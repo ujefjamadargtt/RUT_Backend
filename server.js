@@ -67,7 +67,7 @@ async function startServer() {
     }
 
     try {
-      // await aiInsightScheduler.start();
+      await aiInsightScheduler.start();
     } catch (schedulerErr) {
       // Scheduler failures (e.g. a bad cron expression) must never take
       // down the whole API — log and keep starting.

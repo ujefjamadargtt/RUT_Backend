@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS ai_insight_jobs (
   CONSTRAINT uq_ai_insight_jobs_job_key UNIQUE (job_key)
 );
 
+DROP TRIGGER IF EXISTS trg_ai_insight_jobs_updated_at ON ai_insight_jobs;
 CREATE TRIGGER trg_ai_insight_jobs_updated_at
   BEFORE UPDATE ON ai_insight_jobs
   FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
@@ -61,6 +62,7 @@ CREATE INDEX IF NOT EXISTS idx_ai_insights_is_read       ON ai_insights (is_read
 CREATE INDEX IF NOT EXISTS idx_ai_insights_is_dismissed  ON ai_insights (is_dismissed);
 CREATE INDEX IF NOT EXISTS idx_ai_insights_generated_at  ON ai_insights (generated_at);
 
+DROP TRIGGER IF EXISTS trg_ai_insights_updated_at ON ai_insights;
 CREATE TRIGGER trg_ai_insights_updated_at
   BEFORE UPDATE ON ai_insights
   FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();

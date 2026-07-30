@@ -345,6 +345,47 @@ CREATE INDEX IF NOT EXISTS idx_monthly_costs_employee_id ON monthly_costs (emplo
 CREATE INDEX IF NOT EXISTS idx_monthly_costs_month_year ON monthly_costs (month_year);
 
 -- =============================================================================
+-- TABLE: timesheet_import_history
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS timesheet_import_history (
+  id           SERIAL PRIMARY KEY,
+  imported_by  INT           NOT NULL,
+  file_name    VARCHAR(255)  NOT NULL,
+  file_path    VARCHAR(500)  NOT NULL,
+  total_rows   INT           NOT NULL DEFAULT 0,
+  valid_rows   INT           NOT NULL DEFAULT 0,
+  error_rows   INT           NOT NULL DEFAULT 0,
+  status       VARCHAR(20)   NOT NULL DEFAULT 'pending'
+                             CHECK (status IN ('pending', 'processing', 'completed', 'failed', 'partial')),
+  created_at   TIMESTAMP     NOT NULL DEFAULT NOW(),
+  CONSTRAINT fk_tih_imported_by FOREIGN KEY (imported_by)
+    REFERENCES users (id) ON UPDATE CASCADE ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_tih_imported_by ON timesheet_import_history (imported_by);
+CREATE INDEX IF NOT EXISTS idx_tih_status      ON timesheet_import_history (status);
+CREATE INDEX IF NOT EXISTS idx_tih_created_at  ON timesheet_import_history (created_at);
+
+-- =============================================================================
+-- TABLE: timesheet_import_errors
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS timesheet_import_errors (
+  id             SERIAL PRIMARY KEY,
+  import_id      INT       NOT NULL,
+  row_number     INT       NOT NULL,
+  row_data       JSONB,
+  error_message  TEXT,
+  created_at     TIMESTAMP NOT NULL DEFAULT NOW(),
+  CONSTRAINT fk_tie_import FOREIGN KEY (import_id)
+    REFERENCES timesheet_import_history (id) ON UPDATE CASCADE ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_tie_import_id ON timesheet_import_errors (import_id);
+CREATE INDEX IF NOT EXISTS idx_tie_row_data  ON timesheet_import_errors USING GIN (row_data);
+
+-- =============================================================================
 -- TABLE: timesheets
 -- =============================================================================
 
@@ -422,47 +463,6 @@ CREATE TABLE IF NOT EXISTS user_sessions (
 CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id       ON user_sessions (user_id);
 CREATE INDEX IF NOT EXISTS idx_user_sessions_refresh_token ON user_sessions (refresh_token);
 CREATE INDEX IF NOT EXISTS idx_user_sessions_expires_at    ON user_sessions (expires_at);
-
--- =============================================================================
--- TABLE: timesheet_import_history
--- =============================================================================
-
-CREATE TABLE IF NOT EXISTS timesheet_import_history (
-  id           SERIAL PRIMARY KEY,
-  imported_by  INT           NOT NULL,
-  file_name    VARCHAR(255)  NOT NULL,
-  file_path    VARCHAR(500)  NOT NULL,
-  total_rows   INT           NOT NULL DEFAULT 0,
-  valid_rows   INT           NOT NULL DEFAULT 0,
-  error_rows   INT           NOT NULL DEFAULT 0,
-  status       VARCHAR(20)   NOT NULL DEFAULT 'pending'
-                             CHECK (status IN ('pending', 'processing', 'completed', 'failed', 'partial')),
-  created_at   TIMESTAMP     NOT NULL DEFAULT NOW(),
-  CONSTRAINT fk_tih_imported_by FOREIGN KEY (imported_by)
-    REFERENCES users (id) ON UPDATE CASCADE ON DELETE RESTRICT
-);
-
-CREATE INDEX IF NOT EXISTS idx_tih_imported_by ON timesheet_import_history (imported_by);
-CREATE INDEX IF NOT EXISTS idx_tih_status      ON timesheet_import_history (status);
-CREATE INDEX IF NOT EXISTS idx_tih_created_at  ON timesheet_import_history (created_at);
-
--- =============================================================================
--- TABLE: timesheet_import_errors
--- =============================================================================
-
-CREATE TABLE IF NOT EXISTS timesheet_import_errors (
-  id             SERIAL PRIMARY KEY,
-  import_id      INT       NOT NULL,
-  row_number     INT       NOT NULL,
-  row_data       JSONB,
-  error_message  TEXT,
-  created_at     TIMESTAMP NOT NULL DEFAULT NOW(),
-  CONSTRAINT fk_tie_import FOREIGN KEY (import_id)
-    REFERENCES timesheet_import_history (id) ON UPDATE CASCADE ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_tie_import_id ON timesheet_import_errors (import_id);
-CREATE INDEX IF NOT EXISTS idx_tie_row_data  ON timesheet_import_errors USING GIN (row_data);
 
 -- =============================================================================
 -- TABLE: notifications
