@@ -240,6 +240,41 @@ const mapForm = async ({ roleId, formId, status }, actorId, ipAddress) => {
   return mapping;
 };
 
+/**
+ * Replace ALL of a role's form mappings with the given set in one
+ * transaction: every form_id in the list is set active (inserted or
+ * reactivated), every other form currently mapped to this role is soft-
+ * unmapped (status set to false, never deleted) — mirrors replaceUserRoles()
+ * above exactly, just for the role<->form side. An empty formIds array is a
+ * valid "give this role no forms" request.
+ *
+ * @param {number} roleId
+ * @param {number[]} formIds
+ * @param {number} actorId
+ * @param {string} ipAddress
+ * @returns {Promise<RoleFormMapping[]>} the role's form mappings after the replace
+ */
+const replaceRoleFormMappings = async (roleId, formIds, actorId, ipAddress) => {
+  await ensureRoleExists(roleId);
+  for (const formId of formIds) {
+    await ensureFormExists(formId);
+  }
+
+  const t = await sequelize.transaction();
+  try {
+    await rbacRepository.deactivateUnlistedRoleFormMappings(roleId, formIds, t);
+    await rbacRepository.bulkUpsertRoleFormMappings(roleId, formIds, t);
+    await t.commit();
+  } catch (err) {
+    await t.rollback();
+    throw err;
+  }
+
+  await createAuditLog(actorId, 'UPDATE', 'role_form_mapping', roleId, null, { role_id: roleId, form_ids: formIds }, ipAddress);
+
+  return rbacRepository.listRoleFormMappings(roleId);
+};
+
 // ── Get Accessible Forms (POST /roles/forms) ────────────────────────────────
 
 /**
@@ -308,6 +343,7 @@ module.exports = {
   getRoleFormMappingById,
   createRoleFormMapping,
   deleteRoleFormMapping,
+  replaceRoleFormMappings,
   mapForm,
   getFormsWithMappingStatus,
   getActiveFormsForRoles,

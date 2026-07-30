@@ -53,6 +53,22 @@ const replaceUserRolesSchema = Joi.object({
 });
 
 /**
+ * PUT /roles/form-mappings/:roleId
+ * Replaces the role's entire set of form mappings with this list. An empty
+ * array is allowed — it means "unmap every form from this role."
+ */
+const replaceRoleFormMappingsSchema = Joi.object({
+  form_ids: Joi.array()
+    .items(positiveId)
+    .unique()
+    .required()
+    .messages({
+      'array.unique': 'form_ids must not contain duplicate form IDs.',
+      'any.required': 'form_ids is required.',
+    }),
+});
+
+/**
  * GET /roles/form-mappings?id=:id
  * Fetches a single role_form_mapping row by its own primary key (query
  * param, not a path param — distinct from GET /roles/form-mappings/:roleId,
@@ -107,6 +123,7 @@ module.exports = {
   mappingSchema,
   roleFormMappingSchema,
   replaceUserRolesSchema,
+  replaceRoleFormMappingsSchema,
   getRoleFormMappingQuerySchema,
   formsForRolesSchema,
   mapFormSchema,

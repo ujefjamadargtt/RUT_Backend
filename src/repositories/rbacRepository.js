@@ -156,6 +156,48 @@ const upsertRoleFormMapping = async (roleId, formId, status) => {
 };
 
 /**
+ * Set status=true for every (roleId, formId) pair in the list — inserting a
+ * new row if none exists yet, or reactivating an existing one, in a single
+ * bulk statement (ON CONFLICT (role_id, form_id) DO UPDATE, via the unique
+ * index already declared on the model). Always called inside the same
+ * transaction as deactivateUnlistedRoleFormMappings() below — the two
+ * together implement "replace all form mappings for this role."
+ *
+ * @param {number} roleId
+ * @param {number[]} formIds
+ * @param {object} transaction
+ * @returns {Promise<RoleFormMapping[]>}
+ */
+const bulkUpsertRoleFormMappings = async (roleId, formIds, transaction) => {
+  if (formIds.length === 0) return [];
+  return RoleFormMapping.bulkCreate(
+    formIds.map((formId) => ({ role_id: roleId, form_id: formId, status: true })),
+    { updateOnDuplicate: ['status', 'updated_at'], transaction }
+  );
+};
+
+/**
+ * Set status=false (soft-unmap, never deleted) on every role_form_mapping
+ * row for this role whose form_id is NOT in the given list — the other half
+ * of "replace all form mappings for this role." Passing an empty formIds
+ * array deactivates every currently-mapped form for the role, which is a
+ * valid "give this role no forms" request.
+ *
+ * @param {number} roleId
+ * @param {number[]} formIds - forms that SHOULD remain/become active
+ * @param {object} transaction
+ * @returns {Promise<number>} number of rows deactivated
+ */
+const deactivateUnlistedRoleFormMappings = async (roleId, formIds, transaction) => {
+  const where = { role_id: roleId, status: true };
+  if (formIds.length > 0) {
+    where.form_id = { [Op.notIn]: formIds };
+  }
+  const [affectedCount] = await RoleFormMapping.update({ status: false }, { where, transaction });
+  return affectedCount;
+};
+
+/**
  * Find a single role-form mapping row by its own primary key, with both the
  * role and the form eager-loaded.
  * @param {number} id - role_form_mapping.id (the mapping row's own id, not role_id/form_id)
@@ -292,6 +334,8 @@ module.exports = {
   deleteRoleFormMapping,
   deleteAllRoleFormMappingsForRole,
   upsertRoleFormMapping,
+  bulkUpsertRoleFormMappings,
+  deactivateUnlistedRoleFormMappings,
   listRoleFormMappings,
   findAccessibleForms,
   findAllFormsWithMappingStatus,

@@ -12,6 +12,7 @@ const https = require('https');
 const app = require('./src/app');
 const logger = require('./src/utils/logger');
 const { sequelize } = require('./src/config/database');
+const { runMigrations } = require('./src/database/migrationRunner');
 const aiInsightScheduler = require('./src/scheduler/aiInsight.scheduler');
 
 const NODE_ENV = process.env.NODE_ENV || 'development';
@@ -52,6 +53,13 @@ async function startServer() {
     await sequelize.authenticate();
     logger.info('Database connection established successfully.');
     console.log('[startup] Database connection OK');
+
+    // Runs once, before anything else touches the database: applies every
+    // pending migration in database/migrations/ in chronological order, or
+    // exits the process if any migration fails — the app must never start
+    // serving requests against a partially migrated schema. See
+    // src/database/migrationRunner.js for the full behavior contract.
+    await runMigrations(sequelize);
 
     if (NODE_ENV === 'development') {
       await sequelize.sync({ alter: false });

@@ -9,6 +9,7 @@ const {
   mappingSchema,
   roleFormMappingSchema,
   replaceUserRolesSchema,
+  replaceRoleFormMappingsSchema,
   getRoleFormMappingQuerySchema,
   formsForRolesSchema,
   mapFormSchema,
@@ -365,6 +366,53 @@ router.delete(
   '/form-mappings/:roleId/:formId',
   authenticate,
   rbacController.deleteRoleFormMapping
+);
+
+/**
+ * @swagger
+ * /roles/form-mappings/{roleId}:
+ *   put:
+ *     summary: Replace all form mappings for a role in one call (Management only)
+ *     description: >
+ *       Bulk counterpart to POST/DELETE /roles/form-mappings — given the
+ *       complete list of form_ids that should be active for this role, sets
+ *       those active (inserting or reactivating as needed) and soft-unmaps
+ *       every other form currently mapped to this role, all in one
+ *       transaction. Rows are never physically deleted. Pass an empty
+ *       form_ids array to unmap every form from the role.
+ *     tags: [RBAC]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: roleId
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [form_ids]
+ *             properties:
+ *               form_ids:
+ *                 type: array
+ *                 items: { type: integer }
+ *                 example: [1, 3, 8, 9, 14]
+ *     responses:
+ *       200:
+ *         description: Updated form mappings for this role
+ *       404:
+ *         description: Role or one of the given forms not found
+ *       422:
+ *         description: Validation error
+ */
+router.put(
+  '/form-mappings/:roleId',
+  authenticate,
+  validate(replaceRoleFormMappingsSchema),
+  rbacController.replaceRoleFormMappings
 );
 
 module.exports = router;

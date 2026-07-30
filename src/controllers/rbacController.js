@@ -220,6 +220,34 @@ const deleteRoleFormMapping = async (req, res, next) => {
 };
 
 /**
+ * PUT /api/v1/roles/form-mappings/:roleId
+ * Management only. Replaces the role's entire set of form mappings in one
+ * call — every form_id given is set active, every other form currently
+ * mapped to this role is unmapped. Bulk counterpart to the single-form
+ * POST/DELETE /roles/form-mappings endpoints above.
+ */
+const replaceRoleFormMappings = async (req, res, next) => {
+  try {
+    const roleId = parsePositiveInt(req.params.roleId);
+    if (!roleId) {
+      return sendError(res, 'Invalid role ID.', 400);
+    }
+
+    const mappings = await rbacService.replaceRoleFormMappings(roleId, req.body.form_ids, req.userId, getIpAddress(req));
+    return sendSuccess(res, mappings, 'Role form mappings updated successfully.');
+  } catch (err) {
+    if (err.statusCode === 404) {
+      return sendNotFound(res, 'Role or one of the given forms');
+    }
+    if (err.statusCode) {
+      return sendError(res, err.message, err.statusCode);
+    }
+    logger.error('rbacController.replaceRoleFormMappings error', { error: err.message, stack: err.stack });
+    next(err);
+  }
+};
+
+/**
  * POST /api/v1/roles/forms/mapping
  * Management only. Maps or unmaps a form for a role via the status flag —
  * a dedicated endpoint that never physically deletes a row (soft-mapping).
@@ -278,6 +306,7 @@ module.exports = {
   getRoleFormMappingById,
   createRoleFormMapping,
   deleteRoleFormMapping,
+  replaceRoleFormMappings,
   mapForm,
   formsForRoles,
 };

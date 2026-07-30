@@ -138,6 +138,87 @@ module.exports = {
 
 ---
 
+## Automatic Migrations
+
+Every file in `database/migrations/*.sql` (except `*_rollback.sql` files) is
+applied **automatically** whenever the server starts — `node server.js` or
+`npm start`. There is no manual migration command to run after a deploy.
+
+### How it works
+
+1. On startup, right after the database connection is confirmed and before
+   the HTTP server starts listening, the app checks a `schema_migrations`
+   tracking table (created automatically the first time) for which
+   migration files have already been applied.
+2. Any `.sql` file in `database/migrations/` not yet recorded there is
+   applied, **in chronological order** — filenames follow the
+   `YYYYMMDD_description.sql` convention, so a plain alphabetical sort is
+   already date order.
+3. Each applied file is recorded in `schema_migrations` so it never runs
+   twice.
+4. If nothing is pending, the server just logs that and continues starting
+   normally — no-op, no errors.
+5. If a migration fails, the server logs the full error and **exits**
+   (`process.exit(1)`) rather than starting up against a half-migrated
+   schema. Fix the migration file, then start the server again — it will
+   retry only the failed one (and anything after it), not re-run migrations
+   that already succeeded.
+
+You'll see log lines like:
+```
+[migrations] Checking pending migrations...
+[migrations] Applying migration: 20260801_add_new_column.sql
+[migrations] Migration completed successfully.
+```
+or, when there's nothing to do:
+```
+[migrations] Checking pending migrations...
+[migrations] No pending migrations found.
+```
+
+### First run on an existing (pre-migration-runner) database
+
+The very first time this runs against a database that already has all of
+today's schema (i.e. every migration file currently in the repo was already
+applied by hand, as was the case throughout this project's early
+development), it **baselines** instead of re-executing: every migration
+file present at that moment is recorded as already-applied without running
+its SQL, since the schema already reflects them. You'll see:
+```
+[migrations] First run detected — baselining 16 existing migration(s) as already applied.
+```
+Only migration files added **after** that point are ever actually executed.
+This avoids re-running old, non-idempotent `ALTER TABLE`/`INSERT` statements
+against a database that already has that change.
+
+### Adding a new migration
+
+1. Create a new file in `database/migrations/`, named
+   `YYYYMMDD_short_description.sql` (today's date, so it sorts after every
+   existing file).
+2. Write plain SQL — no special syntax required. If the change needs to be
+   undone later, add a companion `YYYYMMDD_short_description_rollback.sql`
+   (rollback files are never run automatically; that's a manual step if you
+   ever need it).
+3. Write it idempotently where practical (`IF NOT EXISTS`,
+   `ON CONFLICT DO NOTHING`, `WHERE ... IS NULL` guards) — Postgres runs the
+   whole file as one implicit transaction, so a failure partway through
+   rolls the whole file back, but the safest migrations are also safe to
+   re-run if needed.
+4. That's it — the next time the server starts (in any environment: dev,
+   staging, production), it picks up the new file automatically.
+
+### Concurrent server instances
+
+If more than one server instance starts at the same moment (e.g. a
+multi-instance deploy), only one of them actually runs pending migrations —
+the others wait on a Postgres advisory lock, then find everything already
+applied and continue starting normally. No manual coordination needed.
+
+Implementation: `src/database/migrationRunner.js`, wired into `server.js`.
+
+---
+
 ## Resetting the Database (development only)
 
 To wipe everything and start fresh:
