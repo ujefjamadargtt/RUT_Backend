@@ -8,6 +8,7 @@ const { validate } = require('../middlewares/validateRequest');
 const {
   createEmployeeSchema,
   updateEmployeeSchema,
+  resetEmployeePasswordSchema,
 } = require('../validations/employeeValidation');
 const employeeController = require('../controllers/employeeController');
 const { handleEmployeeUpload } = require('../middlewares/upload');
@@ -260,6 +261,41 @@ router.delete(
   '/:id',
   authenticate,
   employeeController.delete
+);
+
+/**
+ * @swagger
+ * /employees/{id}/reset-password:
+ *   put:
+ *     summary: Admin-side reset of an Employee's Self Timesheet login password
+ *     tags: [Employees]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [password]
+ *             properties:
+ *               password: { type: string, minLength: 8 }
+ *     responses:
+ *       200:
+ *         description: Password reset
+ *       404:
+ *         description: Not found
+ */
+router.put(
+  '/:id/reset-password',
+  authenticate,
+  validate(resetEmployeePasswordSchema),
+  employeeController.resetPassword
 );
 
 module.exports = router;

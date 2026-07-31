@@ -11,6 +11,22 @@ const logger = require('../utils/logger');
  */
 
 /**
+ * Employee.findById/create/update() run under the model's defaultScope
+ * (password excluded) EXCEPT the instance returned from an explicit
+ * `.update({ password })` call, whose in-memory dataValues then include the
+ * freshly-hashed value. Strip it before this ever reaches an API response
+ * or an audit log row.
+ *
+ * @param {object} employee - Sequelize Employee instance or plain object.
+ * @returns {object}
+ */
+function redactPassword(employee) {
+  const plain = employee.toJSON ? employee.toJSON() : { ...employee };
+  delete plain.password;
+  return plain;
+}
+
+/**
  * Return a paginated, filtered, sorted employee list.
  *
  * @param {object} query - Express req.query (page, limit, search, status, designation, sort_by, sort_order)
@@ -102,13 +118,13 @@ const create = async (data, userId, ipAddress = null, companyId) => {
     'employees',
     employee.id,
     null,
-    employee.toJSON(),
+    redactPassword(employee),
     ipAddress
   );
 
   logger.info('Employee created', { employeeId: employee.id, code: employee.employee_code, userId });
 
-  return employee;
+  return redactPassword(employee);
 };
 
 /**
@@ -146,7 +162,7 @@ const update = async (id, data, userId, ipAddress = null, companyId) => {
     }
   }
 
-  const oldValues = existing.toJSON();
+  const oldValues = redactPassword(existing);
 
   const updated = await employeeRepository.update(id, {
     ...data,
@@ -159,13 +175,13 @@ const update = async (id, data, userId, ipAddress = null, companyId) => {
     'employees',
     id,
     oldValues,
-    updated.toJSON(),
+    redactPassword(updated),
     ipAddress
   );
 
   logger.info('Employee updated', { employeeId: id, userId });
 
-  return updated;
+  return redactPassword(updated);
 };
 
 /**
@@ -219,6 +235,41 @@ const getActiveEmployees = async (companyId) => {
   return employeeRepository.getActiveEmployees(companyId);
 };
 
+/**
+ * Admin-side reset of an Employee's Self Timesheet login password.
+ * The Employee model's beforeUpdate hook hashes the plain-text value —
+ * this function never touches bcrypt directly.
+ *
+ * @param {number} id
+ * @param {string} newPassword - Plain-text password.
+ * @param {number} userId
+ * @param {string} ipAddress
+ * @param {number} companyId
+ * @returns {Promise<Employee>}
+ */
+const resetPassword = async (id, newPassword, userId, ipAddress = null, companyId) => {
+  await getById(id, companyId); // throws 404 if not found
+
+  const updated = await employeeRepository.update(id, {
+    password: newPassword,
+    updated_by: userId,
+  }, companyId);
+
+  await createAuditLog(
+    userId,
+    'RESET_PASSWORD',
+    'employees',
+    id,
+    null,
+    { employeeId: id },
+    ipAddress
+  );
+
+  logger.info('Employee password reset', { employeeId: id, userId });
+
+  return redactPassword(updated);
+};
+
 module.exports = {
   getAll,
   getById,
@@ -226,4 +277,5 @@ module.exports = {
   update,
   delete: deleteEmployee,
   getActiveEmployees,
+  resetPassword,
 };

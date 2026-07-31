@@ -75,6 +75,45 @@ const upload = async (req, res, next) => {
 };
 
 /**
+ * POST /api/v1/timesheets/sync-employee-worklogs
+ *
+ * "Sync Employee Work Logs" — an alternative source to the Excel upload
+ * above. Reads every 'pending' row from the employee_work_logs table
+ * (Employee Self Timesheet module, Stage 1 — never from `timesheets`) for
+ * the selected month/year and runs them through the EXACT SAME preview
+ * pipeline (validation, 176-hour adjustment, duplicate detection, import
+ * history) as an Excel upload. The returned importId is confirmed with the
+ * SAME POST /timesheets/confirm/:importId endpoint used for Excel imports.
+ */
+const syncEmployeeWorkLogs = async (req, res, next) => {
+  try {
+    const userId = req.userId;
+    const month = parseInt(req.body.month, 10);
+    const year  = parseInt(req.body.year,  10);
+
+    if (!month || month < 1 || month > 12) {
+      return sendError(res, 'month is required and must be between 1 and 12.', 422);
+    }
+    if (!year || year < 2000) {
+      return sendError(res, 'year is required and must be 2000 or later.', 422);
+    }
+
+    const result = await timesheetService.previewPmsImport(month, year, userId, req.companyId);
+
+    return sendSuccess(
+      res,
+      result,
+      result.canConfirm
+        ? `Sync preview ready. ${result.validRows} valid row(s), ${result.errorRows} error(s). Call POST /confirm/${result.importId} to import.`
+        : `No pending employee work log entries found for this month. ${result.errorRows} error(s).`,
+      200
+    );
+  } catch (err) {
+    return handleError(next, err, 'syncEmployeeWorkLogs');
+  }
+};
+
+/**
  * POST /api/v1/timesheets/confirm/:importId
  *
  * Confirms a pending import: re-validates the source file and bulk-inserts
@@ -503,6 +542,7 @@ const deleteImports = async (req, res, next) => {
 
 module.exports = {
   upload,
+  syncEmployeeWorkLogs,
   confirm,
   getHistory,
   getImportById,

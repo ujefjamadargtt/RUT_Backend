@@ -111,6 +111,17 @@ module.exports = (sequelize) => {
         allowNull: false,
         defaultValue: false,
       },
+      // 'excel' (default, every pre-existing row) or 'pms' — tells
+      // confirmImport() whether to re-parse the stored file or re-fetch
+      // from the PMS provider on confirm (see timesheetService.js).
+      source: {
+        type: DataTypes.STRING(10),
+        allowNull: false,
+        defaultValue: 'excel',
+        validate: {
+          isIn: { args: [['excel', 'pms']], msg: 'Source must be excel or pms.' },
+        },
+      },
     },
     {
       sequelize,

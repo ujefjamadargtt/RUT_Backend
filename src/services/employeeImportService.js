@@ -49,6 +49,18 @@ const HEADER_MAP = {
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const CODE_RE = /^[A-Z0-9_/#-]{2,20}$/;
 
+// Assigned ONLY to brand-new Employee records created by this import (see
+// the "Insert valid rows" step below) so an imported employee can log in
+// immediately via /auth/login. Never hashed here — Employee.js's own
+// beforeCreate hook hashes `password` with the exact same bcrypt mechanism
+// Login/Auth already uses for every Employee/User password, so this file
+// never touches bcrypt directly. This import flow has no "update existing
+// employee" branch (a row whose employee_code/email already exists is
+// rejected in validateRow(), never reaches the create() call below), so
+// there is no path here that could ever overwrite an existing employee's
+// password.
+const DEFAULT_EMPLOYEE_PASSWORD = 'Gtt@1234';
+
 function normaliseHeader(raw) {
   return String(raw || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
@@ -315,7 +327,14 @@ async function importEmployees(filePath, userId, companyId) {
 
   for (const row of validRows) {
     try {
-      await employeeRepository.create({ ...row, company_id: companyId, created_by: userId, updated_by: userId });
+      await employeeRepository.create({
+        ...row,
+        company_id: companyId,
+        created_by: userId,
+        updated_by: userId,
+        // New Employee record -> default login password (see constant doc above).
+        password: DEFAULT_EMPLOYEE_PASSWORD,
+      });
       importedCount++;
     } catch (dbErr) {
       logger.error('Employee import DB error', { code: row.employee_code, error: dbErr.message });

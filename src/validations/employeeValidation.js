@@ -9,6 +9,11 @@ const Joi = require('joi');
 const employeeCodePattern = /^[A-Z0-9_/#-]{2,20}$/;
 
 // Reusable sub-schemas
+const passwordField = Joi.string().min(8).max(72).messages({
+  'string.min': 'Password must be at least 8 characters.',
+  'string.max': 'Password cannot exceed 72 characters.',
+});
+
 const experienceField = Joi.number()
   .precision(1)
   .min(0)
@@ -118,6 +123,11 @@ const createEmployeeSchema = Joi.object({
     .messages({
       'any.only': 'Status must be either "active" or "inactive".',
     }),
+
+  // Optional — Admin-provisioned login credential for the Employee Self
+  // Timesheet module. Omit to leave the employee unable to log in until a
+  // password is set here or via PUT /employees/:id/reset-password.
+  password: passwordField.optional(),
 });
 
 /**
@@ -191,11 +201,22 @@ const updateEmployeeSchema = Joi.object({
     .messages({
       'any.only': 'Status must be either "active" or "inactive".',
     }),
+
+  password: passwordField.optional(),
 })
   .min(1)
   .messages({
     'object.min': 'At least one field must be provided for update.',
   });
+
+/**
+ * PUT /employees/:id/reset-password
+ */
+const resetEmployeePasswordSchema = Joi.object({
+  password: passwordField.required().messages({
+    'any.required': 'Password is required.',
+  }),
+});
 
 /**
  * GET /employees — query params schema
@@ -215,5 +236,6 @@ const listEmployeesQuerySchema = Joi.object({
 module.exports = {
   createEmployeeSchema,
   updateEmployeeSchema,
+  resetEmployeePasswordSchema,
   listEmployeesQuerySchema,
 };

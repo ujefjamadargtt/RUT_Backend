@@ -1,7 +1,7 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { User, UserSession, Role, Employee, Company } = require('../models');
+const { User, UserSession, Role, Employee, Company, EmployeeSession } = require('../models');
 const logger = require('../utils/logger');
 const dateHelper = require('../helpers/dateHelper');
 
@@ -95,6 +95,89 @@ async function findUserById(id) {
       },
     ],
     attributes: { exclude: ['password'] },
+  });
+}
+
+/**
+ * Find an Employee by email address (email_id column), for the dynamic
+ * login fallback when no User matches. Mirrors findUserByEmail: uses
+ * Employee.scope('withPassword') to bypass the model's defaultScope
+ * exclusion, and eager-loads the company.
+ *
+ * @param {string} email
+ * @returns {Promise<Employee|null>}
+ */
+async function findEmployeeByEmail(email) {
+  return Employee.scope('withPassword').findOne({
+    where: {
+      email_id: email.toLowerCase().trim(),
+    },
+    include: [
+      {
+        model: Company,
+        as: 'company',
+        attributes: ['id', 'company_code', 'company_name', 'status'],
+        required: false,
+      },
+    ],
+  });
+}
+
+/**
+ * Persist a new employee session record (mirrors createSession for Users).
+ *
+ * @param {object} sessionData
+ * @param {number} sessionData.employee_id
+ * @param {string} sessionData.refresh_token
+ * @param {Date}   sessionData.expires_at
+ * @param {string} [sessionData.ip_address]
+ * @param {string} [sessionData.user_agent]
+ * @returns {Promise<EmployeeSession>}
+ */
+async function createEmployeeSession(sessionData) {
+  return EmployeeSession.create({
+    employee_id: sessionData.employee_id,
+    refresh_token: sessionData.refresh_token,
+    expires_at: sessionData.expires_at,
+    ip_address: sessionData.ip_address || null,
+    user_agent: sessionData.user_agent || null,
+  });
+}
+
+/**
+ * Look up an employee session by refresh token that has not yet expired.
+ *
+ * @param {string} refreshToken
+ * @returns {Promise<EmployeeSession|null>}
+ */
+async function findEmployeeSession(refreshToken) {
+  return EmployeeSession.findOne({
+    where: {
+      refresh_token: refreshToken,
+      expires_at: {
+        [Op.gt]: dateHelper.nowDate(),
+      },
+    },
+    include: [
+      {
+        model: Employee,
+        as: 'employee',
+        attributes: ['id', 'employee_code', 'full_name', 'email_id', 'company_id', 'status', 'is_deleted'],
+      },
+    ],
+  });
+}
+
+/**
+ * Remove a specific employee session by its refresh token.
+ * Returns the number of rows deleted.
+ *
+ * @param {string} refreshToken
+ * @returns {Promise<number>}
+ */
+async function deleteEmployeeSession(refreshToken) {
+  return EmployeeSession.destroy({
+    where: { refresh_token: refreshToken },
   });
 }
 
@@ -204,4 +287,8 @@ module.exports = {
   findSession,
   deleteSession,
   deleteUserSessions,
+  findEmployeeByEmail,
+  createEmployeeSession,
+  findEmployeeSession,
+  deleteEmployeeSession,
 };

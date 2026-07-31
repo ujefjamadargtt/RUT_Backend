@@ -120,6 +120,13 @@ module.exports = (sequelize) => {
         allowNull: false,
         defaultValue: false,
       },
+      // Nullable — mandatory only for Employee self-service entries
+      // (enforced in employeeTimesheetValidation.js), never required for
+      // Admin manual entries or Excel/PMS-imported rows.
+      description: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+      },
       created_by: {
         type: DataTypes.INTEGER,
         allowNull: true,

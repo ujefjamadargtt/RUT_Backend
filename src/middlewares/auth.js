@@ -1,6 +1,7 @@
 'use strict';
 
 const jwt = require('jsonwebtoken');
+const { verifyToken } = require('../config/jwt');
 const { User, Role, Employee } = require('../models');
 const logger = require('../utils/logger');
 const resolveCompany = require('./resolveCompany');
@@ -33,7 +34,17 @@ const authenticate = async (req, res, next) => {
 
     let decoded;
     try {
-      decoded = jwt.verify(token, process.env.JWT_SECRET);
+      // MUST check audience here (config/jwt.js's verifyToken(), not a raw
+      // jwt.verify()) — a User token and an Employee token are signed with
+      // the SAME JWT_SECRET but different audiences ('rut-portal-client'
+      // vs 'rut-portal-employee-client') and payload shapes (a User token
+      // has `id`; an Employee token has `employeeId`, no `id` at all). An
+      // unchecked jwt.verify() lets an Employee token pass signature
+      // verification here, then `decoded.id` is undefined and the
+      // `User.findOne({ where: { id: undefined } })` below throws a raw
+      // Sequelize error instead of a clean 401 — this previously crashed
+      // POST /auth/logout with a 500 whenever an Employee called it.
+      decoded = verifyToken(token);
     } catch (err) {
       if (err instanceof jwt.TokenExpiredError) {
         return res.status(401).json({

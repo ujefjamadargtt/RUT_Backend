@@ -110,6 +110,25 @@ const deleteEmployee = async (req, res, next) => {
 };
 
 /**
+ * PUT /api/v1/employees/:id/reset-password
+ */
+const resetPassword = async (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) {
+      return sendError(res, 'Invalid employee ID.', 400);
+    }
+    await employeeService.resetPassword(id, req.body.password, req.userId, getIpAddress(req), req.companyId);
+    return sendSuccess(res, null, 'Employee password reset successfully.');
+  } catch (err) {
+    if (err.statusCode === 404) {
+      return sendNotFound(res, 'Employee');
+    }
+    next(err);
+  }
+};
+
+/**
  * GET /api/v1/employees/active/list
  */
 const getActiveEmployees = async (req, res, next) => {
@@ -144,4 +163,5 @@ module.exports = {
   delete: deleteEmployee,
   getActiveEmployees,
   importEmployees,
+  resetPassword,
 };

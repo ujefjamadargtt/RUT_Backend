@@ -183,6 +183,28 @@ const deleteErrorsByImportIds = async (importIds, transaction = null, companyId)
 };
 
 /**
+ * Find the existing import history record for one company/month/year/source
+ * combination, if any — the lookup behind the "Sync Employee Work Logs"
+ * idempotency rule: there must only ever be ONE Sync import per
+ * Company + Month + Year, so a repeat sync UPDATES this row instead of
+ * creating a new one (see timesheetService.previewPmsImport/runImportPreview).
+ * Regardless of status — even a previously 'failed' attempt should be
+ * reused/retried rather than piling up a second row for the same period.
+ *
+ * @param {number} companyId
+ * @param {number} month
+ * @param {number} year
+ * @param {string} source - 'excel' | 'pms'
+ * @returns {Promise<TimesheetImportHistory|null>}
+ */
+const findByMonthYearSource = async (companyId, month, year, source) => {
+  return TimesheetImportHistory.findOne({
+    where: { company_id: companyId, import_month: month, import_year: year, source },
+    order: [['id', 'DESC']],
+  });
+};
+
+/**
  * Fetch multiple import history records by their IDs (no associations).
  * Used by the monthly-sheet delete API to look up file_path/file_name
  * for each import before removing the DB rows and the files on disk.
@@ -288,6 +310,7 @@ module.exports = {
   updateImportHistory,
   createImportErrors,
   findImportById,
+  findByMonthYearSource,
   findAllImports,
   findImportsByIds,
   getEmployeeCountsByImportIds,

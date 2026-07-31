@@ -1,6 +1,9 @@
 'use strict';
 
 const { Model, DataTypes } = require('sequelize');
+const bcrypt = require('bcrypt');
+
+const BCRYPT_ROUNDS = 12;
 
 module.exports = (sequelize) => {
   class Employee extends Model {
@@ -21,6 +24,24 @@ module.exports = (sequelize) => {
         foreignKey: 'employee_id',
         as: 'timesheets',
       });
+      Employee.hasMany(models.EmployeeSession, {
+        foreignKey: 'employee_id',
+        as: 'sessions',
+      });
+      Employee.hasMany(models.EmployeeServicePOMapping, {
+        foreignKey: 'employee_id',
+        as: 'servicePOMappings',
+      });
+    }
+
+    /**
+     * Compares a plain-text password against the stored bcrypt hash.
+     * @param {string} plainPassword
+     * @returns {Promise<boolean>}
+     */
+    async validatePassword(plainPassword) {
+      if (!this.password) return false;
+      return bcrypt.compare(plainPassword, this.password);
     }
   }
 
@@ -80,6 +101,14 @@ module.exports = (sequelize) => {
           isEmail: { msg: 'Email address must be a valid email.' },
         },
       },
+      // Nullable — an Employee with no password set cannot log in yet.
+      // Admin-provisioned via POST/PUT /employees or the dedicated
+      // reset-password endpoint; hashed by the beforeCreate/beforeUpdate
+      // hooks below, same as users.password.
+      password: {
+        type: DataTypes.STRING(255),
+        allowNull: true,
+      },
       resource_description: {
         type: DataTypes.TEXT,
         allowNull: true,
@@ -133,6 +162,15 @@ module.exports = (sequelize) => {
       underscored: true,
       createdAt: 'created_at',
       updatedAt: 'updated_at',
+      // Exclude password by default; use Employee.scope('withPassword') when needed
+      defaultScope: {
+        attributes: { exclude: ['password'] },
+      },
+      scopes: {
+        withPassword: {
+          attributes: {},
+        },
+      },
       indexes: [
         { unique: true, fields: ['company_id', 'employee_code'], name: 'uq_employees_company_code' },
       ],
@@ -143,6 +181,14 @@ module.exports = (sequelize) => {
             const timestamp = Date.now().toString().slice(-6);
             const random = Math.floor(Math.random() * 900 + 100);
             employee.employee_code = `EMP${timestamp}${random}`;
+          }
+          if (employee.password) {
+            employee.password = await bcrypt.hash(employee.password, BCRYPT_ROUNDS);
+          }
+        },
+        beforeUpdate: async (employee) => {
+          if (employee.changed('password') && employee.password) {
+            employee.password = await bcrypt.hash(employee.password, BCRYPT_ROUNDS);
           }
         },
       },

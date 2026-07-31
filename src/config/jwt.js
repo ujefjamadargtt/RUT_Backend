@@ -123,6 +123,95 @@ function generateTokens(user) {
 }
 
 /**
+ * Sign an Employee access token. Uses the SAME secrets as User tokens but a
+ * distinct audience ('rut-portal-employee-client' vs. 'rut-portal-client')
+ * so an Employee token can never be mistaken for a User token (or vice
+ * versa) by any code that checks audience — on top of the payload shape
+ * itself already being incompatible (no `id`/`roleId` field).
+ *
+ * @param {object} payload
+ * @param {string} [expiresIn]
+ * @returns {string}
+ */
+function signEmployeeToken(payload, expiresIn = ACCESS_TOKEN_EXPIRY) {
+  return jwt.sign(payload, JWT_SECRET, {
+    expiresIn,
+    issuer: 'rut-portal',
+    audience: 'rut-portal-employee-client',
+  });
+}
+
+/**
+ * Verify an Employee access token.
+ *
+ * @param {string} token
+ * @returns {object} Decoded payload.
+ * @throws {JsonWebTokenError|TokenExpiredError}
+ */
+function verifyEmployeeToken(token) {
+  return jwt.verify(token, JWT_SECRET, {
+    issuer: 'rut-portal',
+    audience: 'rut-portal-employee-client',
+  });
+}
+
+/**
+ * Sign an Employee refresh token.
+ *
+ * @param {object} payload
+ * @param {string} [expiresIn]
+ * @returns {string}
+ */
+function signEmployeeRefreshToken(payload, expiresIn = REFRESH_TOKEN_EXPIRY) {
+  return jwt.sign(payload, JWT_REFRESH_SECRET, {
+    expiresIn,
+    issuer: 'rut-portal',
+    audience: 'rut-portal-employee-refresh',
+  });
+}
+
+/**
+ * Verify an Employee refresh token.
+ *
+ * @param {string} token
+ * @returns {object} Decoded payload.
+ * @throws {JsonWebTokenError|TokenExpiredError}
+ */
+function verifyEmployeeRefreshToken(token) {
+  return jwt.verify(token, JWT_REFRESH_SECRET, {
+    issuer: 'rut-portal',
+    audience: 'rut-portal-employee-refresh',
+  });
+}
+
+/**
+ * Generate both access and refresh tokens for an Employee session.
+ *
+ * @param {object} employee - Employee record (plain object or Sequelize instance, with `company` included).
+ * @returns {{ accessToken: string, refreshToken: string, expiresIn: string, refreshExpiresIn: string }}
+ */
+function generateEmployeeTokens(employee) {
+  const payload = {
+    employeeId: employee.id,
+    companyId: employee.company_id,
+    employeeCode: employee.employee_code,
+    employeeName: employee.full_name,
+    email: employee.email_id,
+    loginType: 'employee',
+  };
+
+  const accessToken = signEmployeeToken(payload);
+  const refreshToken = signEmployeeRefreshToken({ employeeId: employee.id, loginType: 'employee' });
+
+  return {
+    accessToken,
+    refreshToken,
+    expiresIn: ACCESS_TOKEN_EXPIRY,
+    refreshExpiresIn: REFRESH_TOKEN_EXPIRY,
+  };
+}
+
+/**
  * Decode a token without verification (for reading expiry on an expired token).
  *
  * @param {string} token
@@ -151,6 +240,11 @@ module.exports = {
   signRefreshToken,
   verifyRefreshToken,
   generateTokens,
+  signEmployeeToken,
+  verifyEmployeeToken,
+  signEmployeeRefreshToken,
+  verifyEmployeeRefreshToken,
+  generateEmployeeTokens,
   decodeToken,
   extractBearerToken,
   ACCESS_TOKEN_EXPIRY,

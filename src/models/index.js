@@ -54,6 +54,11 @@ const FormMaster             = require('./FormMaster')(sequelize);
 const RoleFormMapping        = require('./RoleFormMapping')(sequelize);
 const AiInsightJob           = require('./AiInsightJob')(sequelize);
 const AiInsight              = require('./AiInsight')(sequelize);
+const EmployeeSession        = require('./EmployeeSession')(sequelize);
+const EmployeeServicePOMapping = require('./EmployeeServicePOMapping')(sequelize);
+const EmployeeWorkLog        = require('./EmployeeWorkLog')(sequelize);
+const PasswordResetOtp       = require('./PasswordResetOtp')(sequelize);
+const PasswordResetHistory   = require('./PasswordResetHistory')(sequelize);
 
 // ---------------------------------------------------------------------------
 // Associations
@@ -203,6 +208,45 @@ TimesheetImportError.belongsTo(TimesheetImportHistory, { foreignKey: 'import_id'
 AiInsightJob.hasMany(AiInsight, { foreignKey: 'job_id', as: 'insights' });
 AiInsight.belongsTo(AiInsightJob, { foreignKey: 'job_id', as: 'job' });
 
+// Employee <-> EmployeeSession
+Employee.hasMany(EmployeeSession, { foreignKey: 'employee_id', as: 'sessions' });
+EmployeeSession.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
+
+// Employee <-> ServicePO (many-to-many through EmployeeServicePOMapping —
+// Phase 2's "which projects can this employee self-log time against" table,
+// distinct from the existing ServicePOResource allocation table)
+Employee.hasMany(EmployeeServicePOMapping, { foreignKey: 'employee_id', as: 'servicePOMappings' });
+EmployeeServicePOMapping.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
+ServicePO.hasMany(EmployeeServicePOMapping, { foreignKey: 'service_po_id', as: 'employeeMappings' });
+EmployeeServicePOMapping.belongsTo(ServicePO, { foreignKey: 'service_po_id', as: 'servicePO' });
+EmployeeServicePOMapping.belongsTo(Company, { foreignKey: 'company_id', as: 'company' });
+
+// Employee <-> EmployeeWorkLog — Employee Self Timesheet "draft" table.
+// NOT part of the official Timesheet graph; only linked to
+// TimesheetImportHistory once a row has been synced (status='synced').
+Employee.hasMany(EmployeeWorkLog, { foreignKey: 'employee_id', as: 'workLogs' });
+EmployeeWorkLog.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
+ServicePO.hasMany(EmployeeWorkLog, { foreignKey: 'service_po_id', as: 'employeeWorkLogs' });
+EmployeeWorkLog.belongsTo(ServicePO, { foreignKey: 'service_po_id', as: 'servicePO' });
+SubProject.hasMany(EmployeeWorkLog, { foreignKey: 'sub_project_id', as: 'employeeWorkLogs' });
+EmployeeWorkLog.belongsTo(SubProject, { foreignKey: 'sub_project_id', as: 'subProject' });
+TimesheetImportHistory.hasMany(EmployeeWorkLog, { foreignKey: 'timesheet_import_id', as: 'syncedWorkLogs', onDelete: 'SET NULL' });
+EmployeeWorkLog.belongsTo(TimesheetImportHistory, { foreignKey: 'timesheet_import_id', as: 'importHistory', onDelete: 'SET NULL' });
+
+// Forgot Password module — User/Employee <-> PasswordResetOtp/PasswordResetHistory
+User.hasMany(PasswordResetOtp, { foreignKey: 'user_id', as: 'passwordResetOtps' });
+PasswordResetOtp.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+Employee.hasMany(PasswordResetOtp, { foreignKey: 'employee_id', as: 'passwordResetOtps' });
+PasswordResetOtp.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
+PasswordResetOtp.belongsTo(Company, { foreignKey: 'company_id', as: 'company' });
+
+User.hasMany(PasswordResetHistory, { foreignKey: 'user_id', as: 'passwordResetHistory' });
+PasswordResetHistory.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+Employee.hasMany(PasswordResetHistory, { foreignKey: 'employee_id', as: 'passwordResetHistory' });
+PasswordResetHistory.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
+PasswordResetHistory.belongsTo(Company, { foreignKey: 'company_id', as: 'company' });
+EmployeeWorkLog.belongsTo(Company, { foreignKey: 'company_id', as: 'company' });
+
 // ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
@@ -231,4 +275,9 @@ module.exports = {
   RoleFormMapping,
   AiInsightJob,
   AiInsight,
+  EmployeeSession,
+  EmployeeServicePOMapping,
+  EmployeeWorkLog,
+  PasswordResetOtp,
+  PasswordResetHistory,
 };

@@ -210,6 +210,51 @@ router.post(
 
 /**
  * @swagger
+ * /timesheets/sync-employee-worklogs:
+ *   post:
+ *     summary: Sync Employee Work Logs — pull employee-entered work logs for one month and preview an import
+ *     description: >
+ *       Reads every 'pending' row from the employee_work_logs table
+ *       (Employee Self Timesheet module — never from `timesheets`) for the
+ *       selected month/year and runs them through the exact same preview
+ *       pipeline as an Excel upload (validation, 176-hour adjustment,
+ *       duplicate detection, import history). Confirm with the same
+ *       POST /confirm/{importId} used for Excel imports. On confirm, the
+ *       source employee_work_logs rows are marked 'synced' and linked to
+ *       the resulting import batch.
+ *     tags: [Timesheet Import]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [month, year]
+ *             properties:
+ *               month:
+ *                 type: integer
+ *                 minimum: 1
+ *                 maximum: 12
+ *               year:
+ *                 type: integer
+ *                 minimum: 2000
+ *     responses:
+ *       200:
+ *         description: Preview data with valid rows, error rows, and importId
+ *       422:
+ *         description: month/year is missing or invalid
+ */
+router.post(
+  '/sync-employee-worklogs',
+  authenticate,
+  importLimiter,
+  timesheetController.syncEmployeeWorkLogs
+);
+
+/**
+ * @swagger
  * /timesheets/confirm/{importId}:
  *   post:
  *     summary: Confirm and commit a pending import

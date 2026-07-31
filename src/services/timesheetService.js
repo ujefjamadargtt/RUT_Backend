@@ -13,6 +13,30 @@ const logger = require('../utils/logger');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
 const dateHelper = require('../helpers/dateHelper');
 const { applyHoursVisibility } = require('../utils/hoursVisibility');
+const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
+
+/**
+ * Map EmployeeWorkLog rows (Employee Self Timesheet module — ALL rows for
+ * the month, regardless of status; see employeeWorkLogRepository.findForSync)
+ * into the exact row shape parseFile() produces for an Excel row, so they
+ * flow untouched through the existing validateRows()/adjustHoursTo176()
+ * import pipeline. This is the ONLY place the "Sync Employee Work Logs"
+ * flow reads source data from — never from `timesheets`.
+ *
+ * @param {import('../models').EmployeeWorkLog[]} workLogs
+ * @returns {object[]}
+ */
+function mapWorkLogsToImportRows(workLogs) {
+  return workLogs.map((log, index) => ({
+    rowNumber: index + 1,
+    resourceName: log.employee?.employee_code,
+    servicePOName: log.servicePO?.service_po_name,
+    subProject: log.subProject?.sub_project_name,
+    date: log.work_date,
+    hours: parseFloat(log.hours),
+    isWorking: true,
+  }));
+}
 
 // ── Expected spreadsheet column headers (case-insensitive, trimmed) ───────────
 const HEADER_MAP = {
@@ -934,9 +958,93 @@ const previewImport = async (filePath, fileName, userId, mimetype, importMonth, 
     throw err;
   }
 
+  return runImportPreview(parsedRows, {
+    fileName: displayFileName,
+    filePath,
+    userId,
+    importMonth,
+    importYear,
+    companyId,
+    source: 'excel',
+  });
+};
+
+// Same 3-letter month naming convention Excel imports already use — the
+// display file_name is derived from the sheet name ("Jan", "Feb", ...) plus
+// the uploaded file's extension (see previewImport()'s displayFileName).
+// The Sync flow has no uploaded file/sheet name to derive from, so it
+// generates the same convention directly from the selected month.
+const MONTH_ABBREVIATIONS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/**
+ * Preview a "Sync Employee Work Logs" run: reads every row from
+ * `employee_work_logs` (Employee Self Timesheet module) for the selected
+ * company/month/year instead of parsing an uploaded file, maps them into
+ * parseFile()'s row shape, then runs through the EXACT SAME validate ->
+ * 176h-adjust -> duplicate-detect -> import-history pipeline
+ * runImportPreview() already applies to Excel uploads — only the row
+ * source changes, per the "reuse the complete existing Import Timesheet
+ * business logic, do not duplicate" requirement. Never reads `timesheets`.
+ *
+ * Idempotent by design: there must only ever be ONE Sync import per
+ * Company + Month + Year. If one already exists (from an earlier sync of
+ * this same period), runImportPreview() UPDATES that same row instead of
+ * creating a new one — Sync behaves as an overwrite, not an append.
+ *
+ * @param {number} month
+ * @param {number} year
+ * @param {number} userId
+ * @param {number} companyId
+ * @returns {Promise<{ importId, totalRows, validRows, errorRows, preview, errors, duplicates, canConfirm }>}
+ */
+const previewPmsImport = async (month, year, userId, companyId) => {
+  logger.info('Employee Work Log sync preview started', { userId, month, year, companyId });
+
+  const workLogs = await employeeWorkLogRepository.findForSync(companyId, month, year);
+  const parsedRows = mapWorkLogsToImportRows(workLogs);
+
+  // Find-or-update: reuse the existing Sync import for this
+  // company+month+year (any source='pms' record, whatever its status) so a
+  // repeat sync never creates a second import history row for the same period.
+  const existing = await timesheetImportRepository.findByMonthYearSource(companyId, month, year, 'pms');
+
+  return runImportPreview(parsedRows, {
+    fileName: `${MONTH_ABBREVIATIONS[month - 1]}.xlsx`,
+    filePath: null,
+    userId,
+    importMonth: month,
+    importYear: year,
+    companyId,
+    source: 'pms',
+    existingImportId: existing ? existing.id : null,
+  });
+};
+
+/**
+ * Shared body of the import preview flow: validate -> adjust hours to 176
+ * -> detect duplicates -> create/update import history (status = pending)
+ * -> persist error rows -> build the preview response. Extracted from
+ * previewImport() so previewPmsImport() (Sync Employee Work Logs) can reuse
+ * it verbatim instead of duplicating any of this logic — the only
+ * difference between an Excel upload and a Sync is where `parsedRows`
+ * came from.
+ *
+ * `meta.existingImportId` (optional): when provided, the import history
+ * record with that ID is UPDATED in place (its prior error rows are
+ * cleared first) instead of a new row being created — this is what makes
+ * repeat syncs of the same Company+Month+Year an overwrite rather than an
+ * append. Excel uploads never pass this — their behavior is unchanged.
+ *
+ * @param {object[]} parsedRows - rows in the shape parseFile() produces
+ * @param {object} meta - { fileName, filePath, userId, importMonth, importYear, companyId, source, existingImportId? }
+ * @returns {Promise<{ importId, fileName, totalRows, validRows, errorRows, preview, errors, duplicates, canConfirm }>}
+ */
+const runImportPreview = async (parsedRows, meta) => {
+  const { fileName, filePath, userId, importMonth, importYear, companyId, source = 'excel', existingImportId = null } = meta;
+
   // 2. Validate
   const { validRows: rawValidRows, errorRows } = await validateRows(parsedRows, companyId);
-  logErrorRowBreakdown(errorRows, { fileName: displayFileName, stage: 'preview' });
+  logErrorRowBreakdown(errorRows, { fileName, stage: 'preview' });
 
   // 3. Adjust each employee's adjustable hours to sum to 176
   const validRows = adjustHoursTo176(rawValidRows);
@@ -950,19 +1058,39 @@ const previewImport = async (filePath, fileName, userId, mimetype, importMonth, 
     });
   }
 
-  // 4. Create import history record (status = pending)
-  const importRecord = await timesheetImportRepository.createImportHistory({
-    imported_by:  userId,
-    file_name:    displayFileName,
-    file_path:    filePath,
-    total_rows:   parsedRows.length,
-    valid_rows:   validRows.length,
-    error_rows:   errorRows.length,
-    status:       'pending',
-    import_month: importMonth,
-    import_year:  importYear,
-    company_id:   companyId,
-  });
+  // 4. Create OR update the import history record (status = pending)
+  let importRecord;
+  if (existingImportId) {
+    // Overwrite path: clear this import's previous error rows first so
+    // they don't accumulate across repeat sync attempts, then update the
+    // SAME row in place — no new timesheet_import_history record.
+    await timesheetImportRepository.deleteErrorsByImportIds([existingImportId], null, companyId);
+    importRecord = await timesheetImportRepository.updateImportHistory(existingImportId, {
+      imported_by:  userId,
+      file_name:    fileName,
+      file_path:    filePath,
+      total_rows:   parsedRows.length,
+      valid_rows:   validRows.length,
+      error_rows:   errorRows.length,
+      status:       'pending',
+      import_month: importMonth,
+      import_year:  importYear,
+    }, null, companyId);
+  } else {
+    importRecord = await timesheetImportRepository.createImportHistory({
+      imported_by:  userId,
+      file_name:    fileName,
+      file_path:    filePath,
+      total_rows:   parsedRows.length,
+      valid_rows:   validRows.length,
+      error_rows:   errorRows.length,
+      status:       'pending',
+      import_month: importMonth,
+      import_year:  importYear,
+      company_id:   companyId,
+      source,
+    });
+  }
 
   // 5. Persist error rows if any
   if (errorRows.length > 0) {
@@ -981,11 +1109,12 @@ const previewImport = async (filePath, fileName, userId, mimetype, importMonth, 
     totalRows:  parsedRows.length,
     validRows:  validRows.length,
     errorRows:  errorRows.length,
+    source,
   });
 
   return {
     importId:  importRecord.id,
-    fileName:  displayFileName,
+    fileName,
     totalRows: parsedRows.length,
     validRows: validRows.length,
     errorRows: errorRows.length,
@@ -1033,12 +1162,26 @@ const confirmImport = async (importId, userId, ipAddress = null, companyId) => {
     throw err;
   }
 
-  // 2. Re-parse the original file and re-validate to get current valid rows
-  //    (guards against race conditions between preview and confirm)
+  // 2. Re-fetch/re-parse the source rows and re-validate to get current
+  //    valid rows (guards against race conditions between preview and
+  //    confirm). Branches on `source`: an Excel-sourced import re-parses
+  //    the file stored on disk (unchanged); a PMS-sourced import (i.e. a
+  //    "Sync Employee Work Logs" run) re-reads employee_work_logs rows
+  //    instead — everything downstream of this point is identical for
+  //    both sources.
   let parsedRows;
   try {
-    const { rows } = await parseFile(importRecord.file_path, importRecord.file_name, null);
-    parsedRows = rows;
+    if (importRecord.source === 'pms') {
+      const workLogs = await employeeWorkLogRepository.findForSync(
+        companyId,
+        importRecord.import_month,
+        importRecord.import_year
+      );
+      parsedRows = mapWorkLogsToImportRows(workLogs);
+    } else {
+      const { rows } = await parseFile(importRecord.file_path, importRecord.file_name, null);
+      parsedRows = rows;
+    }
   } catch (err) {
     await timesheetImportRepository.updateImportHistory(importId, { status: 'failed' }, null, companyId);
     throw err;
@@ -1132,6 +1275,17 @@ const confirmImport = async (importId, userId, ipAddress = null, companyId) => {
         company_id:    companyId,
       }));
       await timesheetImportRepository.createImportErrors(errorInserts);
+    }
+
+    // For a "Sync Employee Work Logs" import, flip the source
+    // employee_work_logs rows to 'synced' in the SAME transaction as the
+    // timesheets insert — either both commit or both roll back, so a draft
+    // row can never be left 'pending' after its official record exists (or
+    // vice versa).
+    if (importRecord.source === 'pms') {
+      const tuples = validRows.map((row) => ({ employeeId: row.employeeId, poId: row.poId, date: row.date }));
+      const syncedCount = await employeeWorkLogRepository.markSyncedByTuples(companyId, tuples, importId, t);
+      logger.info('Employee work logs marked as synced', { importId, syncedCount });
     }
 
     await t.commit();
@@ -1746,8 +1900,15 @@ const deleteTimesheet = async (id, companyId) => {
  *   3. The import history record itself (timesheet_import_history)
  *   4. The physical uploaded file on disk (file_path)
  *
+ * This NEVER deletes Employee Work Logs (employee_work_logs) — they are the
+ * source of truth, not the output of an import. Any work log rows that had
+ * been synced into the import being deleted are instead reverted to
+ * status='pending' (employeeWorkLogRepository.revertSyncStatusByImportIds,
+ * step 0 below) so they remain intact and can be freely edited/re-synced —
+ * the row itself is never touched.
+ *
  * @param {number[]} ids
- * @returns {Promise<{ deletedImportCount: number, deletedTimesheetRows: number, removedFiles: string[], failedFiles: object[] }>}
+ * @returns {Promise<{ deletedImportCount: number, deletedTimesheetRows: number, deletedErrorRows: number, revertedWorkLogs: number, removedFiles: string[], failedFiles: object[] }>}
  */
 const deleteImports = async (ids, companyId) => {
   const uniqueIds = [...new Set(ids)];
@@ -1778,7 +1939,18 @@ const deleteImports = async (ids, companyId) => {
   let deletedTimesheetRows;
   let deletedErrorRows;
   let deletedImportCount;
+  let revertedWorkLogs;
   try {
+    // Employee Work Logs are the source of truth and must remain intact
+    // after a Timesheet Import is deleted — the official Timesheet data
+    // for this import is about to disappear, so any work log rows this
+    // import had synced are no longer accurately reflected anywhere and
+    // must revert to status='pending' (not just have their FK nulled) so
+    // they can be edited/deleted freely and picked up by a future sync.
+    // Must run BEFORE deleting the import history rows below (defense in
+    // depth: the FK's own ON DELETE SET NULL would clear the column
+    // regardless, but only this step restores `status`).
+    revertedWorkLogs = await employeeWorkLogRepository.revertSyncStatusByImportIds(uniqueIds, t);
     // Child table 1: timesheet rows belonging to these imports
     deletedTimesheetRows = await timesheetRepository.deleteByImportIds(uniqueIds, t, companyId);
     // Child table 2: error rows belonging to these imports — deleted explicitly
@@ -1814,7 +1986,7 @@ const deleteImports = async (ids, companyId) => {
     }
   }
 
-  return { deletedImportCount, deletedTimesheetRows, deletedErrorRows, removedFiles, failedFiles };
+  return { deletedImportCount, deletedTimesheetRows, deletedErrorRows, revertedWorkLogs, removedFiles, failedFiles };
 };
 
 /**
@@ -1876,6 +2048,7 @@ module.exports = {
   parseFile: parseFile,
   validateRows: validateRows,
   previewImport: previewImport,
+  previewPmsImport: previewPmsImport,
   confirmImport: confirmImport,
   getImportHistory: getImportHistory,
   getImportById: getImportById,
