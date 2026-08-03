@@ -89,10 +89,12 @@ const softDelete = async (id, updatedBy, companyId) => {
  * Insert a new service type record.
  *
  * @param {object} data
+ * @param {object} [options={}] - e.g. { transaction } for use inside a
+ *   caller-managed transaction (see companyService.createWithAdmin).
  * @returns {Promise<ServiceType>}
  */
-const create = async (data) => {
-  return ServiceType.create(data);
+const create = async (data, options = {}) => {
+  return ServiceType.create(data, options);
 };
 
 /**

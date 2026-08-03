@@ -5,6 +5,7 @@ const companyRepository = require('../repositories/companyRepository');
 const userRepository = require('../repositories/userRepository');
 const roleRepository = require('../repositories/roleRepository');
 const serviceCategoryRepository = require('../repositories/serviceCategoryRepository');
+const serviceTypeRepository = require('../repositories/serviceTypeRepository');
 const { createAuditLog } = require('../middlewares/auditLog');
 
 /**
@@ -18,6 +19,29 @@ const DEFAULT_SERVICE_CATEGORIES = [
   { name: 'Billable', report_bucket_key: 'billable' },
   { name: 'Non-Billable', report_bucket_key: 'non_billable' },
   { name: 'Customer Non-Billable', report_bucket_key: 'customer_non_billable' },
+];
+
+/**
+ * Every new company also starts with these default service types, each
+ * linked to one of the categories above by NAME — never by ID. Category IDs
+ * are per-company (auto-generated on insert below), so the same "Billable"
+ * category has a different ID for every company; hardcoding an ID here
+ * would silently link a new company's service types to some other
+ * company's category row.
+ */
+const DEFAULT_SERVICE_TYPES = [
+  { name: 'Project', category: 'Billable' },
+  { name: 'Service Pack', category: 'Billable' },
+  { name: 'Staff Augmentation', category: 'Billable' },
+  { name: 'AMC', category: 'Billable' },
+  { name: 'Internal Support', category: 'Non-Billable' },
+  { name: 'Team Management', category: 'Non-Billable' },
+  { name: 'Leaves', category: 'Non-Billable' },
+  { name: 'L&D', category: 'Non-Billable' },
+  { name: 'Others', category: 'Non-Billable' },
+  { name: 'Customer Work', category: 'Customer Non-Billable' },
+  { name: 'Complimentary Hours', category: 'Customer Non-Billable' },
+  { name: 'Product/Solution/Framework Development', category: 'Customer Non-Billable' },
 ];
 
 /**
@@ -89,12 +113,31 @@ const createWithAdmin = async (data, actorId, ipAddress = null) => {
       { transaction }
     );
 
+    // Insert categories first and capture their freshly generated IDs —
+    // never assume/hardcode an ID, each company gets its own.
+    const categoryMap = {};
     for (const category of DEFAULT_SERVICE_CATEGORIES) {
-      await serviceCategoryRepository.create(
+      const created = await serviceCategoryRepository.create(
         {
           ...category,
           company_id: company.id,
           status: 'active',
+          created_by: actorId,
+          updated_by: actorId,
+        },
+        { transaction }
+      );
+      categoryMap[category.name] = created.id;
+    }
+
+    // Then link each default service type to this company's own category ID
+    // via the map above, resolved by name.
+    for (const serviceType of DEFAULT_SERVICE_TYPES) {
+      await serviceTypeRepository.create(
+        {
+          service_type_name: serviceType.name,
+          service_category_id: categoryMap[serviceType.category],
+          company_id: company.id,
           created_by: actorId,
           updated_by: actorId,
         },
