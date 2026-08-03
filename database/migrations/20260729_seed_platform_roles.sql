@@ -26,12 +26,15 @@
 
 BEGIN;
 
-INSERT INTO roles (role_name, permission, status)
-VALUES ('Platform Admin', 'Read & Write', 'active')
+-- created_at/updated_at set explicitly to NOW() rather than left to a
+-- DB-level DEFAULT — see 20260804_backfill_default_service_types.sql's header
+-- comment for why that assumption doesn't reliably hold across environments.
+INSERT INTO roles (role_name, permission, status, created_at, updated_at)
+VALUES ('Platform Admin', 'Read & Write', 'active', NOW(), NOW())
 ON CONFLICT (role_name) DO NOTHING;
 
-INSERT INTO roles (role_name, permission, status)
-VALUES ('Company Admin', 'Read & Write', 'active')
+INSERT INTO roles (role_name, permission, status, created_at, updated_at)
+VALUES ('Company Admin', 'Read & Write', 'active', NOW(), NOW())
 ON CONFLICT (role_name) DO NOTHING;
 
 COMMIT;

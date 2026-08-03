@@ -48,7 +48,16 @@ ALTER TABLE monthly_costs              ADD COLUMN IF NOT EXISTS company_id INT R
 ALTER TABLE service_pos                ADD COLUMN IF NOT EXISTS company_id INT REFERENCES companies (id);
 ALTER TABLE service_po_resources       ADD COLUMN IF NOT EXISTS company_id INT REFERENCES companies (id);
 ALTER TABLE service_types              ADD COLUMN IF NOT EXISTS company_id INT REFERENCES companies (id);
-ALTER TABLE service_categories         ADD COLUMN IF NOT EXISTS company_id INT REFERENCES companies (id);
+-- service_categories specifically uses IF EXISTS here (unlike every other
+-- line below) because, unlike the rest of these tables, it was never
+-- actually created by database/schema.sql or any migration before this one —
+-- it only ever existed on databases where it had been added out-of-band
+-- (see 20260803_ensure_service_categories_schema.sql's header for the full
+-- story). On a database that genuinely doesn't have it yet, this becomes a
+-- safe no-op; 20260803_ensure_service_categories_schema.sql (which runs
+-- later in filename order) creates the table AND applies this same
+-- company_id retrofit to it unconditionally, so nothing is lost.
+ALTER TABLE IF EXISTS service_categories ADD COLUMN IF NOT EXISTS company_id INT REFERENCES companies (id);
 ALTER TABLE sub_projects               ADD COLUMN IF NOT EXISTS company_id INT REFERENCES companies (id);
 ALTER TABLE timesheets                 ADD COLUMN IF NOT EXISTS company_id INT REFERENCES companies (id);
 ALTER TABLE timesheet_import_history   ADD COLUMN IF NOT EXISTS company_id INT REFERENCES companies (id);
@@ -63,7 +72,14 @@ CREATE INDEX IF NOT EXISTS idx_monthly_costs_company_id            ON monthly_co
 CREATE INDEX IF NOT EXISTS idx_service_pos_company_id              ON service_pos (company_id);
 CREATE INDEX IF NOT EXISTS idx_service_po_resources_company_id     ON service_po_resources (company_id);
 CREATE INDEX IF NOT EXISTS idx_service_types_company_id            ON service_types (company_id);
-CREATE INDEX IF NOT EXISTS idx_service_categories_company_id       ON service_categories (company_id);
+-- CREATE INDEX has no "IF EXISTS <table>" form, so this one is guarded with
+-- a DO block instead (DDL inside PL/pgSQL requires EXECUTE) — same reasoning
+-- as the ALTER TABLE above.
+DO $$ BEGIN
+  IF to_regclass('public.service_categories') IS NOT NULL THEN
+    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_service_categories_company_id ON service_categories (company_id)';
+  END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_sub_projects_company_id             ON sub_projects (company_id);
 CREATE INDEX IF NOT EXISTS idx_timesheets_company_id               ON timesheets (company_id);
 CREATE INDEX IF NOT EXISTS idx_timesheet_import_history_company_id ON timesheet_import_history (company_id);

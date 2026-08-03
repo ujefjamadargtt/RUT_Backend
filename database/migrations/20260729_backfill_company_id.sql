@@ -25,7 +25,13 @@ BEGIN
   UPDATE service_pos               SET company_id = gtt_id WHERE company_id IS NULL;
   UPDATE service_po_resources      SET company_id = gtt_id WHERE company_id IS NULL;
   UPDATE service_types             SET company_id = gtt_id WHERE company_id IS NULL;
-  UPDATE service_categories        SET company_id = gtt_id WHERE company_id IS NULL;
+  -- service_categories may not exist yet on a genuinely fresh database (see
+  -- 20260803_ensure_service_categories_schema.sql's header) — this backfill
+  -- is a no-op there anyway since 20260803 creates the table with company_id
+  -- already populated, not NULL.
+  IF to_regclass('public.service_categories') IS NOT NULL THEN
+    UPDATE service_categories SET company_id = gtt_id WHERE company_id IS NULL;
+  END IF;
   UPDATE sub_projects              SET company_id = gtt_id WHERE company_id IS NULL;
   UPDATE timesheets                SET company_id = gtt_id WHERE company_id IS NULL;
   UPDATE timesheet_import_history  SET company_id = gtt_id WHERE company_id IS NULL;

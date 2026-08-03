@@ -10,6 +10,13 @@ BEGIN;
 
 ALTER TABLE employees ADD COLUMN IF NOT EXISTS password VARCHAR(255);
 
+-- email_id itself is not in database/schema.sql or any earlier migration —
+-- like service_categories (see 20260803_ensure_service_categories_schema.sql),
+-- it only existed on already-migrated databases because it was added
+-- out-of-band at some point. Add it here for real so a brand-new environment
+-- ends up with it too, matching src/models/Employee.js's field definition.
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS email_id VARCHAR(150);
+
 -- email_id lookups happen on every login attempt for an unrecognised-user
 -- email; index it for that lookup (uniqueness itself stays an application-
 -- level rule — see employeeRepository.findAllEmailsGlobal — not enforced here).

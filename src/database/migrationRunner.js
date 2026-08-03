@@ -75,6 +75,48 @@ async function getAppliedMigrations(sequelize) {
 }
 
 /**
+ * Distinguishes the two situations that both present as "schema_migrations
+ * doesn't exist yet" (isFirstRun === true in runMigrations):
+ *
+ *  1. An OLD database that predates this runner entirely — every migration
+ *     file on disk was already applied by hand over the course of
+ *     development, same as this project always worked before the runner
+ *     existed. Here, baselining (record as applied, don't re-execute) is
+ *     correct — re-running them for real would mean re-applying changes
+ *     already live and could fail or duplicate data.
+ *
+ *  2. A BRAND NEW database that just had database/schema.sql run against it
+ *     (the documented manual first step for any new environment — see
+ *     database/README.md) and is starting this server for the very first
+ *     time. schema.sql only defines the ORIGINAL baseline tables; every
+ *     table/column introduced since (companies, service_categories,
+ *     company_id, etc.) exists ONLY inside database/migrations/*.sql. If
+ *     this case is (mis)treated the same as case 1 and baselined, every one
+ *     of those migrations gets marked "applied" without ever actually
+ *     running — silently leaving the new environment missing multi-tenancy,
+ *     service categories, and everything else those files add. This is
+ *     exactly the class of bug this project hit in practice: schema drift
+ *     between "what schema.sql describes" and "what migrations actually
+ *     built," invisible until something tries to use the missing piece.
+ *
+ * `companies` is the correct discriminator: it's created exclusively by
+ * 20260728_add_company_tenancy_schema.sql and appears nowhere in schema.sql.
+ * If it already exists the moment we detect isFirstRun, this is case 1 —
+ * some migrations' real-world effects already exist even though this runner
+ * has never tracked them. If it doesn't exist, this is case 2, and every
+ * migration must actually run, not be baselined.
+ *
+ * @param {import('sequelize').Sequelize} sequelize
+ * @returns {Promise<boolean>}
+ */
+async function hasPreRunnerMigrationHistory(sequelize) {
+  const [[{ exists }]] = await sequelize.query(
+    "SELECT to_regclass('public.companies') IS NOT NULL AS exists"
+  );
+  return exists;
+}
+
+/**
  * Records every currently-existing migration file as already applied,
  * WITHOUT executing its SQL. Called exactly once — only when
  * ensureMigrationsTable() reports the tracking table was just created,
@@ -195,10 +237,24 @@ async function runMigrations(sequelize) {
     const allFiles = listMigrationFiles();
 
     if (isFirstRun) {
-      await baselineExistingMigrations(sequelize, allFiles);
-      logger.info('Migration completed successfully.');
-      console.log('[migrations] Migration completed successfully.');
-      return;
+      const preExisting = await hasPreRunnerMigrationHistory(sequelize);
+
+      if (preExisting) {
+        await baselineExistingMigrations(sequelize, allFiles);
+        logger.info('Migration completed successfully.');
+        console.log('[migrations] Migration completed successfully.');
+        return;
+      }
+
+      logger.info(
+        `Migrations: first run on a brand-new database detected (no "companies" table yet) — ` +
+        `applying all ${allFiles.length} migration(s) for real instead of baselining.`
+      );
+      console.log(
+        `[migrations] Brand-new database detected — applying all ${allFiles.length} migration(s) for real.`
+      );
+      // Falls through to the normal pending-migration loop below, with
+      // `applied` empty, so every file on disk runs in order.
     }
 
     const applied = await getAppliedMigrations(sequelize);

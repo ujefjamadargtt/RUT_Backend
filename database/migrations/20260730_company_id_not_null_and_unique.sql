@@ -47,8 +47,13 @@ BEGIN
   EXECUTE format('ALTER TABLE service_types ALTER COLUMN company_id SET DEFAULT %L', gtt_id);
   ALTER TABLE service_types ALTER COLUMN company_id SET NOT NULL;
 
-  EXECUTE format('ALTER TABLE service_categories ALTER COLUMN company_id SET DEFAULT %L', gtt_id);
-  ALTER TABLE service_categories ALTER COLUMN company_id SET NOT NULL;
+  -- service_categories may not exist yet on a genuinely fresh database (see
+  -- 20260803_ensure_service_categories_schema.sql's header) — skip gracefully
+  -- there; that later migration creates it with company_id already NOT NULL.
+  IF to_regclass('public.service_categories') IS NOT NULL THEN
+    EXECUTE format('ALTER TABLE service_categories ALTER COLUMN company_id SET DEFAULT %L', gtt_id);
+    ALTER TABLE service_categories ALTER COLUMN company_id SET NOT NULL;
+  END IF;
 
   EXECUTE format('ALTER TABLE sub_projects ALTER COLUMN company_id SET DEFAULT %L', gtt_id);
   ALTER TABLE sub_projects ALTER COLUMN company_id SET NOT NULL;
@@ -88,9 +93,12 @@ ALTER TABLE sub_projects DROP CONSTRAINT IF EXISTS uq_sub_projects_code;
 ALTER TABLE sub_projects ADD CONSTRAINT uq_sub_projects_company_code UNIQUE (company_id, sub_project_code);
 
 -- service_categories.name had no prior DB-level constraint (app-layer check
--- only) — add the composite one fresh.
-ALTER TABLE service_categories DROP CONSTRAINT IF EXISTS uq_service_categories_company_name;
-ALTER TABLE service_categories ADD CONSTRAINT uq_service_categories_company_name UNIQUE (company_id, name);
+-- only) — add the composite one fresh. IF EXISTS on the table: may not exist
+-- yet on a genuinely fresh database (see
+-- 20260803_ensure_service_categories_schema.sql's header), which applies
+-- this same constraint unconditionally once it creates the table.
+ALTER TABLE IF EXISTS service_categories DROP CONSTRAINT IF EXISTS uq_service_categories_company_name;
+ALTER TABLE IF EXISTS service_categories ADD CONSTRAINT uq_service_categories_company_name UNIQUE (company_id, name);
 
 -- users.email intentionally left untouched — stays globally unique (login identity).
 

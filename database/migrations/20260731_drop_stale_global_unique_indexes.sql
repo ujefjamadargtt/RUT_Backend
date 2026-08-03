@@ -30,7 +30,10 @@ DROP INDEX IF EXISTS uq_service_pos_code_active;
 DROP INDEX IF EXISTS uq_service_types_name_active;
 DROP INDEX IF EXISTS uq_service_categories_name_active;
 -- uq_service_categories_name is backed by a table CONSTRAINT (not a bare
--- index) — must be dropped via ALTER TABLE, not DROP INDEX.
-ALTER TABLE service_categories DROP CONSTRAINT IF EXISTS uq_service_categories_name;
+-- index) — must be dropped via ALTER TABLE, not DROP INDEX. IF EXISTS on the
+-- table itself too: service_categories may not exist yet on a genuinely
+-- fresh database at this point in the migration sequence (see
+-- 20260803_ensure_service_categories_schema.sql's header).
+ALTER TABLE IF EXISTS service_categories DROP CONSTRAINT IF EXISTS uq_service_categories_name;
 
 COMMIT;

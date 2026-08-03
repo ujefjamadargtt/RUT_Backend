@@ -16,13 +16,18 @@ BEGIN;
 -- ROLES
 -- =============================================================================
 
-INSERT INTO roles (id, role_name, permission, status, created_by, updated_by)
+-- created_at/updated_at set explicitly to NOW() rather than left to a
+-- DB-level DEFAULT — that default exists wherever this table was built from
+-- database/schema.sql, but is not guaranteed on every environment (see
+-- database/migrations/20260804_backfill_default_service_types.sql's header
+-- comment for the incident this was learned from).
+INSERT INTO roles (id, role_name, permission, status, created_by, updated_by, created_at, updated_at)
 VALUES
-  (1, 'HR',              'Read',         'active', 1, 1),
-  (2, 'Finance',         'Read',         'active', 1, 1),
-  (3, 'Division Head',   'Read & Write', 'active', 1, 1),
-  (4, 'Project Manager', 'Read & Write', 'active', 1, 1),
-  (5, 'Management',      'Read & Write', 'active', 1, 1)
+  (1, 'HR',              'Read',         'active', 1, 1, NOW(), NOW()),
+  (2, 'Finance',         'Read',         'active', 1, 1, NOW(), NOW()),
+  (3, 'Division Head',   'Read & Write', 'active', 1, 1, NOW(), NOW()),
+  (4, 'Project Manager', 'Read & Write', 'active', 1, 1, NOW(), NOW()),
+  (5, 'Management',      'Read & Write', 'active', 1, 1, NOW(), NOW())
 ON CONFLICT (role_name) DO NOTHING;
 
 -- Keep sequence in sync after explicit ID inserts
@@ -32,13 +37,16 @@ SELECT setval('roles_id_seq', (SELECT MAX(id) FROM roles));
 -- SERVICE TYPES
 -- =============================================================================
 
-INSERT INTO service_types (id, service_type_name, created_by, updated_by)
+INSERT INTO service_types (id, service_type_name, created_by, updated_by, created_at, updated_at)
 VALUES
-  (1, 'Project',               1, 1),
-  (2, 'Service Pack',          1, 1),
-  (3, 'Resource Outsourcing',  1, 1),
-  (4, 'Managed Services',      1, 1)
-ON CONFLICT (service_type_name) DO NOTHING;
+  (1, 'Project',               1, 1, NOW(), NOW()),
+  (2, 'Service Pack',          1, 1, NOW(), NOW()),
+  (3, 'Resource Outsourcing',  1, 1, NOW(), NOW()),
+  (4, 'Managed Services',      1, 1, NOW(), NOW())
+-- uq_service_types_name was replaced by the composite uq_service_types_company_name
+-- (company_id, service_type_name) in 20260730_company_id_not_null_and_unique.sql —
+-- company_id isn't listed above so it takes the column's temporary DEFAULT (GTT's id).
+ON CONFLICT (company_id, service_type_name) DO NOTHING;
 
 SELECT setval('service_types_id_seq', (SELECT MAX(id) FROM service_types));
 
@@ -57,7 +65,9 @@ INSERT INTO employees (
   date_of_joining,
   status,
   created_by,
-  updated_by
+  updated_by,
+  created_at,
+  updated_at
 )
 VALUES (
   1,
@@ -70,9 +80,14 @@ VALUES (
   CURRENT_DATE,
   'active',
   1,
-  1
+  1,
+  NOW(),
+  NOW()
 )
-ON CONFLICT (employee_code) DO NOTHING;
+-- uq_employees_employee_code was replaced by the composite
+-- uq_employees_company_code (company_id, employee_code) in
+-- 20260730_company_id_not_null_and_unique.sql.
+ON CONFLICT (company_id, employee_code) DO NOTHING;
 
 SELECT setval('employees_id_seq', (SELECT MAX(id) FROM employees));
 
@@ -93,7 +108,9 @@ INSERT INTO users (
   role_id,
   status,
   created_by,
-  updated_by
+  updated_by,
+  created_at,
+  updated_at
 )
 VALUES (
   1,
@@ -103,7 +120,9 @@ VALUES (
   5,   -- Management role
   'active',
   1,
-  1
+  1,
+  NOW(),
+  NOW()
 )
 ON CONFLICT (email) DO NOTHING;
 
@@ -129,11 +148,13 @@ SELECT setval('user_roles_id_seq', (SELECT MAX(id) FROM user_roles));
 -- =============================================================================
 
 -- CLIENTS
-INSERT INTO clients (id, client_code, client_name, industry, status, created_by, updated_by)
+INSERT INTO clients (id, client_code, client_name, industry, status, created_by, updated_by, created_at, updated_at)
 VALUES
-  (1, 'CL-001', 'Acme Technologies', 'Information Technology', 'active', 1, 1),
-  (2, 'CL-002', 'Zenith Retail', 'Retail', 'active', 1, 1)
-ON CONFLICT (client_code) DO NOTHING;
+  (1, 'CL-001', 'Acme Technologies', 'Information Technology', 'active', 1, 1, NOW(), NOW()),
+  (2, 'CL-002', 'Zenith Retail', 'Retail', 'active', 1, 1, NOW(), NOW())
+-- uq_clients_client_code was replaced by the composite uq_clients_company_code
+-- (company_id, client_code) in 20260730_company_id_not_null_and_unique.sql.
+ON CONFLICT (company_id, client_code) DO NOTHING;
 
 SELECT setval('clients_id_seq', GREATEST((SELECT MAX(id) FROM clients), 2));
 
@@ -151,12 +172,16 @@ INSERT INTO service_pos (
   is_billable,
   status,
   created_by,
-  updated_by
+  updated_by,
+  created_at,
+  updated_at
 )
 VALUES
-  (1, 'PO-001', 'Acme Website Revamp', 1, 1, 120000.00, '2026-01-01', '2026-12-31', 2000, TRUE, 'active', 1, 1),
-  (2, 'PO-002', 'Zenith Store Migration', 2, 2, 85000.00, '2026-03-01', '2026-09-30', 1400, TRUE, 'active', 1, 1)
-ON CONFLICT (service_po_code) DO NOTHING;
+  (1, 'PO-001', 'Acme Website Revamp', 1, 1, 120000.00, '2026-01-01', '2026-12-31', 2000, TRUE, 'active', 1, 1, NOW(), NOW()),
+  (2, 'PO-002', 'Zenith Store Migration', 2, 2, 85000.00, '2026-03-01', '2026-09-30', 1400, TRUE, 'active', 1, 1, NOW(), NOW())
+-- uq_service_pos_code was replaced by the composite uq_service_pos_company_code
+-- (company_id, service_po_code) in 20260730_company_id_not_null_and_unique.sql.
+ON CONFLICT (company_id, service_po_code) DO NOTHING;
 
 SELECT setval('service_pos_id_seq', GREATEST((SELECT MAX(id) FROM service_pos), 2));
 
@@ -171,13 +196,17 @@ INSERT INTO sub_projects (
   end_date,
   status,
   created_by,
-  updated_by
+  updated_by,
+  created_at,
+  updated_at
 )
 VALUES
-  (1, 'SP-001', 1, 'Frontend Modernization', 'UI/UX overhaul for Acme portal', '2026-01-01', '2026-06-30', 'active', 1, 1),
-  (2, 'SP-002', 1, 'Backend API Integration', 'Connect Acme services with external APIs', '2026-02-01', '2026-09-30', 'active', 1, 1),
-  (3, 'SP-003', 2, 'Data Migration', 'Move retail catalog and orders to the new platform', '2026-03-01', '2026-07-31', 'active', 1, 1)
-ON CONFLICT (sub_project_code) DO NOTHING;
+  (1, 'SP-001', 1, 'Frontend Modernization', 'UI/UX overhaul for Acme portal', '2026-01-01', '2026-06-30', 'active', 1, 1, NOW(), NOW()),
+  (2, 'SP-002', 1, 'Backend API Integration', 'Connect Acme services with external APIs', '2026-02-01', '2026-09-30', 'active', 1, 1, NOW(), NOW()),
+  (3, 'SP-003', 2, 'Data Migration', 'Move retail catalog and orders to the new platform', '2026-03-01', '2026-07-31', 'active', 1, 1, NOW(), NOW())
+-- uq_sub_projects_code was replaced by the composite uq_sub_projects_company_code
+-- (company_id, sub_project_code) in 20260730_company_id_not_null_and_unique.sql.
+ON CONFLICT (company_id, sub_project_code) DO NOTHING;
 
 SELECT setval('sub_projects_id_seq', GREATEST((SELECT MAX(id) FROM sub_projects), 3));
 
@@ -193,13 +222,15 @@ INSERT INTO employees (
   date_of_joining,
   status,
   created_by,
-  updated_by
+  updated_by,
+  created_at,
+  updated_at
 )
 VALUES
-  (2, 'EMP-002', 'Priya Sharma', 'Software Engineer', 3.5, 2.0, 'Frontend specialist assigned to Acme project.', '2025-10-15', 'active', 1, 1),
-  (3, 'EMP-003', 'Rahul Verma', 'Backend Engineer', 5.0, 3.0, 'API and integration specialist.', '2025-09-01', 'active', 1, 1),
-  (4, 'EMP-004', 'Sneha Patel', 'QA Engineer', 2.0, 1.5, 'Automation and regression testing.', '2026-02-10', 'active', 1, 1)
-ON CONFLICT (employee_code) DO NOTHING;
+  (2, 'EMP-002', 'Priya Sharma', 'Software Engineer', 3.5, 2.0, 'Frontend specialist assigned to Acme project.', '2025-10-15', 'active', 1, 1, NOW(), NOW()),
+  (3, 'EMP-003', 'Rahul Verma', 'Backend Engineer', 5.0, 3.0, 'API and integration specialist.', '2025-09-01', 'active', 1, 1, NOW(), NOW()),
+  (4, 'EMP-004', 'Sneha Patel', 'QA Engineer', 2.0, 1.5, 'Automation and regression testing.', '2026-02-10', 'active', 1, 1, NOW(), NOW())
+ON CONFLICT (company_id, employee_code) DO NOTHING;
 
 SELECT setval('employees_id_seq', GREATEST((SELECT MAX(id) FROM employees), 4));
 
@@ -212,12 +243,14 @@ INSERT INTO users (
   role_id,
   status,
   created_by,
-  updated_by
+  updated_by,
+  created_at,
+  updated_at
 )
 VALUES
-  (2, 2, 'priya.sharma@rutportal.com', '$2b$12$a6Ex/FZQ1fMXPJdgk9qGduLv8bvvVK6F87xamgf2mC5m51ZxxXGmq', 4, 'active', 1, 1),
-  (3, 3, 'rahul.verma@rutportal.com', '$2b$12$a6Ex/FZQ1fMXPJdgk9qGduLv8bvvVK6F87xamgf2mC5m51ZxxXGmq', 4, 'active', 1, 1),
-  (4, 4, 'sneha.patel@rutportal.com', '$2b$12$a6Ex/FZQ1fMXPJdgk9qGduLv8bvvVK6F87xamgf2mC5m51ZxxXGmq', 2, 'active', 1, 1)
+  (2, 2, 'priya.sharma@rutportal.com', '$2b$12$a6Ex/FZQ1fMXPJdgk9qGduLv8bvvVK6F87xamgf2mC5m51ZxxXGmq', 4, 'active', 1, 1, NOW(), NOW()),
+  (3, 3, 'rahul.verma@rutportal.com', '$2b$12$a6Ex/FZQ1fMXPJdgk9qGduLv8bvvVK6F87xamgf2mC5m51ZxxXGmq', 4, 'active', 1, 1, NOW(), NOW()),
+  (4, 4, 'sneha.patel@rutportal.com', '$2b$12$a6Ex/FZQ1fMXPJdgk9qGduLv8bvvVK6F87xamgf2mC5m51ZxxXGmq', 2, 'active', 1, 1, NOW(), NOW())
 ON CONFLICT (email) DO NOTHING;
 
 SELECT setval('users_id_seq', GREATEST((SELECT MAX(id) FROM users), 4));
@@ -241,14 +274,15 @@ INSERT INTO timesheets (
   timesheet_date,
   hours_logged,
   created_by,
-  updated_by
+  updated_by,
+  created_at
 )
 VALUES
-  (1, 2, 1, 1, '2026-06-22', 8.0, 2, 2),
-  (2, 3, 1, 2, '2026-06-22', 7.5, 3, 3),
-  (3, 4, 2, 3, '2026-06-22', 8.0, 4, 4),
-  (4, 2, 1, 1, '2026-06-23', 7.0, 2, 2),
-  (5, 3, 1, 2, '2026-06-23', 8.0, 3, 3)
+  (1, 2, 1, 1, '2026-06-22', 8.0, 2, 2, NOW()),
+  (2, 3, 1, 2, '2026-06-22', 7.5, 3, 3, NOW()),
+  (3, 4, 2, 3, '2026-06-22', 8.0, 4, 4, NOW()),
+  (4, 2, 1, 1, '2026-06-23', 7.0, 2, 2, NOW()),
+  (5, 3, 1, 2, '2026-06-23', 8.0, 3, 3, NOW())
 ON CONFLICT DO NOTHING;
 
 SELECT setval('timesheets_id_seq', GREATEST((SELECT MAX(id) FROM timesheets), 5));
@@ -263,12 +297,13 @@ INSERT INTO monthly_costs (
   total_cost,
   billable_cost,
   created_by,
-  updated_by
+  updated_by,
+  created_at
 )
 VALUES
-  (1, 2, '2026-06', 250000.00, 12000.00, 262000.00, 150000.00, 1, 1),
-  (2, 3, '2026-06', 300000.00, 15000.00, 315000.00, 180000.00, 1, 1),
-  (3, 4, '2026-06', 200000.00, 9000.00, 209000.00, 120000.00, 1, 1)
+  (1, 2, '2026-06', 250000.00, 12000.00, 262000.00, 150000.00, 1, 1, NOW()),
+  (2, 3, '2026-06', 300000.00, 15000.00, 315000.00, 180000.00, 1, 1, NOW()),
+  (3, 4, '2026-06', 200000.00, 9000.00, 209000.00, 120000.00, 1, 1, NOW())
 ON CONFLICT DO NOTHING;
 
 SELECT setval('monthly_costs_id_seq', GREATEST((SELECT MAX(id) FROM monthly_costs), 3));
