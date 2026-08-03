@@ -80,6 +80,24 @@ const create = async (data, userId, companyId) => {
 
   await assertCategoryExists(data.service_category_id, companyId);
 
+  // A previously soft-deleted row still holds this name in the DB's unique
+  // (company_id, service_type_name) index — the findByName() check above
+  // deliberately excludes deleted rows, so recreating a deleted name would
+  // otherwise reach Postgres and crash with a raw SequelizeUniqueConstraintError
+  // instead of succeeding. Revive that row rather than inserting a new one.
+  const deleted = await serviceTypeRepository.findDeletedByName(data.service_type_name, companyId);
+  if (deleted) {
+    const revived = await serviceTypeRepository.update(
+      deleted.id,
+      { ...data, is_deleted: false, updated_by: userId },
+      companyId
+    );
+
+    logger.info('Service type revived (was soft-deleted)', { serviceTypeId: revived.id, name: revived.service_type_name, userId });
+
+    return revived;
+  }
+
   const payload = {
     ...data,
     company_id: companyId,

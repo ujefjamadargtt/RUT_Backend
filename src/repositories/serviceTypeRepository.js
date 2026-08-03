@@ -64,6 +64,21 @@ const findByName = async (name, companyId) => {
   });
 };
 
+/**
+ * Find a soft-deleted service type occupying this name for this company.
+ * uq_service_types_company_name is a plain (company_id, service_type_name)
+ * unique index — it has no is_deleted-aware partial condition, so a
+ * soft-deleted row still blocks a fresh INSERT of the same name at the DB
+ * level even though findByName() (which excludes is_deleted rows) reports no
+ * conflict. Callers use this to revive the row instead of inserting a new
+ * one and hitting a raw SequelizeUniqueConstraintError.
+ */
+const findDeletedByName = async (name, companyId) => {
+  return ServiceType.findOne({
+    where: { service_type_name: { [Op.iLike]: name.trim() }, is_deleted: true, company_id: companyId },
+  });
+};
+
 const softDelete = async (id, updatedBy, companyId) => {
   const record = await ServiceType.findOne({ where: { id, is_deleted: false, company_id: companyId } });
   if (!record) return null;
@@ -104,6 +119,7 @@ module.exports = {
   findAll,
   findById,
   findByName,
+  findDeletedByName,
   create,
   update,
   softDelete,
