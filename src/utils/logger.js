@@ -62,8 +62,25 @@ const logger = createLogger({
   exitOnError: false,
 });
 
-// ─── Console transport (non-production) ──────────────────────────────────────
-if (process.env.NODE_ENV !== 'production') {
+// ─── Console transport ────────────────────────────────────────────────────────
+// Always attached, in every environment. In production this is the ONLY way
+// to see application errors: hosts like Railway capture stdout/stderr as
+// their log stream, but have no access to the DailyRotateFile transports
+// above, which write to the container's local (often ephemeral) disk. Without
+// this, a production 500 logs only to a file nobody can read, and the
+// operator is stuck with the generic "An internal server error occurred."
+// response and no way to find the real cause.
+if (process.env.NODE_ENV === 'production') {
+  logger.add(new transports.Console({
+    level: LOG_LEVEL,
+    format: combine(
+      timestamp({ format: () => moment.tz(dateHelper.DEFAULT_TZ).format('YYYY-MM-DD HH:mm:ss') }),
+      errors({ stack: true }),
+      splat(),
+      json(),
+    ),
+  }));
+} else {
   logger.add(new transports.Console({
     level: 'debug',
     format: combine(

@@ -1,7 +1,26 @@
 'use strict';
 
 const serviceTypeRepository = require('../repositories/serviceTypeRepository');
+const serviceCategoryRepository = require('../repositories/serviceCategoryRepository');
 const logger = require('../utils/logger');
+
+/**
+ * Throw a clean 422 if service_category_id is set but doesn't refer to a
+ * real, non-deleted category for this company. Without this check, a bad ID
+ * reaches Postgres as a raw, uncaught foreign-key-violation error — which in
+ * production comes back to the caller as an opaque, unlogged-to-console 500
+ * (see src/utils/response.js's prod redaction) instead of a clear 422.
+ */
+const assertCategoryExists = async (serviceCategoryId, companyId) => {
+  if (!serviceCategoryId) return;
+
+  const category = await serviceCategoryRepository.findById(serviceCategoryId, companyId);
+  if (!category) {
+    const err = new Error(`Service category ${serviceCategoryId} not found.`);
+    err.statusCode = 422;
+    throw err;
+  }
+};
 
 /**
  * ServiceType Service
@@ -59,6 +78,8 @@ const create = async (data, userId, companyId) => {
     throw err;
   }
 
+  await assertCategoryExists(data.service_category_id, companyId);
+
   const payload = {
     ...data,
     company_id: companyId,
@@ -101,6 +122,8 @@ const update = async (id, data, userId, companyId) => {
       throw err;
     }
   }
+
+  await assertCategoryExists(data.service_category_id, companyId);
 
   const payload = { ...data, updated_by: userId };
   const updated = await serviceTypeRepository.update(id, payload, companyId);

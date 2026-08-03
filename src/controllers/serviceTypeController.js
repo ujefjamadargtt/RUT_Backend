@@ -24,7 +24,7 @@ const getAllServiceTypes = async (req, res) => {
     const serviceTypes = await serviceTypeService.getAll(req.query, req.companyId);
     return sendSuccess(res, serviceTypes, 'Service types fetched successfully.');
   } catch (error) {
-    logger.error('getAllServiceTypes error', { error: error.message });
+    logger.error('getAllServiceTypes error', { error: error.message, stack: error.stack });
     return sendError(res, error.message, error.statusCode || 500);
   }
 };
@@ -45,7 +45,7 @@ const getServiceTypeById = async (req, res) => {
     if (error.statusCode === 404) {
       return sendNotFound(res, 'Service type');
     }
-    logger.error('getServiceTypeById error', { error: error.message, id: req.params.id });
+    logger.error('getServiceTypeById error', { error: error.message, stack: error.stack, id: req.params.id });
     return sendError(res, error.message, error.statusCode || 500);
   }
 };
@@ -61,7 +61,7 @@ const createServiceType = async (req, res) => {
     if (error.statusCode === 409) {
       return sendError(res, error.message, 409);
     }
-    logger.error('createServiceType error', { error: error.message, userId: req.userId });
+    logger.error('createServiceType error', { error: error.message, stack: error.stack, userId: req.userId });
     return sendError(res, error.message, error.statusCode || 500);
   }
 };
@@ -85,7 +85,7 @@ const updateServiceType = async (req, res) => {
     if (error.statusCode === 409) {
       return sendError(res, error.message, 409);
     }
-    logger.error('updateServiceType error', { error: error.message, id: req.params.id });
+    logger.error('updateServiceType error', { error: error.message, stack: error.stack, id: req.params.id });
     return sendError(res, error.message, error.statusCode || 500);
   }
 };
@@ -99,7 +99,7 @@ const deleteServiceType = async (req, res) => {
     return sendNoContent(res);
   } catch (error) {
     if (error.statusCode === 404) return sendNotFound(res, 'Service type');
-    logger.error('deleteServiceType error', { error: error.message, id: req.params.id });
+    logger.error('deleteServiceType error', { error: error.message, stack: error.stack, id: req.params.id });
     return sendError(res, error.message, error.statusCode || 500);
   }
 };
