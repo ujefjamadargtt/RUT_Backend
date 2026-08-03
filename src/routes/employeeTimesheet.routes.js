@@ -83,7 +83,7 @@ router.get(
  * @swagger
  * /employee-timesheets/monthly-summary:
  *   get:
- *     summary: Total hours per Service PO for one month, plus grand total
+ *     summary: Total hours per Service PO for one month, plus a day-by-day breakdown matrix
  *     tags: [Employee Timesheet]
  *     security:
  *       - bearerAuth: []

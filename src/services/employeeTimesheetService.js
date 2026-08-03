@@ -277,34 +277,119 @@ const getDailyEntries = async (employeeId, date, companyId) => {
   return rows;
 };
 
+const INTERNAL_ROW_LABEL = 'Internal';
+
 /**
- * Monthly Summary: total hours per Service PO for the month. Purely
- * informational at this stage — this is NOT the 176-hour official cap
- * (that only applies once entries are synced into `timesheets`).
+ * Monthly Summary: total hours per Service PO for the month, plus a
+ * day-by-day breakdown (Service PO rows x day-of-month columns) for the
+ * frontend matrix view. Purely informational at this stage — this is NOT
+ * the 176-hour official cap (that only applies once entries are synced into
+ * `timesheets`).
+ *
+ * Every row is one of the employee's currently-mapped Service POs (same set
+ * '/projects' returns) — hours always show under the actual PO's own name,
+ * even a PO whose is_billable flag is false (e.g. "Idle"). Only entries left
+ * over from a Service PO the employee is no longer actively mapped to (the
+ * mapping was removed after the hours were logged) fall into a catch-all
+ * "Internal" row.
  *
  * @param {number} employeeId
  * @param {number} month
  * @param {number} year
  * @param {number} companyId
- * @returns {Promise<{ byServicePO: Array, totalHours: number }>}
+ * @returns {Promise<{ byServicePO: Array, totalHours: number, days: number[], rows: Array, columnTotals: object, grandTotal: number }>}
  */
 const getMonthlySummary = async (employeeId, month, year, companyId) => {
-  const byServicePO = await employeeWorkLogRepository.getMonthlySummary({ employeeId, month, year, companyId });
+  const [byServicePORows, dayBreakdownRows, mappings] = await Promise.all([
+    employeeWorkLogRepository.getMonthlySummary({ employeeId, month, year, companyId }),
+    employeeWorkLogRepository.getMonthlyDayBreakdown({ employeeId, month, year, companyId }),
+    employeeServicePOMappingRepository.findByEmployee(employeeId, companyId, 'active'),
+  ]);
 
-  const totalHours = byServicePO.reduce(
+  const totalHours = byServicePORows.reduce(
     (sum, row) => sum + (parseFloat(row.get('total_hours')) || 0),
     0
   );
 
+  const byServicePO = byServicePORows.map((row) => ({
+    servicePOId: row.service_po_id,
+    servicePOCode: row.servicePO?.service_po_code,
+    servicePOName: row.servicePO?.service_po_name,
+    totalHours: parseFloat(row.get('total_hours')) || 0,
+    entryCount: parseInt(row.get('entry_count'), 10) || 0,
+  }));
+
+  const { endDate } = dateHelper.getMonthBounds(month, year);
+  const daysInMonth = parseInt(endDate.split('-')[2], 10);
+  const days = Array.from({ length: daysInMonth }, (_, i) => i + 1);
+  const emptyHoursByDay = () => days.reduce((acc, d) => ({ ...acc, [d]: 0 }), {});
+
+  const rowsByKey = new Map();
+  const mappedPOsById = new Map();
+  // Seed every currently-mapped Service PO up front (same source as
+  // getMappedProjects/'/projects') so a PO with zero hours this month still
+  // shows up as an all-zero row instead of being silently dropped.
+  for (const mapping of mappings) {
+    if (!mapping.servicePO) continue;
+    mappedPOsById.set(mapping.servicePO.id, mapping.servicePO);
+    rowsByKey.set(`po-${mapping.servicePO.id}`, {
+      servicePOId: mapping.servicePO.id,
+      label: mapping.servicePO.service_po_name,
+      hoursByDay: emptyHoursByDay(),
+      total: 0,
+    });
+  }
+
+  for (const row of dayBreakdownRows) {
+    const servicePO = mappedPOsById.get(row.service_po_id);
+    const day = parseInt(row.day, 10);
+    const hours = parseFloat(row.total_hours) || 0;
+
+    const key = servicePO ? `po-${row.service_po_id}` : 'internal';
+    if (!rowsByKey.has(key)) {
+      rowsByKey.set(key, {
+        servicePOId: servicePO ? row.service_po_id : null,
+        label: servicePO ? servicePO.service_po_name : INTERNAL_ROW_LABEL,
+        hoursByDay: emptyHoursByDay(),
+        total: 0,
+      });
+    }
+    const bucket = rowsByKey.get(key);
+    bucket.hoursByDay[day] += hours;
+    bucket.total += hours;
+  }
+
+  const round2 = (n) => Math.round(n * 100) / 100;
+
+  const mappedRows = [...rowsByKey.values()]
+    .filter((row) => row.servicePOId !== null)
+    .sort((a, b) => a.label.localeCompare(b.label));
+  const internalRow = rowsByKey.get('internal');
+  const orderedRows = internalRow ? [...mappedRows, internalRow] : mappedRows;
+
+  const rows = orderedRows.map((row) => ({
+    servicePOId: row.servicePOId,
+    label: row.label,
+    hoursByDay: Object.fromEntries(
+      Object.entries(row.hoursByDay).map(([d, h]) => [d, round2(h)])
+    ),
+    total: round2(row.total),
+  }));
+
+  const columnTotals = emptyHoursByDay();
+  for (const row of orderedRows) {
+    for (const day of days) columnTotals[day] += row.hoursByDay[day];
+  }
+
   return {
-    byServicePO: byServicePO.map((row) => ({
-      servicePOId: row.service_po_id,
-      servicePOCode: row.servicePO?.service_po_code,
-      servicePOName: row.servicePO?.service_po_name,
-      totalHours: parseFloat(row.get('total_hours')) || 0,
-      entryCount: parseInt(row.get('entry_count'), 10) || 0,
-    })),
-    totalHours: Math.round(totalHours * 100) / 100,
+    byServicePO,
+    totalHours: round2(totalHours),
+    days,
+    rows,
+    columnTotals: Object.fromEntries(
+      Object.entries(columnTotals).map(([d, h]) => [d, round2(h)])
+    ),
+    grandTotal: round2(orderedRows.reduce((sum, row) => sum + row.total, 0)),
   };
 };
 

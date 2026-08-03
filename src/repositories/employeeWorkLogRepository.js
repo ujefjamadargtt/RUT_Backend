@@ -233,6 +233,44 @@ const getMonthlySummary = async ({ employeeId, month, year, companyId }) => {
 };
 
 /**
+ * Monthly Day Breakdown — hours per Service PO per calendar day, for one
+ * employee/month. Same source/scope as getMonthlySummary (all of the
+ * employee's own employee_work_logs rows for the month, pending or synced),
+ * just also grouped by day-of-month so the caller can build a day-by-day
+ * matrix. No join needed — the service layer maps service_po_id against the
+ * employee's currently-mapped Service POs itself.
+ * @param {object} params - { employeeId, month, year, companyId }
+ * @returns {Promise<Array<{ service_po_id, day, total_hours }>>}
+ */
+const getMonthlyDayBreakdown = async ({ employeeId, month, year, companyId }) => {
+  const monthNum = parseInt(month, 10);
+  const yearNum = parseInt(year, 10);
+  if (!Number.isInteger(monthNum) || !Number.isInteger(yearNum)) {
+    throw new Error(`getMonthlyDayBreakdown: month/year must be numbers (got month=${month}, year=${year}).`);
+  }
+
+  const rows = await EmployeeWorkLog.findAll({
+    attributes: [
+      'service_po_id',
+      [literal('EXTRACT(DAY FROM work_date)'), 'day'],
+      [fn('SUM', col('hours')), 'total_hours'],
+    ],
+    where: {
+      [Op.and]: [
+        literal(`EXTRACT(MONTH FROM work_date) = ${monthNum}`),
+        literal(`EXTRACT(YEAR  FROM work_date) = ${yearNum}`),
+      ],
+      employee_id: parseInt(employeeId, 10),
+      company_id: companyId,
+    },
+    group: ['service_po_id', literal('EXTRACT(DAY FROM work_date)')],
+    raw: true,
+  });
+
+  return rows;
+};
+
+/**
  * ALL work log rows for one company/month/year (regardless of status),
  * joined with Employee/ServicePO/SubProject — the ONLY data source for the
  * Admin "Sync Employee Work Logs" flow (see timesheetService.previewPmsImport
@@ -372,6 +410,7 @@ module.exports = {
   getDailyHours,
   getCalendarSummary,
   getMonthlySummary,
+  getMonthlyDayBreakdown,
   findForSync,
   markSyncedByTuples,
   revertSyncStatusByImportIds,
