@@ -70,7 +70,17 @@ CREATE INDEX IF NOT EXISTS idx_service_categories_company_id ON service_categori
 
 -- 4. Uniqueness + check constraints under the exact names the app and later
 --    migrations already assume exist.
+--
+--    uq_service_categories_company_name may already exist here as a plain
+--    index rather than a table constraint — that happens when a prior
+--    Sequelize model-level `indexes:` sync created it directly, instead of
+--    the ALTER TABLE ... ADD CONSTRAINT this migration uses. DROP CONSTRAINT
+--    IF EXISTS only looks in pg_constraint and silently no-ops against a
+--    bare index of the same name, so ADD CONSTRAINT's implicit backing index
+--    then collides with it ("relation ... already exists"). Drop both forms
+--    before recreating it as a real constraint.
 ALTER TABLE service_categories DROP CONSTRAINT IF EXISTS uq_service_categories_company_name;
+DROP INDEX IF EXISTS uq_service_categories_company_name;
 ALTER TABLE service_categories
   ADD CONSTRAINT uq_service_categories_company_name UNIQUE (company_id, name);
 
@@ -90,7 +100,11 @@ CREATE TRIGGER trg_service_categories_updated_at BEFORE UPDATE ON service_catego
 --    cascade-delete the service_type itself.
 ALTER TABLE service_types ADD COLUMN IF NOT EXISTS service_category_id INT;
 
+-- Drop both the hand-written name (used locally) and Sequelize's
+-- default-generated name (<table>_<column>_fkey, what a model-driven sync
+-- would have produced instead) — whichever this database actually has.
 ALTER TABLE service_types DROP CONSTRAINT IF EXISTS fk_service_types_category;
+ALTER TABLE service_types DROP CONSTRAINT IF EXISTS service_types_service_category_id_fkey;
 ALTER TABLE service_types
   ADD CONSTRAINT fk_service_types_category
   FOREIGN KEY (service_category_id) REFERENCES service_categories (id)
