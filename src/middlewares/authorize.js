@@ -15,12 +15,13 @@ const logger = require('../utils/logger');
 // declarations:
 //  - "Super Admin": pre-existing business role (id=6) that predates
 //    per-route authorize() arrays and keeps its original full-access behavior.
-//  - "Company Admin": new per-company role from the multi-tenancy retrofit —
-//    "manages everything within their own company." Company-scoping is
-//    already fully enforced separately by resolveCompany, so this bypass
-//    only grants full CRUD within their own company, never cross-company
-//    reach.
-const SUPERUSER_ROLES = ['super admin', 'company admin'];
+//  - "BU Admin" (renamed from "Company Admin" — see
+//    database/migrations/20260807_rename_company_admin_to_bu_admin.sql): new
+//    per-company role from the multi-tenancy retrofit — "manages everything
+//    within their own company." Company-scoping is already fully enforced
+//    separately by resolveCompany, so this bypass only grants full CRUD
+//    within their own company, never cross-company reach.
+const SUPERUSER_ROLES = ['super admin', 'bu admin'];
 
 const authorize = (roles = []) => {
   if (typeof roles === 'string') {

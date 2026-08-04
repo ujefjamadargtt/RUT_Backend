@@ -36,12 +36,12 @@ const getById = async (req, res, next) => {
 
 /**
  * POST /api/v1/companies
- * Creates a company and its first Company Admin in one transaction.
+ * Creates a company and its first BU Admin in one transaction.
  */
 const create = async (req, res, next) => {
   try {
     const result = await companyService.createWithAdmin(req.body, req.userId, getIpAddress(req));
-    return sendCreated(res, result, 'Company and its first Company Admin created successfully.');
+    return sendCreated(res, result, 'Company and its first BU Admin created successfully.');
   } catch (err) {
     if (err.statusCode === 409) {
       return sendError(res, err.message, 409);

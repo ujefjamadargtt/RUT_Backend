@@ -73,6 +73,19 @@ module.exports = (sequelize) => {
           key: 'id',
         },
       },
+      // Optional tag for which Service PO Hierarchy node (Parent or Child —
+      // see ServicePOHierarchy.js) the hours were logged against. Purely
+      // for the employee's own selection UI/history; service_po_id above
+      // remains the required, authoritative field sync/import/reports read.
+      hierarchy_node_id: {
+        type: DataTypes.BIGINT,
+        allowNull: true,
+        references: {
+          model: 'service_po_hierarchy',
+          key: 'id',
+        },
+        onDelete: 'SET NULL',
+      },
       work_date: {
         type: DataTypes.DATEONLY,
         allowNull: false,
@@ -146,13 +159,17 @@ module.exports = (sequelize) => {
       underscored: true,
       createdAt: 'created_at',
       updatedAt: 'updated_at',
-      indexes: [
-        {
-          unique: true,
-          fields: ['employee_id', 'service_po_id', 'work_date'],
-          name: 'uq_employee_work_logs',
-        },
-      ],
+      // NOTE: uq_employee_work_logs is NOT declared here as a Sequelize
+      // model-level index. It's a functional unique index — UNIQUE on
+      // (employee_id, service_po_id, COALESCE(hierarchy_node_id, 0),
+      // work_date) — created directly by
+      // database/migrations/20260807_hierarchy_node_id_unique_scope.sql,
+      // which Sequelize's `indexes: [{ fields: [...] }]` shorthand can't
+      // express (it would emit a plain column list, and a plain multi-
+      // column UNIQUE never catches two NULL-hierarchy_node_id rows as
+      // duplicates of each other — see the migration's comment). The app
+      // enforces the same null-safe scope at the service layer via
+      // employeeWorkLogRepository.checkDuplicate.
     }
   );
 

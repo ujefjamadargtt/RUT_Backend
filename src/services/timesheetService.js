@@ -14,6 +14,7 @@ const { getPaginationParams, getPaginationMeta } = require('../utils/pagination'
 const dateHelper = require('../helpers/dateHelper');
 const { applyHoursVisibility } = require('../utils/hoursVisibility');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
+const timesheetPublishPolicy = require('../utils/timesheetPublishPolicy');
 
 /**
  * Map EmployeeWorkLog rows (Employee Self Timesheet module — ALL rows for
@@ -1222,6 +1223,12 @@ const confirmImport = async (importId, userId, ipAddress = null, companyId) => {
   const t = await sequelize.transaction();
 
   try {
+    // Resolved ONCE per import (not per row) — every row in the same
+    // confirm belongs to the same company, so is_publish is identical
+    // across the whole batch. See timesheetPublishPolicy.js for the rule
+    // itself (company-level, not per-user/per-role).
+    const isPublish = await timesheetPublishPolicy.resolveInitialIsPublish(companyId);
+
     const records = validRows.map((row) => ({
       employee_id:         row.employeeId,
       service_po_id:       row.poId,
@@ -1229,9 +1236,9 @@ const confirmImport = async (importId, userId, ipAddress = null, companyId) => {
       timesheet_date:      row.date,
       hours_logged:        row.hours,
       // modified_hours always starts out equal to hours_logged on creation
-      // — set here in application code, never left null. is_publish is left
-      // at its DB default (false).
+      // — set here in application code, never left null.
       modified_hours:      row.hours,
+      is_publish:          isPublish,
       company_id:          companyId,
       created_by:          userId,
       updated_by:          userId,
@@ -1256,13 +1263,17 @@ const confirmImport = async (importId, userId, ipAddress = null, companyId) => {
 
     const inserted = await timesheetRepository.bulkCreate(records, t);
 
-    // 5. Update history: completed (also stamp month/year from actual data)
+    // 5. Update history: completed (also stamp month/year from actual data).
+    // is_publish uses the SAME `isPublish` value just stamped onto every
+    // `records` row above — one resolution, applied to both tables, so
+    // they can never disagree (see timesheetPublishPolicy.js).
     await timesheetImportRepository.updateImportHistory(importId, {
       status:       'completed',
       valid_rows:   inserted.length,
       error_rows:   errorRows.length,
       import_month: importMonth,
       import_year:  importYear,
+      is_publish:   isPublish,
     }, null, companyId);
 
     // Persist any new error rows found on re-validation
@@ -1640,9 +1651,11 @@ const createTimesheet = async (data, companyId) => {
   const { client_id, service_type_id, service_category_id, ...insertData } = data;
   // modified_hours always starts out equal to hours_logged on creation —
   // set here in application code (not a DB default/trigger) so it's never
-  // left null on a new row. hours_logged itself is never touched by this;
-  // is_publish is left at its DB default (false) on create.
+  // left null on a new row. hours_logged itself is never touched by this.
+  // is_publish is resolved from the company's own flag — see
+  // timesheetPublishPolicy.js — not left at its DB default.
   insertData.modified_hours = insertData.hours_logged;
+  insertData.is_publish = await timesheetPublishPolicy.resolveInitialIsPublish(companyId);
   insertData.company_id = companyId;
   return timesheetRepository.create(insertData);
 };

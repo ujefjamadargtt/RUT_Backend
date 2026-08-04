@@ -19,6 +19,7 @@ const {
 } = require('../utils/loginTypeResolver');
 const logger = require('../utils/logger');
 const moment = require('moment-timezone');
+const { extractIsOriginalDataVisible } = require('../utils/timesheetPublishPolicy');
 
 /**
  * Parse a JWT expiry string such as "7d", "15m", "1h" into a future Date.
@@ -65,12 +66,28 @@ function sanitiseEmployee(employee) {
   return plain;
 }
 
-function serialiseRoles(roles) {
+/**
+ * Shape a user's active roles for the login/refresh-token response. The
+ * response KEY/STRUCTURE is unchanged (still one `is_original_data_visible`
+ * entry per role) — but its VALUE is now the user's COMPANY's own
+ * companies.is_original_data_visible (see database/migrations/
+ * 20260808_add_company_original_data_visibility.sql; call sites pass
+ * timesheetPublishPolicy.extractIsOriginalDataVisible(user.company)),
+ * stamped identically onto every role, instead of each role's own
+ * (unrelated, now-unused for this purpose) roles.is_original_data_visible
+ * column. Frontend-visible shape is byte-for-byte identical to before; only
+ * the data source changed.
+ *
+ * @param {object[]} roles
+ * @param {boolean} isOriginalDataVisible - the user's COMPANY's is_original_data_visible
+ * @returns {object[]}
+ */
+function serialiseRoles(roles, isOriginalDataVisible) {
   return roles.map((role) => ({
     id: role.id,
     name: role.role_name,
     permission: role.permission,
-    is_original_data_visible: role.is_original_data_visible,
+    is_original_data_visible: isOriginalDataVisible,
   }));
 }
 
@@ -263,7 +280,7 @@ async function authenticateUser(user, password, ipAddress, userAgent) {
     refreshToken,
     expiresIn,
     user: sanitiseUser(user),
-    roles: serialiseRoles(activeRoles),
+    roles: serialiseRoles(activeRoles, extractIsOriginalDataVisible(user.company)),
     forms,
   };
 }
@@ -555,7 +572,7 @@ async function refreshToken(refreshToken, ipAddress, userAgent) {
     refreshToken: tokens.refreshToken,
     expiresIn: tokens.expiresIn,
     user: sanitiseUser(user),
-    roles: serialiseRoles(activeRoles),
+    roles: serialiseRoles(activeRoles, extractIsOriginalDataVisible(user.company)),
     forms,
   };
 }

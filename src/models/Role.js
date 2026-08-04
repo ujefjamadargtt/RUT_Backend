@@ -53,13 +53,6 @@ module.exports = (sequelize) => {
           isIn: { args: [['active', 'inactive']], msg: 'Status must be active or inactive.' },
         },
       },
-      // Whether users assigned to this role may view original/raw data in
-      // the application. Defaults to false — hidden unless explicitly granted.
-      is_original_data_visible: {
-        type: DataTypes.BOOLEAN,
-        allowNull: false,
-        defaultValue: false,
-      },
       is_deleted: {
         type: DataTypes.BOOLEAN,
         allowNull: false,

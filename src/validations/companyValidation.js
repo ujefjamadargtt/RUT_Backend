@@ -10,7 +10,7 @@ const { passwordComplexity } = require('./userValidation');
  */
 
 /**
- * POST /companies — create a company + its first Company Admin, one transaction
+ * POST /companies — create a company + its first BU Admin, one transaction
  */
 const createCompanySchema = Joi.object({
   company_code: Joi.string()
@@ -50,14 +50,24 @@ const createCompanySchema = Joi.object({
     }),
 
   admin_password: passwordComplexity.required(),
+
+  // Drives the Original Timesheet publish rule (see
+  // src/utils/timesheetPublishPolicy.js) — see companies.is_original_data_visible's
+  // column comment in src/models/Company.js for the full rule.
+  is_original_data_visible: Joi.boolean().optional().default(false).messages({
+    'boolean.base': 'is_original_data_visible must be true or false.',
+  }),
 });
 
 /**
- * PATCH /companies/:id — update a company (name/status only)
+ * PATCH /companies/:id — update a company (name/status/is_original_data_visible)
  */
 const updateCompanySchema = Joi.object({
   company_name: Joi.string().trim().min(2).max(150).optional(),
   status: Joi.string().trim().lowercase().valid('active', 'inactive').optional(),
+  is_original_data_visible: Joi.boolean().optional().messages({
+    'boolean.base': 'is_original_data_visible must be true or false.',
+  }),
 })
   .min(1)
   .messages({ 'object.min': 'At least one field must be provided for update.' });

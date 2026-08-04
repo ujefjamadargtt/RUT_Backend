@@ -6,7 +6,7 @@ const router = express.Router();
 const employeeAuth = require('../middlewares/employeeAuth');
 const { validate } = require('../middlewares/validateRequest');
 const {
-  createEntrySchema,
+  replaceDailyEntriesSchema,
   updateEntrySchema,
   monthYearQuerySchema,
   dailyQuerySchema,
@@ -59,7 +59,7 @@ router.get(
  * @swagger
  * /employee-timesheets/daily:
  *   get:
- *     summary: All of the employee's own entries for one date
+ *     summary: Service PO -> Parent -> Child hierarchy with hours-per-node, for one date
  *     tags: [Employee Timesheet]
  *     security:
  *       - bearerAuth: []
@@ -70,7 +70,12 @@ router.get(
  *         schema: { type: string, format: date }
  *     responses:
  *       200:
- *         description: Daily entries
+ *         description: >
+ *           { date, service_pos: [{ service_po_id, service_po_name, hours,
+ *           po_total_hrs, children: [{ hierarchy_id, name, type, hours,
+ *           children? }] }] } — same schema as one entry of the Monthly
+ *           Summary array, so the frontend can reuse one rendering component
+ *           for both.
  */
 router.get(
   '/daily',
@@ -83,7 +88,7 @@ router.get(
  * @swagger
  * /employee-timesheets/monthly-summary:
  *   get:
- *     summary: Total hours per Service PO for one month, plus a day-by-day breakdown matrix
+ *     summary: Per-date Service PO -> Parent -> Child hierarchy with hours-per-node, for one month
  *     tags: [Employee Timesheet]
  *     security:
  *       - bearerAuth: []
@@ -98,7 +103,12 @@ router.get(
  *         schema: { type: integer }
  *     responses:
  *       200:
- *         description: Monthly summary
+ *         description: >
+ *           Array of { date, service_pos: [{ service_po_id, service_po_name,
+ *           hours, po_total_hrs, children: [{ hierarchy_id, name, type,
+ *           hours, children? }] }] } — one entry per calendar date, every
+ *           mapped Service PO and its complete hierarchy always present
+ *           (hours default to 0).
  */
 router.get(
   '/monthly-summary',
@@ -129,7 +139,12 @@ router.get(
  * @swagger
  * /employee-timesheets/entries:
  *   post:
- *     summary: Create a self-service timesheet entry
+ *     summary: >
+ *       REPLACE SAVE the employee's complete set of timesheet entries for
+ *       one date. Deletes every existing entry for (employee, date) and
+ *       reinserts exactly the given `entries` list, in one transaction —
+ *       never a duplicate-entry error. Pass an empty `entries` array to
+ *       clear the date entirely.
  *     tags: [Employee Timesheet]
  *     security:
  *       - bearerAuth: []
@@ -139,27 +154,34 @@ router.get(
  *         application/json:
  *           schema:
  *             type: object
- *             required: [service_po_id, hours, description, timesheet_date]
+ *             required: [timesheet_date, entries]
  *             properties:
- *               service_po_id: { type: integer }
- *               sub_project_id: { type: integer }
- *               hours: { type: number }
- *               description: { type: string }
  *               timesheet_date: { type: string, format: date }
+ *               entries:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [service_po_id, hours, description]
+ *                   properties:
+ *                     service_po_id: { type: integer }
+ *                     sub_project_id: { type: integer }
+ *                     hierarchy_node_id: { type: integer }
+ *                     hours: { type: number }
+ *                     description: { type: string }
  *     responses:
- *       201:
- *         description: Entry created
+ *       200:
+ *         description: The date's entries after the replace (array)
  *       400:
- *         description: Future date, or daily/monthly hour cap exceeded
+ *         description: Future date, daily hour cap exceeded, or duplicate (service_po_id, hierarchy_node_id) within the payload
  *       403:
- *         description: Service PO not mapped to this employee
- *       409:
- *         description: Duplicate entry for this date/PO
+ *         description: A Service PO in the payload is not mapped to this employee
+ *       422:
+ *         description: Validation error
  */
 router.post(
   '/entries',
   employeeAuth,
-  validate(createEntrySchema),
+  validate(replaceDailyEntriesSchema),
   controller.createEntry
 );
 

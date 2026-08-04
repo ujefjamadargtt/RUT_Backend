@@ -41,6 +41,7 @@ const ServiceCategory        = require('./ServiceCategory')(sequelize);
 const ServiceType            = require('./ServiceType')(sequelize);
 const ServicePO              = require('./ServicePO')(sequelize);
 const ServicePOResource      = require('./ServicePOResource')(sequelize);
+const ServicePOHierarchy     = require('./ServicePOHierarchy')(sequelize);
 const SubProject             = require('./SubProject')(sequelize);
 const MonthlyCost            = require('./MonthlyCost')(sequelize);
 const Timesheet              = require('./Timesheet')(sequelize);
@@ -233,6 +234,21 @@ EmployeeWorkLog.belongsTo(SubProject, { foreignKey: 'sub_project_id', as: 'subPr
 TimesheetImportHistory.hasMany(EmployeeWorkLog, { foreignKey: 'timesheet_import_id', as: 'syncedWorkLogs', onDelete: 'SET NULL' });
 EmployeeWorkLog.belongsTo(TimesheetImportHistory, { foreignKey: 'timesheet_import_id', as: 'importHistory', onDelete: 'SET NULL' });
 
+// Service PO Hierarchy — Parent/Child nodes belonging to exactly one
+// Service PO (max depth 2: Service PO -> Parent -> Child; a CHILD can never
+// itself be a parent_hierarchy_id target — enforced in
+// servicePOHierarchyService.js, not by these associations).
+ServicePO.hasMany(ServicePOHierarchy, { foreignKey: 'service_po_id', as: 'hierarchyNodes' });
+ServicePOHierarchy.belongsTo(ServicePO, { foreignKey: 'service_po_id', as: 'servicePO' });
+ServicePOHierarchy.belongsTo(ServicePOHierarchy, { foreignKey: 'parent_hierarchy_id', as: 'parentNode' });
+ServicePOHierarchy.hasMany(ServicePOHierarchy, { foreignKey: 'parent_hierarchy_id', as: 'children' });
+
+// EmployeeWorkLog <-> ServicePOHierarchy — optional tag alongside the
+// existing, required service_po_id (see EmployeeWorkLog.js's
+// hierarchy_node_id doc comment). onDelete: 'SET NULL' matches the FK.
+ServicePOHierarchy.hasMany(EmployeeWorkLog, { foreignKey: 'hierarchy_node_id', as: 'workLogs', onDelete: 'SET NULL' });
+EmployeeWorkLog.belongsTo(ServicePOHierarchy, { foreignKey: 'hierarchy_node_id', as: 'hierarchyNode', onDelete: 'SET NULL' });
+
 // Forgot Password module — User/Employee <-> PasswordResetOtp/PasswordResetHistory
 User.hasMany(PasswordResetOtp, { foreignKey: 'user_id', as: 'passwordResetOtps' });
 PasswordResetOtp.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
@@ -262,6 +278,7 @@ module.exports = {
   ServiceType,
   ServicePO,
   ServicePOResource,
+  ServicePOHierarchy,
   SubProject,
   MonthlyCost,
   Timesheet,

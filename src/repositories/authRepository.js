@@ -25,23 +25,29 @@ async function findUserByEmail(email) {
     where: {
       email: email.toLowerCase().trim(),
     },
+    // The Role includes below deliberately do NOT list
+    // is_original_data_visible, and the Company include below deliberately
+    // DOES: the login response's roles[].is_original_data_visible is sourced
+    // from the user's COMPANY (see authService.js's serialiseRoles()), not
+    // from Role, and not from a users-table column — see
+    // database/migrations/20260808_add_company_original_data_visibility.sql.
     include: [
       {
         model: Role,
         as: 'role',
-        attributes: ['id', 'role_name', 'permission', 'status', 'is_original_data_visible'],
+        attributes: ['id', 'role_name', 'permission', 'status'],
       },
       {
         model: Role,
         as: 'roles',
-        attributes: ['id', 'role_name', 'permission', 'status', 'is_original_data_visible'],
+        attributes: ['id', 'role_name', 'permission', 'status'],
         through: { attributes: [] },
         required: false,
       },
       {
         model: Company,
         as: 'company',
-        attributes: ['id', 'company_code', 'company_name', 'status'],
+        attributes: ['id', 'company_code', 'company_name', 'status', 'is_original_data_visible'],
         required: false,
       },
     ],
@@ -63,12 +69,12 @@ async function findUserById(id) {
       {
         model: Role,
         as: 'role',
-        attributes: ['id', 'role_name', 'permission', 'status', 'is_original_data_visible'],
+        attributes: ['id', 'role_name', 'permission', 'status'],
       },
       {
         model: Role,
         as: 'roles',
-        attributes: ['id', 'role_name', 'permission', 'status', 'is_original_data_visible'],
+        attributes: ['id', 'role_name', 'permission', 'status'],
         through: { attributes: [] },
         required: false,
       },
@@ -233,18 +239,30 @@ async function findSession(refreshToken) {
       {
         model: User,
         as: 'user',
-        attributes: ['id', 'email', 'role_id', 'employee_id', 'status'],
+        attributes: ['id', 'email', 'role_id', 'employee_id', 'company_id', 'status'],
         include: [
           {
             model: Role,
             as: 'role',
-            attributes: ['id', 'role_name', 'permission', 'status', 'is_original_data_visible'],
+            attributes: ['id', 'role_name', 'permission', 'status'],
           },
           {
             model: Role,
             as: 'roles',
-            attributes: ['id', 'role_name', 'permission', 'status', 'is_original_data_visible'],
+            attributes: ['id', 'role_name', 'permission', 'status'],
             through: { attributes: [] },
+            required: false,
+          },
+          // is_original_data_visible sourced from the user's COMPANY, not
+          // from Role or a users-table column — see authService.js's
+          // serialiseRoles() and database/migrations/
+          // 20260808_add_company_original_data_visibility.sql. Without this
+          // include, refreshToken()'s serialiseRoles() call would always
+          // see it as undefined.
+          {
+            model: Company,
+            as: 'company',
+            attributes: ['id', 'is_original_data_visible'],
             required: false,
           },
         ],

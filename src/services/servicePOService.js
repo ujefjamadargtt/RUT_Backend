@@ -2,6 +2,9 @@
 
 const servicePORepository = require('../repositories/servicePORepository');
 const clientRepository = require('../repositories/clientRepository');
+const servicePOHierarchyRepository = require('../repositories/servicePOHierarchyRepository');
+const timesheetRepository = require('../repositories/timesheetRepository');
+const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
 const { Employee } = require('../models');
 const { generatePOCode } = require('../helpers/codeGenerator');
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
@@ -454,6 +457,29 @@ const getActivePOs = async (companyId) => {
   return servicePORepository.getActivePOs(companyId);
 };
 
+/**
+ * Whether any work log entry exists anywhere in this Service PO's
+ * hierarchy — the Main PO itself, or any Parent/Child node under it —
+ * across BOTH work-log sources: the official `timesheets` table and the
+ * Employee Self Timesheet draft table (`employee_work_logs`). Used as the
+ * delete guard in deleteServicePO() below; nowhere else.
+ *
+ * @param {number} servicePOId
+ * @param {number} companyId
+ * @returns {Promise<boolean>}
+ */
+async function hasWorkLogsInHierarchy(servicePOId, companyId) {
+  const hierarchyNodes = await servicePOHierarchyRepository.findByServicePO(servicePOId);
+  const hierarchyNodeIds = hierarchyNodes.map((node) => node.id);
+
+  const [hasTimesheets, hasEmployeeWorkLogs] = await Promise.all([
+    timesheetRepository.existsForServicePO(servicePOId, companyId),
+    employeeWorkLogRepository.existsForServicePOOrHierarchy(servicePOId, hierarchyNodeIds, companyId),
+  ]);
+
+  return hasTimesheets || hasEmployeeWorkLogs;
+}
+
 const deleteServicePO = async (id, userId, companyId) => {
   const existing = await servicePORepository.findById(id, companyId);
   if (!existing) {
@@ -461,6 +487,15 @@ const deleteServicePO = async (id, userId, companyId) => {
     err.statusCode = 404;
     throw err;
   }
+
+  if (await hasWorkLogsInHierarchy(id, companyId)) {
+    const err = new Error(
+      'This Service PO cannot be deleted because work log entries exist for this Service PO or its hierarchy.'
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+
   await servicePORepository.softDelete(id, userId, companyId);
 };
 

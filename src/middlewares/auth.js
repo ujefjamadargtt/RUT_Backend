@@ -7,6 +7,33 @@ const logger = require('../utils/logger');
 const resolveCompany = require('./resolveCompany');
 
 /**
+ * Routes Platform Admin may reach despite being platform-only by default
+ * (see the block in authenticate() below). Grown alongside RBAC restricting
+ * the "Roles" and "Forms" admin screens — Form Master, Role Master, and
+ * their role_form_mapping rows — to Platform Admin ONLY (see
+ * rbacService.js's assertFormRoleMappingAllowed() and
+ * database/migrations/20260807_restrict_admin_forms_to_platform_admin.sql):
+ * Platform Admin must be able to reach the routes that manage those two
+ * screens, not just company provisioning.
+ *
+ * role.routes.js and rbac.routes.js are both mounted at the same
+ * `/api/v1/roles` baseUrl (see app.js), so req.path (the part after baseUrl)
+ * is what distinguishes Role Master CRUD (`/`, `/:id`) and role-form-mapping
+ * endpoints (`/forms`, `/forms/mapping`, `/form-mappings...`) from
+ * `/user-mappings/...` — assigning roles to business users is a business-data
+ * concern, not part of Form/Role Master, and stays blocked.
+ *
+ * @param {import('express').Request} req
+ * @returns {boolean}
+ */
+function isPlatformAdminAllowedRoute(req) {
+  if (req.baseUrl.endsWith('/companies')) return true;
+  if (req.baseUrl.endsWith('/forms')) return true;
+  if (req.baseUrl.endsWith('/roles') && !req.path.startsWith('/user-mappings')) return true;
+  return false;
+}
+
+/**
  * JWT Authentication Middleware
  * Extracts Bearer token, verifies it, loads the user, and attaches to req.user.
  */
@@ -76,12 +103,12 @@ const authenticate = async (req, res, next) => {
         {
           model: Role,
           as: 'role',
-          attributes: ['id', 'role_name', 'permission', 'status', 'is_original_data_visible'],
+          attributes: ['id', 'role_name', 'permission', 'status'],
         },
         {
           model: Role,
           as: 'roles',
-          attributes: ['id', 'role_name', 'permission', 'status', 'is_original_data_visible'],
+          attributes: ['id', 'role_name', 'permission', 'status'],
           through: { attributes: [] },
           required: false,
         },
@@ -141,20 +168,22 @@ const authenticate = async (req, res, next) => {
     // column) wherever a handler needs role id/permission, not just the name.
     req.activeRoles = activeRoles;
 
-    // Platform Admin is platform-only (provisions companies, nothing else —
-    // see the multi-tenancy retrofit spec). Most business routes rely solely
-    // on per-route authorize([...]) arrays for role gating, but many read
-    // (GET) endpoints have no authorize() call at all and are open to any
-    // authenticated role. Since resolveCompany deliberately no-ops for
-    // is_platform_admin (it has no company_id to resolve), req.companyId
-    // would stay undefined on those routes — crashing repositories that
-    // require it, or silently returning unscoped, cross-company data in the
-    // ones with an optional-companyId fallback. Block here, centrally,
-    // before that gap can be reached, rather than adding authorize() to
-    // every unprotected route. company.routes.js (the one place Platform
-    // Admin is actually meant to operate) is exempted; requirePlatformAdmin
-    // still separately gates it from everyone else.
-    if (user.is_platform_admin && !req.baseUrl.endsWith('/companies')) {
+    // Platform Admin is platform-only (provisions companies, plus manages
+    // Form/Role Master and their mappings — see isPlatformAdminAllowedRoute()
+    // above — nothing else). Most business routes rely solely on per-route
+    // authorize([...]) arrays for role gating, but many read (GET) endpoints
+    // have no authorize() call at all and are open to any authenticated
+    // role. Since resolveCompany deliberately no-ops for is_platform_admin
+    // (it has no company_id to resolve), req.companyId would stay undefined
+    // on those routes — crashing repositories that require it, or silently
+    // returning unscoped, cross-company data in the ones with an
+    // optional-companyId fallback. Block here, centrally, before that gap
+    // can be reached, rather than adding authorize() to every unprotected
+    // route. requirePlatformAdmin still separately gates /companies from
+    // everyone else; the Form/Role Master routes rely on
+    // rbacService.assertFormRoleMappingAllowed for the equivalent guarantee
+    // on the role_form_mapping side.
+    if (user.is_platform_admin && !isPlatformAdminAllowedRoute(req)) {
       logger.warn('Platform Admin blocked from business route', {
         userId: user.id,
         path: req.originalUrl,

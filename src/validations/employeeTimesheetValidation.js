@@ -7,18 +7,22 @@ const Joi = require('joi');
  */
 
 /**
- * POST /employee-timesheets/entries
- * Project, description, and hours are all mandatory; hours must be > 0 and
- * <= 12 (the daily cap is also enforced across ALL of a day's entries at
- * the service layer — this per-field bound just rejects an obviously
- * invalid single value early).
+ * A single line item within a POST /employee-timesheets/entries REPLACE SAVE
+ * payload — no timesheet_date of its own (the whole array shares the one
+ * top-level date), no duplicate-entry concerns (the service layer wipes and
+ * reinserts every entry for that date in one transaction, so there is no
+ * "existing" row to collide with — see replaceDailyEntriesSchema).
  */
-const createEntrySchema = Joi.object({
+const dailyEntryLineSchema = Joi.object({
   service_po_id: Joi.number().integer().positive().required().messages({
     'any.required': 'Service PO is required.',
     'number.base': 'Service PO must be a number.',
   }),
   sub_project_id: Joi.number().integer().positive().optional().allow(null),
+  // Optional: which Service PO Hierarchy node (Parent or Child) the hours
+  // are logged against — see servicePOHierarchyService.js. Purely a tag
+  // alongside service_po_id, which stays the required/authoritative field.
+  hierarchy_node_id: Joi.number().integer().positive().optional().allow(null),
   hours: Joi.number().positive().max(12).required().messages({
     'any.required': 'Hours is required.',
     'number.base': 'Hours must be a number.',
@@ -30,9 +34,25 @@ const createEntrySchema = Joi.object({
     'string.min': 'Description cannot be empty.',
     'string.max': 'Description cannot exceed 2000 characters.',
   }),
+});
+
+/**
+ * POST /employee-timesheets/entries
+ * REPLACE SAVE: the frontend always sends the COMPLETE set of entries for
+ * one employee/date — the service layer deletes every existing entry for
+ * that date and reinserts exactly this list, in one transaction. An empty
+ * `entries` array is valid — it means "clear this date's timesheet
+ * entirely." The 12-hour/day cap is validated at the service layer against
+ * the SUM of this array's `hours`, not per line.
+ */
+const replaceDailyEntriesSchema = Joi.object({
   timesheet_date: Joi.date().iso().required().messages({
     'any.required': 'Date is required.',
     'date.format': 'Date must be in ISO format (YYYY-MM-DD).',
+  }),
+  entries: Joi.array().items(dailyEntryLineSchema).required().messages({
+    'any.required': 'entries is required.',
+    'array.base': 'entries must be an array.',
   }),
 });
 
@@ -42,6 +62,7 @@ const createEntrySchema = Joi.object({
 const updateEntrySchema = Joi.object({
   service_po_id: Joi.number().integer().positive().optional(),
   sub_project_id: Joi.number().integer().positive().optional().allow(null),
+  hierarchy_node_id: Joi.number().integer().positive().optional().allow(null),
   hours: Joi.number().positive().max(12).optional().messages({
     'number.positive': 'Hours must be greater than 0.',
     'number.max': 'Hours cannot exceed 12 per day.',
@@ -83,7 +104,7 @@ const dailyQuerySchema = Joi.object({
 });
 
 module.exports = {
-  createEntrySchema,
+  replaceDailyEntriesSchema,
   updateEntrySchema,
   monthYearQuerySchema,
   dailyQuerySchema,

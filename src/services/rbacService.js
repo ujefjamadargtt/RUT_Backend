@@ -62,6 +62,59 @@ async function ensureFormExists(formId) {
   }
 }
 
+// The "Roles" and "Forms" admin screens (seeded in database/rbac_seed.sql,
+// module "Administration") ARE the RBAC configuration surface itself — they
+// manage which roles/forms exist system-wide. Per
+// database/migrations/20260807_restrict_admin_forms_to_platform_admin.sql,
+// these may ONLY ever be mapped to the "Platform Admin" role.
+const RESTRICTED_ADMIN_FORMS = [
+  { moduleName: 'Administration', formName: 'Roles' },
+  { moduleName: 'Administration', formName: 'Forms' },
+];
+const PLATFORM_ADMIN_ROLE_NAME = 'Platform Admin';
+
+/**
+ * Resolve the current ids behind RESTRICTED_ADMIN_FORMS and the Platform
+ * Admin role — looked up fresh on every call (cheap queries against small,
+ * rarely-changing tables) rather than cached, so a form/role rename takes
+ * effect immediately rather than needing a process restart.
+ * @returns {Promise<{ restrictedFormIds: Set<number>, platformAdminRoleId: number|null }>}
+ */
+async function loadFormRoleMappingGuardData() {
+  const [forms, platformAdminRole] = await Promise.all([
+    Promise.all(RESTRICTED_ADMIN_FORMS.map((f) => formRepository.findByName(f.moduleName, f.formName))),
+    roleRepository.findByName(PLATFORM_ADMIN_ROLE_NAME),
+  ]);
+
+  return {
+    restrictedFormIds: new Set(forms.filter(Boolean).map((f) => f.id)),
+    platformAdminRoleId: platformAdminRole ? platformAdminRole.id : null,
+  };
+}
+
+/**
+ * Enforce that the "Roles"/"Forms" admin screens stay mapped to Platform
+ * Admin ONLY: reject mapping either of them onto any other role, and reject
+ * unmapping Platform Admin's own access (it must always stay mapped). A
+ * no-op for every other (role, form) pair. Called from both the single-pair
+ * mapForm() and the bulk replaceRoleFormMappings() below, since either can
+ * otherwise change this mapping.
+ * @param {number} roleId
+ * @param {number} formId
+ * @param {boolean} status - true = map/activate, false = unmap/deactivate
+ */
+async function assertFormRoleMappingAllowed(roleId, formId, status) {
+  const { restrictedFormIds, platformAdminRoleId } = await loadFormRoleMappingGuardData();
+  if (!restrictedFormIds.has(formId)) return;
+
+  if (roleId !== platformAdminRoleId && status) {
+    fail('This form can only be mapped to the Platform Admin role.', 403);
+  }
+  if (roleId === platformAdminRoleId && !status) {
+    fail('This form must always stay mapped to the Platform Admin role and cannot be unmapped.', 403);
+  }
+}
+
 // ── User <-> Role mappings ───────────────────────────────────────────────────
 
 /**
@@ -224,6 +277,7 @@ const deleteRoleFormMapping = async ({ role_id: roleId, form_id: formId }, actor
 const mapForm = async ({ roleId, formId, status }, actorId, ipAddress) => {
   await ensureRoleExists(roleId);
   await ensureFormExists(formId);
+  await assertFormRoleMappingAllowed(roleId, formId, status);
 
   const { mapping, created } = await rbacRepository.upsertRoleFormMapping(roleId, formId, status);
 
@@ -258,6 +312,26 @@ const replaceRoleFormMappings = async (roleId, formIds, actorId, ipAddress) => {
   await ensureRoleExists(roleId);
   for (const formId of formIds) {
     await ensureFormExists(formId);
+  }
+
+  // This bulk replace bypasses mapForm(), so it needs its own check: any
+  // restricted form (see assertFormRoleMappingAllowed) being ADDED for a
+  // non-Platform-Admin role, or OMITTED (i.e. implicitly unmapped) for
+  // Platform Admin, is rejected — same rule, applied to the whole set at once.
+  const { restrictedFormIds, platformAdminRoleId } = await loadFormRoleMappingGuardData();
+  if (restrictedFormIds.size > 0) {
+    const requestedFormIds = new Set(formIds);
+    if (roleId !== platformAdminRoleId) {
+      const disallowed = formIds.some((formId) => restrictedFormIds.has(formId));
+      if (disallowed) {
+        fail('This form can only be mapped to the Platform Admin role.', 403);
+      }
+    } else {
+      const missing = [...restrictedFormIds].some((formId) => !requestedFormIds.has(formId));
+      if (missing) {
+        fail('This form must always stay mapped to the Platform Admin role and cannot be unmapped.', 403);
+      }
+    }
   }
 
   const t = await sequelize.transaction();

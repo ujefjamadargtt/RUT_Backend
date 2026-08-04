@@ -55,7 +55,7 @@ const listUserMappings = async (userId) => {
       {
         model: Role,
         as: 'role',
-        attributes: ['id', 'role_name', 'permission', 'status', 'is_original_data_visible'],
+        attributes: ['id', 'role_name', 'permission', 'status'],
       },
     ],
     order: [['role_id', 'ASC']],
@@ -210,7 +210,7 @@ const findRoleFormMappingById = async (id) => {
       {
         model: Role,
         as: 'role',
-        attributes: ['id', 'role_name', 'permission', 'status', 'is_original_data_visible'],
+        attributes: ['id', 'role_name', 'permission', 'status'],
       },
       {
         model: FormMaster,

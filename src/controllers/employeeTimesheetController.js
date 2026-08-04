@@ -1,7 +1,7 @@
 'use strict';
 
 const employeeTimesheetService = require('../services/employeeTimesheetService');
-const { sendSuccess, sendCreated, sendError, sendNotFound } = require('../utils/response');
+const { sendSuccess, sendError, sendNotFound } = require('../utils/response');
 
 /**
  * Employee Timesheet Controller (Employee Self Timesheet module)
@@ -41,6 +41,8 @@ const getCalendar = async (req, res, next) => {
 
 /**
  * GET /api/v1/employee-timesheets/daily
+ * Returns { date, service_pos } — same Service PO -> Parent -> Child
+ * hierarchy shape as one entry of monthly-summary's array.
  */
 const getDaily = async (req, res, next) => {
   try {
@@ -79,11 +81,15 @@ const getProjects = async (req, res, next) => {
 
 /**
  * POST /api/v1/employee-timesheets/entries
+ * REPLACE SAVE: body is { timesheet_date, entries: [...] } — the employee's
+ * COMPLETE set of entries for that date. Every existing entry for the date
+ * is deleted and replaced with exactly this list, in one transaction —
+ * never a duplicate-entry error for this endpoint.
  */
 const createEntry = async (req, res, next) => {
   try {
-    const entry = await employeeTimesheetService.createEntry(req.employeeId, req.companyId, req.body);
-    return sendCreated(res, entry, 'Timesheet entry created successfully.');
+    const entries = await employeeTimesheetService.replaceDailyEntries(req.employeeId, req.companyId, req.body);
+    return sendSuccess(res, entries, 'Timesheet entries saved successfully.');
   } catch (err) {
     handleServiceError(err, res, next);
   }

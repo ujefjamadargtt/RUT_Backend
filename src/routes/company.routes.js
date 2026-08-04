@@ -72,7 +72,7 @@ router.get(
  * @swagger
  * /companies:
  *   post:
- *     summary: Create a company and its first Company Admin (Platform Admin only)
+ *     summary: Create a company and its first BU Admin (Platform Admin only)
  *     description: >
  *       Transactional — a company is never created without an owner. If
  *       admin-user creation fails, the company insert rolls back too.
@@ -93,7 +93,7 @@ router.get(
  *               admin_password: { type: string, example: "Str0ng!Pass" }
  *     responses:
  *       201:
- *         description: Company and Company Admin created
+ *         description: Company and BU Admin created
  *       409:
  *         description: Company code or admin email already exists
  *       422:

@@ -47,7 +47,7 @@ const DEFAULT_SERVICE_TYPES = [
 /**
  * Company Service
  * Platform-level provisioning: create/list/update companies, and the
- * transactional "company + its first Company Admin" creation flow. A
+ * transactional "company + its first BU Admin" creation flow. A
  * company is never created without an owner — if admin creation fails, the
  * company insert rolls back too.
  */
@@ -69,14 +69,14 @@ const getById = async (id) => {
 };
 
 /**
- * Create a company and its first Company Admin user in one transaction.
+ * Create a company and its first BU Admin user in one transaction.
  * @param {object} data - { company_code, company_name, admin_email, admin_password, admin_full_name }
  * @param {number} actorId - the platform admin creating this company
  * @param {string} ipAddress
  * @returns {Promise<{ company: Company, admin: User }>}
  */
 const createWithAdmin = async (data, actorId, ipAddress = null) => {
-  const { company_code, company_name, admin_email, admin_password } = data;
+  const { company_code, company_name, admin_email, admin_password, is_original_data_visible } = data;
 
   const existingCompany = await companyRepository.findByCode(company_code);
   if (existingCompany) {
@@ -88,15 +88,15 @@ const createWithAdmin = async (data, actorId, ipAddress = null) => {
     fail(`A user with email "${admin_email}" already exists.`, 409);
   }
 
-  const companyAdminRole = await roleRepository.findByName('Company Admin');
+  const companyAdminRole = await roleRepository.findByName('BU Admin');
   if (!companyAdminRole) {
-    fail('The "Company Admin" role is not seeded. Run database/migrations/20260729_seed_platform_roles.sql first.', 500);
+    fail('The "BU Admin" role is not seeded. Run database/migrations/20260729_seed_platform_roles.sql and 20260807_rename_company_admin_to_bu_admin.sql first.', 500);
   }
 
   let company, admin;
   await sequelize.transaction(async (transaction) => {
     company = await companyRepository.create(
-      { company_code, company_name, created_by: actorId, updated_by: actorId },
+      { company_code, company_name, is_original_data_visible, created_by: actorId, updated_by: actorId },
       { transaction }
     );
 

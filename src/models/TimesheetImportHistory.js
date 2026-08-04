@@ -103,9 +103,15 @@ module.exports = (sequelize) => {
           },
         },
       },
-      // One-way flag: set true when any child timesheet row's modified_hours
-      // is edited via PATCH /timesheets/:id/modified-hours. Never reset to
-      // false anywhere in this feature.
+      // Initial value set at import-confirm time in timesheetService.js's
+      // confirmImport() via timesheetPublishPolicy.resolveInitialIsPublish()
+      // — the SAME value stamped onto every child `timesheets` row created
+      // in that same call, so the two tables can never disagree (see
+      // Timesheet.js's is_publish comment). The DB default (false) below is
+      // a fallback only. Afterward it's a one-way flag: only ever flipped
+      // true, in lockstep with its child rows, via PATCH
+      // /timesheets/:id/modified-hours or the Publish API — never reset to
+      // false anywhere.
       is_publish: {
         type: DataTypes.BOOLEAN,
         allowNull: false,

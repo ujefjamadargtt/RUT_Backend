@@ -113,8 +113,17 @@ module.exports = (sequelize) => {
           max: { args: [999.99], msg: 'Modified hours cannot exceed 999.99.' },
         },
       },
-      // One-way flag: set true the first time modified_hours is edited via
-      // PATCH /timesheets/:id/modified-hours. Never reset to false anywhere.
+      // Initial value set at insert time in application code (createTimesheet(),
+      // confirmImport()) via timesheetPublishPolicy.resolveInitialIsPublish() —
+      // based on the COMPANY's OWN companies.is_original_data_visible (see
+      // database/migrations/20260808_add_company_original_data_visibility.sql;
+      // NOT per-user or per-role): that flag true -> false (work with
+      // original data first); false -> true (published immediately). The DB
+      // default (false) below is a fallback only — every live insert site
+      // sets it explicitly. Afterward it's a one-way flag: only ever
+      // flipped true via PATCH /timesheets/:id/modified-hours or the
+      // Publish API, never reset to
+      // false anywhere.
       is_publish: {
         type: DataTypes.BOOLEAN,
         allowNull: false,

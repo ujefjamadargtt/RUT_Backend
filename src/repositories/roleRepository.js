@@ -8,9 +8,13 @@ const { Role, User, UserRole } = require('../models');
  * Raw database access only — no business logic.
  */
 
-// Platform-level roles from the multi-tenancy retrofit — never shown in the
-// regular Role Management list (see findAll below).
-const EXCLUDED_ROLE_NAMES = ['Platform Admin', 'Company Admin'];
+// Platform Admin (platform-only, provisions companies) is never shown in the
+// regular Role Management / Role-Form-Mapping list (see findAll below).
+// "BU Admin" (renamed from "Company Admin" — see
+// database/migrations/20260807_rename_company_admin_to_bu_admin.sql) is
+// deliberately NOT excluded: it must appear in this list so it can be
+// selected on the Role-Form mapping screen like any other business role.
+const EXCLUDED_ROLE_NAMES = ['Platform Admin'];
 
 /**
  * Fetch all roles with optional search and status filter.
@@ -31,10 +35,9 @@ const findAll = async (filters = {}, sort = {}) => {
     ? sortOrder.toUpperCase()
     : 'ASC';
 
-  // Platform Admin (platform-only, provisions companies) and Company Admin
-  // (auto-created alongside its company, never manually assignable) are
-  // never returned here — this list feeds role dropdowns/management screens
-  // for the 5 regular business roles only.
+  // Platform Admin (platform-only, provisions companies) is never returned
+  // here — this list feeds role dropdowns/management screens, including the
+  // Role-Form mapping screen's role picker, which BU Admin must appear in.
   const where = {
     is_deleted: false,
     role_name: { [Op.notIn]: EXCLUDED_ROLE_NAMES },

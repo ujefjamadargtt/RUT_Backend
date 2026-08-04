@@ -609,6 +609,25 @@ const findByImportBatch = async (importId, companyId) => {
   });
 };
 
+/**
+ * Whether ANY official timesheet row exists for a Service PO — one half of
+ * the delete guard in servicePOService.delete() (the other half is
+ * employeeWorkLogRepository.existsForServicePOOrHierarchy). The official
+ * `timesheets` table has no hierarchy_node_id column (hierarchy tagging is
+ * an Employee Self Timesheet / employee_work_logs-only concept), so this is
+ * scoped to service_po_id alone.
+ * @param {number} servicePOId
+ * @param {number} companyId
+ * @returns {Promise<boolean>}
+ */
+const existsForServicePO = async (servicePOId, companyId) => {
+  const row = await Timesheet.findOne({
+    where: { service_po_id: servicePOId, company_id: companyId },
+    attributes: ['id'],
+  });
+  return !!row;
+};
+
 module.exports = {
   findAll,
   findById,
@@ -630,4 +649,5 @@ module.exports = {
   findEligibleEmployeeById,
   findEligibleServicePOById,
   ELIGIBLE_PO_STATUSES,
+  existsForServicePO,
 };

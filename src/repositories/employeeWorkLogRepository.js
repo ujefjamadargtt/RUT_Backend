@@ -79,18 +79,26 @@ const findByIdForEmployee = async (id, employeeId, companyId) => {
 };
 
 /**
- * Check whether a work log entry already exists for this employee/PO/date.
+ * Check whether a work log entry already exists for this employee/PO/
+ * hierarchy-node/date. Scoped to hierarchyNodeId (not just PO+date) so
+ * separate Parent/Child hierarchy rows under the SAME Service PO on the
+ * SAME date are distinct entries, not duplicates of each other — matches
+ * the DB's uq_employee_work_logs functional unique index (see
+ * database/migrations/20260807_hierarchy_node_id_unique_scope.sql), which
+ * keys on COALESCE(hierarchy_node_id, 0) for the same reason.
  * @param {number} employeeId
  * @param {number} servicePOId
+ * @param {number|null} hierarchyNodeId - null means "logged directly against the PO"
  * @param {string} date - "YYYY-MM-DD"
  * @param {number} [excludeId]
  * @param {number} companyId
  * @returns {Promise<EmployeeWorkLog|null>}
  */
-const checkDuplicate = async (employeeId, servicePOId, date, excludeId = null, companyId) => {
+const checkDuplicate = async (employeeId, servicePOId, hierarchyNodeId, date, excludeId = null, companyId) => {
   const where = {
     employee_id: employeeId,
     service_po_id: servicePOId,
+    hierarchy_node_id: hierarchyNodeId || null,
     work_date: date,
     company_id: companyId,
   };
@@ -101,10 +109,45 @@ const checkDuplicate = async (employeeId, servicePOId, date, excludeId = null, c
 /**
  * Insert a new work log entry.
  * @param {object} data
+ * @param {object} [options] - Sequelize options (e.g. { transaction })
  * @returns {Promise<EmployeeWorkLog>}
  */
-const create = async (data) => {
-  return EmployeeWorkLog.create(data);
+const create = async (data, options = {}) => {
+  return EmployeeWorkLog.create(data, options);
+};
+
+/**
+ * Bulk-insert several work log entries in one statement — used by the
+ * REPLACE SAVE flow (employeeTimesheetService.replaceDailyEntries) to
+ * insert an entire day's entries after deleteByEmployeeAndDate() has
+ * cleared the old ones, both inside the same transaction.
+ * @param {object[]} rows
+ * @param {object} transaction
+ * @returns {Promise<EmployeeWorkLog[]>}
+ */
+const bulkCreate = async (rows, transaction) => {
+  if (rows.length === 0) return [];
+  return EmployeeWorkLog.bulkCreate(rows, { transaction, returning: true });
+};
+
+/**
+ * Hard-delete EVERY work log entry for one employee on one date — the
+ * "clear the day" half of the REPLACE SAVE flow
+ * (employeeTimesheetService.replaceDailyEntries). Always called inside the
+ * same transaction as the bulkCreate() that reinserts the day's entries, so
+ * a failure partway through leaves the employee's previous entries for that
+ * date untouched rather than half-replaced.
+ * @param {number} employeeId
+ * @param {string} date - "YYYY-MM-DD"
+ * @param {number} companyId
+ * @param {object} transaction
+ * @returns {Promise<number>} rows deleted
+ */
+const deleteByEmployeeAndDate = async (employeeId, date, companyId, transaction) => {
+  return EmployeeWorkLog.destroy({
+    where: { employee_id: employeeId, work_date: date, company_id: companyId },
+    transaction,
+  });
 };
 
 /**
@@ -191,68 +234,53 @@ const getCalendarSummary = async ({ employeeId, month, year, companyId }) => {
 };
 
 /**
- * Monthly Summary — total hours grouped by Service PO, for one employee/month.
- * @param {object} params - { employeeId, month, year, companyId }
- * @returns {Promise<Array>}
+ * Daily Hierarchy Breakdown — hours grouped by (service_po_id,
+ * hierarchy_node_id), for one employee/date. hierarchy_node_id is null for
+ * hours logged directly against the Service PO itself (no Parent/Child tag).
+ * This is the sole data source employeeTimesheetService.getDailyEntries uses
+ * to build the same Service PO -> Parent -> Child hours tree the Monthly
+ * Summary returns, scoped to a single date.
+ * @param {object} params - { employeeId, date, companyId }
+ * @returns {Promise<Array<{ service_po_id, hierarchy_node_id, total_hours }>>}
  */
-const getMonthlySummary = async ({ employeeId, month, year, companyId }) => {
-  const monthNum = parseInt(month, 10);
-  const yearNum = parseInt(year, 10);
-  if (!Number.isInteger(monthNum) || !Number.isInteger(yearNum)) {
-    throw new Error(`getMonthlySummary: month/year must be numbers (got month=${month}, year=${year}).`);
-  }
-
-  const rows = await EmployeeWorkLog.findAll({
+const getDailyHierarchyBreakdown = async ({ employeeId, date, companyId }) => {
+  return EmployeeWorkLog.findAll({
     attributes: [
       'service_po_id',
-      [fn('SUM', col('EmployeeWorkLog.hours')), 'total_hours'],
-      [fn('COUNT', col('EmployeeWorkLog.id')), 'entry_count'],
+      'hierarchy_node_id',
+      [fn('SUM', col('hours')), 'total_hours'],
     ],
     where: {
-      [Op.and]: [
-        literal(`EXTRACT(MONTH FROM work_date) = ${monthNum}`),
-        literal(`EXTRACT(YEAR  FROM work_date) = ${yearNum}`),
-      ],
+      work_date: date,
       employee_id: parseInt(employeeId, 10),
       company_id: companyId,
     },
-    include: [
-      { model: ServicePO, as: 'servicePO', attributes: ['id', 'service_po_code', 'service_po_name'] },
-    ],
-    group: [
-      'EmployeeWorkLog.service_po_id',
-      'servicePO.id',
-      'servicePO.service_po_code',
-      'servicePO.service_po_name',
-    ],
-    order: [[fn('SUM', col('EmployeeWorkLog.hours')), 'DESC']],
-    raw: false,
+    group: ['service_po_id', 'hierarchy_node_id'],
+    raw: true,
   });
-
-  return rows;
 };
 
 /**
- * Monthly Day Breakdown — hours per Service PO per calendar day, for one
- * employee/month. Same source/scope as getMonthlySummary (all of the
- * employee's own employee_work_logs rows for the month, pending or synced),
- * just also grouped by day-of-month so the caller can build a day-by-day
- * matrix. No join needed — the service layer maps service_po_id against the
- * employee's currently-mapped Service POs itself.
+ * Monthly Hierarchy Breakdown — hours grouped by (date, service_po_id,
+ * hierarchy_node_id), for one employee/month. hierarchy_node_id is null for
+ * hours logged directly against the Service PO itself (no Parent/Child tag).
+ * This is the sole data source employeeTimesheetService.getMonthlySummary
+ * uses to build the per-date Service PO -> Parent -> Child hours tree.
  * @param {object} params - { employeeId, month, year, companyId }
- * @returns {Promise<Array<{ service_po_id, day, total_hours }>>}
+ * @returns {Promise<Array<{ work_date, service_po_id, hierarchy_node_id, total_hours }>>}
  */
-const getMonthlyDayBreakdown = async ({ employeeId, month, year, companyId }) => {
+const getMonthlyHierarchyBreakdown = async ({ employeeId, month, year, companyId }) => {
   const monthNum = parseInt(month, 10);
   const yearNum = parseInt(year, 10);
   if (!Number.isInteger(monthNum) || !Number.isInteger(yearNum)) {
-    throw new Error(`getMonthlyDayBreakdown: month/year must be numbers (got month=${month}, year=${year}).`);
+    throw new Error(`getMonthlyHierarchyBreakdown: month/year must be numbers (got month=${month}, year=${year}).`);
   }
 
-  const rows = await EmployeeWorkLog.findAll({
+  return EmployeeWorkLog.findAll({
     attributes: [
+      'work_date',
       'service_po_id',
-      [literal('EXTRACT(DAY FROM work_date)'), 'day'],
+      'hierarchy_node_id',
       [fn('SUM', col('hours')), 'total_hours'],
     ],
     where: {
@@ -263,11 +291,9 @@ const getMonthlyDayBreakdown = async ({ employeeId, month, year, companyId }) =>
       employee_id: parseInt(employeeId, 10),
       company_id: companyId,
     },
-    group: ['service_po_id', literal('EXTRACT(DAY FROM work_date)')],
+    group: ['work_date', 'service_po_id', 'hierarchy_node_id'],
     raw: true,
   });
-
-  return rows;
 };
 
 /**
@@ -399,20 +425,74 @@ const getReportRows = async ({ employeeId, companyId, startDate, endDate }) => {
   });
 };
 
+/**
+ * Whether ANY employee_work_logs row exists for a Service PO OR any of its
+ * hierarchy nodes (Parent/Child) — one half of the delete guard in
+ * servicePOService.delete() (the other half is timesheetRepository.
+ * existsForServicePO). In practice a hierarchy-tagged row's service_po_id
+ * always already matches the node's own PO (enforced at write time — see
+ * employeeTimesheetService.resolveHierarchyNode), so the service_po_id
+ * check alone already covers Main/Parent/Child; the explicit
+ * hierarchy_node_id check is kept as a defensive belt-and-braces match.
+ * @param {number} servicePOId
+ * @param {number[]} hierarchyNodeIds - every Parent/Child node id under this Service PO
+ * @param {number} companyId
+ * @returns {Promise<boolean>}
+ */
+const existsForServicePOOrHierarchy = async (servicePOId, hierarchyNodeIds, companyId) => {
+  const where = {
+    company_id: companyId,
+    [Op.or]: [
+      { service_po_id: servicePOId },
+      ...(hierarchyNodeIds.length > 0 ? [{ hierarchy_node_id: { [Op.in]: hierarchyNodeIds } }] : []),
+    ],
+  };
+
+  const row = await EmployeeWorkLog.findOne({ where, attributes: ['id'] });
+  return !!row;
+};
+
+/**
+ * Whether ANY employee_work_logs row exists tagged against one or more
+ * SPECIFIC hierarchy nodes — the delete guard in
+ * servicePOHierarchyService.remove(). Unlike existsForServicePOOrHierarchy
+ * above, this does NOT fall back to service_po_id: deleting a single
+ * Parent/Child node must only be blocked by work logs on THAT node (and, for
+ * a Parent, its own Children) — not by unrelated work logs logged directly
+ * against the Service PO or against a sibling node elsewhere in the
+ * hierarchy.
+ * @param {number[]} hierarchyNodeIds - the node being deleted, plus its Children if it's a Parent
+ * @param {number} companyId
+ * @returns {Promise<boolean>}
+ */
+const existsForHierarchyNodes = async (hierarchyNodeIds, companyId) => {
+  if (!hierarchyNodeIds || hierarchyNodeIds.length === 0) return false;
+
+  const row = await EmployeeWorkLog.findOne({
+    where: { hierarchy_node_id: { [Op.in]: hierarchyNodeIds }, company_id: companyId },
+    attributes: ['id'],
+  });
+  return !!row;
+};
+
 module.exports = {
   findAll,
   findById,
   findByIdForEmployee,
   checkDuplicate,
   create,
+  bulkCreate,
+  deleteByEmployeeAndDate,
   update,
   deleteById,
   getDailyHours,
   getCalendarSummary,
-  getMonthlySummary,
-  getMonthlyDayBreakdown,
+  getDailyHierarchyBreakdown,
+  getMonthlyHierarchyBreakdown,
   findForSync,
   markSyncedByTuples,
   revertSyncStatusByImportIds,
   getReportRows,
+  existsForServicePOOrHierarchy,
+  existsForHierarchyNodes,
 };

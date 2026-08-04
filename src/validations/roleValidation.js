@@ -38,12 +38,6 @@ const createRoleSchema = Joi.object({
     .messages({
       'any.only': 'Status must be either "active" or "inactive".',
     }),
-
-  is_original_data_visible: Joi.boolean()
-    .default(false)
-    .messages({
-      'boolean.base': 'is_original_data_visible must be true or false.',
-    }),
 });
 
 /**
@@ -73,12 +67,6 @@ const updateRoleSchema = Joi.object({
     .optional()
     .messages({
       'any.only': 'Status must be either "active" or "inactive".',
-    }),
-
-  is_original_data_visible: Joi.boolean()
-    .optional()
-    .messages({
-      'boolean.base': 'is_original_data_visible must be true or false.',
     }),
 })
   .min(1)

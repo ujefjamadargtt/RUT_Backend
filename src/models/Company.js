@@ -37,6 +37,19 @@ module.exports = (sequelize) => {
       allowNull: false,
       defaultValue: false,
     },
+    // Drives the Original Timesheet publish rule (see
+    // src/utils/timesheetPublishPolicy.js) — true means this company's users
+    // work with original/unpublished data first (new timesheets/import
+    // history rows created via Excel Import/Sync/manual entry start
+    // is_publish=false); false means they should always see published data
+    // (those rows start is_publish=true). See database/migrations/
+    // 20260808_add_company_original_data_visibility.sql. COMPANY-level, not
+    // per-user or per-role.
+    is_original_data_visible: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+    },
     created_by: {
       type: DataTypes.INTEGER,
       allowNull: true,

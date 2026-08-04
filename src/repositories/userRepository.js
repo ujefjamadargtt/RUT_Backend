@@ -21,13 +21,13 @@ const DEFAULT_INCLUDE = [
   {
     model: Role,
     as: 'role',
-    attributes: ['id', 'role_name', 'permission', 'status', 'is_original_data_visible'],
+    attributes: ['id', 'role_name', 'permission', 'status'],
     required: false,
   },
   {
     model: Role,
     as: 'roles',
-    attributes: ['id', 'role_name', 'permission', 'status', 'is_original_data_visible'],
+    attributes: ['id', 'role_name', 'permission', 'status'],
     through: { attributes: [] },
     required: false,
   },

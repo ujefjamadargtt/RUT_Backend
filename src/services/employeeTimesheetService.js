@@ -1,8 +1,11 @@
 'use strict';
 
+const { sequelize } = require('../models');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
 const timesheetService = require('./timesheetService');
 const employeeServicePOMappingRepository = require('../repositories/employeeServicePOMappingRepository');
+const servicePOHierarchyRepository = require('../repositories/servicePOHierarchyRepository');
+const servicePOHierarchyDTO = require('../dtos/servicePOHierarchyDTO');
 const dateHelper = require('../helpers/dateHelper');
 const logger = require('../utils/logger');
 
@@ -47,6 +50,12 @@ function conflictError(message) {
   return err;
 }
 
+function badRequestError(message) {
+  const err = new Error(message);
+  err.statusCode = 400;
+  return err;
+}
+
 /** Normalise a Date object or ISO string to a plain "YYYY-MM-DD" string. */
 function toDateString(date) {
   return dateHelper.formatDate(date);
@@ -80,6 +89,25 @@ async function assertProjectMapped(employeeId, servicePOId, companyId) {
 }
 
 /**
+ * When a hierarchy node (Parent or Child — see servicePOHierarchyService.js)
+ * is supplied, confirm it actually belongs to the Service PO being logged
+ * against and return it (with its parentNode loaded, for
+ * servicePOHierarchyDTO.buildBreadcrumb) — both node types are equally
+ * valid to log against, there is no leaf-only restriction. Returns null
+ * (no error) when hierarchyNodeId is null/undefined.
+ */
+async function resolveHierarchyNode(hierarchyNodeId, servicePOId) {
+  if (!hierarchyNodeId) return null;
+  const node = await servicePOHierarchyRepository.findByIdAndServicePOWithParent(hierarchyNodeId, servicePOId);
+  if (!node) {
+    const err = new Error(`Hierarchy node #${hierarchyNodeId} does not belong to Service PO #${servicePOId}.`);
+    err.statusCode = 400;
+    throw err;
+  }
+  return node;
+}
+
+/**
  * 12-hours/day cap — sums this employee's work_logs on one date (excluding
  * the row being updated, if any) and rejects if the requested hours would
  * push the day's total over DAILY_HOUR_CAP.
@@ -98,49 +126,109 @@ async function assertDailyCap(employeeId, dateStr, hoursRequested, companyId, ex
 }
 
 /**
- * Create a new work log entry (Stage 1 — draft, not yet official).
+ * REPLACE SAVE for one employee's entire timesheet on one date (Stage 1 —
+ * draft, not yet official). The frontend always sends the COMPLETE set of
+ * entries for (employee, date) — this treats that payload as the source of
+ * truth: every existing employee_work_logs row for the date is deleted and
+ * exactly the given `entries` are reinserted, in one transaction. There is
+ * no per-entry duplicate-key concept at all here (unlike the single-row
+ * updateEntry/deleteEntry below): the whole date is wiped first, so nothing
+ * from before this call can collide with what's being inserted now. Passing
+ * an empty `entries` array is valid and clears the date entirely.
+ *
+ * Every line is validated (project mapping, employee-active/PO-eligible/
+ * sub-project-belongs-to-PO, hierarchy node ownership) and the 12-hour/day
+ * cap is checked against the SUM of this payload's hours alone — BEFORE the
+ * transaction opens, so a validation failure never touches the database (the
+ * "rollback everything on failure" requirement holds trivially: either
+ * nothing in the DB changes, or the transaction's DELETE+INSERT commits as a
+ * unit). The 176-hour monthly cap is intentionally untouched — see this
+ * file's header comment; that rule stays Sync-only.
  *
  * @param {number} employeeId
  * @param {number} companyId
- * @param {object} data - { service_po_id, sub_project_id?, hours, description, timesheet_date }
- * @returns {Promise<EmployeeWorkLog>}
+ * @param {object} data - { timesheet_date, entries: [{ service_po_id, sub_project_id?, hierarchy_node_id?, hours, description }] }
+ * @returns {Promise<object[]>} the date's entries after the replace, each plus service_po_breadcrumb
  */
-const createEntry = async (employeeId, companyId, data) => {
+const replaceDailyEntries = async (employeeId, companyId, data) => {
   const dateStr = assertNotFutureDate(data.timesheet_date);
+  const lines = data.entries || [];
 
-  await assertProjectMapped(employeeId, data.service_po_id, companyId);
-
-  // Reuse the Admin module's employee-active / PO-eligible-status /
-  // sub-project-belongs-to-PO checks — these only query Employee/ServicePO,
-  // never `timesheets`.
-  await timesheetService.resolveManualEntryReferences(
-    { employee_id: employeeId, service_po_id: data.service_po_id, sub_project_id: data.sub_project_id },
-    companyId
-  );
-
-  const duplicate = await employeeWorkLogRepository.checkDuplicate(employeeId, data.service_po_id, dateStr, null, companyId);
-  if (duplicate) {
-    throw conflictError(`You already have a work log entry for ${dateStr} under this Service PO.`);
+  // Two lines at the same (service_po_id, hierarchy_node_id) would collide
+  // on insert (uq_employee_work_logs) — reject up front rather than letting
+  // the transaction fail on a DB constraint violation partway through.
+  const seenKeys = new Set();
+  for (const line of lines) {
+    const key = `${line.service_po_id}|${line.hierarchy_node_id || 'po'}`;
+    if (seenKeys.has(key)) {
+      const nodeSuffix = line.hierarchy_node_id ? ` / hierarchy node #${line.hierarchy_node_id}` : '';
+      throw badRequestError(`Duplicate entry for Service PO #${line.service_po_id}${nodeSuffix} in the same request.`);
+    }
+    seenKeys.add(key);
   }
 
-  await assertDailyCap(employeeId, dateStr, data.hours, companyId);
+  // 12-hour/day cap, computed purely from this payload — the old rows for
+  // this date are being replaced wholesale, so there is nothing left in the
+  // DB to add on top of. assertDailyCap's DB-lookup version still backs
+  // updateEntry below, which edits one row in place rather than replacing
+  // the whole day.
+  const totalHours = lines.reduce((sum, line) => sum + parseFloat(line.hours), 0);
+  if (totalHours > DAILY_HOUR_CAP) {
+    throw badRequestError(
+      `Total hours for ${dateStr} cannot exceed ${DAILY_HOUR_CAP}. This request totals ${Math.round(totalHours * 100) / 100} hours.`
+    );
+  }
 
-  const record = await employeeWorkLogRepository.create({
-    employee_id: employeeId,
-    service_po_id: data.service_po_id,
-    sub_project_id: data.sub_project_id || null,
-    work_date: dateStr,
-    hours: data.hours,
-    description: data.description,
-    company_id: companyId,
-    status: 'pending',
-    created_by: employeeId,
-    updated_by: employeeId,
+  // Resolve/validate every line before touching the database at all.
+  const resolvedLines = [];
+  for (const line of lines) {
+    await assertProjectMapped(employeeId, line.service_po_id, companyId);
+
+    // Reuse the Admin module's employee-active / PO-eligible-status /
+    // sub-project-belongs-to-PO checks — these only query Employee/ServicePO,
+    // never `timesheets`.
+    const { po } = await timesheetService.resolveManualEntryReferences(
+      { employee_id: employeeId, service_po_id: line.service_po_id, sub_project_id: line.sub_project_id },
+      companyId
+    );
+
+    const hierarchyNode = await resolveHierarchyNode(line.hierarchy_node_id, line.service_po_id);
+
+    resolvedLines.push({ line, po, hierarchyNode });
+  }
+
+  const insertedRows = await sequelize.transaction(async (transaction) => {
+    await employeeWorkLogRepository.deleteByEmployeeAndDate(employeeId, dateStr, companyId, transaction);
+
+    return employeeWorkLogRepository.bulkCreate(
+      resolvedLines.map(({ line }) => ({
+        employee_id: employeeId,
+        service_po_id: line.service_po_id,
+        sub_project_id: line.sub_project_id || null,
+        hierarchy_node_id: line.hierarchy_node_id || null,
+        work_date: dateStr,
+        hours: line.hours,
+        description: line.description,
+        company_id: companyId,
+        status: 'pending',
+        created_by: employeeId,
+        updated_by: employeeId,
+      })),
+      transaction
+    );
   });
 
-  logger.info('Employee work log entry created', { workLogId: record.id, employeeId, companyId });
+  logger.info('Employee daily timesheet replace-saved', {
+    employeeId, companyId, date: dateStr, entryCount: insertedRows.length,
+  });
 
-  return record;
+  return insertedRows.map((row, i) => ({
+    ...row.get({ plain: true }),
+    service_po_breadcrumb: servicePOHierarchyDTO.buildBreadcrumb(
+      resolvedLines[i].po.service_po_name,
+      resolvedLines[i].hierarchyNode
+    ),
+  }));
 };
 
 /**
@@ -156,8 +244,8 @@ const createEntry = async (employeeId, companyId, data) => {
  * @param {number} employeeId
  * @param {number} companyId
  * @param {number} id
- * @param {object} data - Any subset of { service_po_id, sub_project_id, hours, description, timesheet_date }
- * @returns {Promise<EmployeeWorkLog>}
+ * @param {object} data - Any subset of { service_po_id, sub_project_id, hierarchy_node_id, hours, description, timesheet_date }
+ * @returns {Promise<object>} the updated entry, plus service_po_breadcrumb
  */
 const updateEntry = async (employeeId, companyId, id, data) => {
   const existing = await employeeWorkLogRepository.findByIdForEmployee(id, employeeId, companyId);
@@ -167,19 +255,25 @@ const updateEntry = async (employeeId, companyId, id, data) => {
 
   const servicePOId = data.service_po_id ?? existing.service_po_id;
   const subProjectId = data.sub_project_id !== undefined ? data.sub_project_id : existing.sub_project_id;
+  const hierarchyNodeId = data.hierarchy_node_id !== undefined ? data.hierarchy_node_id : existing.hierarchy_node_id;
   const hours = data.hours ?? existing.hours;
   const dateStr = data.timesheet_date ? assertNotFutureDate(data.timesheet_date) : existing.work_date;
 
   await assertProjectMapped(employeeId, servicePOId, companyId);
 
-  await timesheetService.resolveManualEntryReferences(
+  const { po } = await timesheetService.resolveManualEntryReferences(
     { employee_id: employeeId, service_po_id: servicePOId, sub_project_id: subProjectId },
     companyId
   );
 
-  const duplicate = await employeeWorkLogRepository.checkDuplicate(employeeId, servicePOId, dateStr, id, companyId);
+  const hierarchyNode = await resolveHierarchyNode(hierarchyNodeId, servicePOId);
+
+  const duplicate = await employeeWorkLogRepository.checkDuplicate(
+    employeeId, servicePOId, hierarchyNodeId || null, dateStr, id, companyId
+  );
   if (duplicate) {
-    throw conflictError(`You already have a work log entry for ${dateStr} under this Service PO.`);
+    const nodeSuffix = hierarchyNode ? ` under "${hierarchyNode.node_name}"` : '';
+    throw conflictError(`You already have a work log entry for ${dateStr} under this Service PO${nodeSuffix}.`);
   }
 
   await assertDailyCap(employeeId, dateStr, hours, companyId, id);
@@ -187,6 +281,7 @@ const updateEntry = async (employeeId, companyId, id, data) => {
   const updated = await employeeWorkLogRepository.update(id, {
     service_po_id: servicePOId,
     sub_project_id: subProjectId || null,
+    hierarchy_node_id: hierarchyNodeId || null,
     work_date: dateStr,
     hours,
     description: data.description !== undefined ? data.description : existing.description,
@@ -200,7 +295,10 @@ const updateEntry = async (employeeId, companyId, id, data) => {
 
   logger.info('Employee work log entry updated', { workLogId: id, employeeId, companyId });
 
-  return updated;
+  return {
+    ...updated.get({ plain: true }),
+    service_po_breadcrumb: servicePOHierarchyDTO.buildBreadcrumb(po.service_po_name, hierarchyNode),
+  };
 };
 
 /**
@@ -262,158 +360,221 @@ const getCalendarSummary = async (employeeId, month, year, companyId) => {
 };
 
 /**
- * Daily Entries for one date.
+ * Load every currently-mapped Service PO (same source as '/projects') plus
+ * the complete hierarchy (Parent/Child nodes) for all of them, in two
+ * batched queries — shared by getDailyEntries and getMonthlySummary so both
+ * build the identical Service PO -> Parent -> Child tree shape.
+ *
+ * @param {number} employeeId
+ * @param {number} companyId
+ * @returns {Promise<{ mappedPOs: Array<object>, hierarchyRowsByPOId: Map<string, ServicePOHierarchy[]> }>}
+ */
+const loadMappedPOsWithHierarchy = async (employeeId, companyId) => {
+  const mappings = await employeeServicePOMappingRepository.findByEmployee(employeeId, companyId, 'active');
+  const mappedPOs = mappings
+    .map((m) => m.servicePO)
+    .filter(Boolean)
+    .sort((a, b) => a.service_po_name.localeCompare(b.service_po_name));
+
+  const hierarchyRows = await servicePOHierarchyRepository.findByServicePOIds(mappedPOs.map((po) => po.id));
+  const hierarchyRowsByPOId = new Map();
+  for (const row of hierarchyRows) {
+    const key = String(row.service_po_id);
+    if (!hierarchyRowsByPOId.has(key)) hierarchyRowsByPOId.set(key, []);
+    hierarchyRowsByPOId.get(key).push(row);
+  }
+
+  return { mappedPOs, hierarchyRowsByPOId };
+};
+
+/**
+ * Group flat (service_po_id, hierarchy_node_id, total_hours) breakdown rows
+ * — for ONE date — into servicePOId -> Map(nodeKey -> hours), where nodeKey
+ * is 'po' for hours logged directly against the Service PO itself (no
+ * hierarchy_node_id) or the hierarchy node's own id otherwise.
+ *
+ * @param {Array<{ service_po_id, hierarchy_node_id, total_hours }>} rows
+ * @returns {Map<string, Map<string, number>>}
+ */
+const groupHoursByServicePO = (rows) => {
+  const hoursByPOId = new Map();
+  for (const row of rows) {
+    const poKey = String(row.service_po_id);
+    const nodeKey = row.hierarchy_node_id ? String(row.hierarchy_node_id) : 'po';
+    const hours = parseFloat(row.total_hours) || 0;
+
+    if (!hoursByPOId.has(poKey)) hoursByPOId.set(poKey, new Map());
+    hoursByPOId.get(poKey).set(nodeKey, hours);
+  }
+  return hoursByPOId;
+};
+
+/**
+ * Build the `service_pos` array — the shared hierarchy response shape
+ * returned by BOTH getDailyEntries and getMonthlySummary (per date) — for
+ * ONE date's worth of hours. Every mapped Service PO is included, and every
+ * Parent/Child node under it, even when nothing was logged that day (hours
+ * default to 0 — see servicePOHierarchyDTO.toHierarchyTreeWithHours).
+ *
+ * po_total_hrs = hours logged directly against the Service PO itself +
+ * every Parent's hours + every Child's hours, for that date.
+ *
+ * @param {Array<object>} mappedPOs
+ * @param {Map<string, ServicePOHierarchy[]>} hierarchyRowsByPOId
+ * @param {Map<string, Map<string, number>>} hoursByPOId - this date's hours only
+ * @returns {Array<object>}
+ */
+const buildServicePOsForDate = (mappedPOs, hierarchyRowsByPOId, hoursByPOId) => {
+  const round2 = (n) => Math.round(n * 100) / 100;
+
+  return mappedPOs.map((po) => {
+    const poHours = hoursByPOId.get(String(po.id));
+    const directHours = poHours ? (poHours.get('po') || 0) : 0;
+
+    const nodeHoursMap = new Map();
+    if (poHours) {
+      for (const [key, hrs] of poHours) {
+        if (key !== 'po') nodeHoursMap.set(key, hrs);
+      }
+    }
+
+    const children = servicePOHierarchyDTO.toHierarchyTreeWithHours(
+      hierarchyRowsByPOId.get(String(po.id)) || [],
+      nodeHoursMap
+    );
+    const hierarchyHours = servicePOHierarchyDTO.sumHierarchyHours(children);
+
+    return {
+      service_po_id: po.id,
+      service_po_name: po.service_po_name,
+      hours: round2(directHours),
+      po_total_hrs: round2(directHours + hierarchyHours),
+      children,
+    };
+  });
+};
+
+/**
+ * Daily Entries for one date: the same Service PO -> Parent -> Child
+ * hierarchy shape the Monthly Summary returns per date (see
+ * buildServicePOsForDate), scoped to a single day — every mapped Service PO
+ * and its complete hierarchy is always present, hours default to 0. No
+ * breadcrumb, so the frontend can render Daily and Monthly with the same
+ * component.
  *
  * @param {number} employeeId
  * @param {string} date - "YYYY-MM-DD"
  * @param {number} companyId
- * @returns {Promise<EmployeeWorkLog[]>}
+ * @returns {Promise<{ date: string, service_pos: Array }>}
  */
 const getDailyEntries = async (employeeId, date, companyId) => {
-  const { rows } = await employeeWorkLogRepository.findAll(
-    { employeeId, startDate: date, endDate: date, companyId },
-    { limit: 100, offset: 0 }
-  );
-  return rows;
+  const dateStr = toDateString(date);
+
+  const [{ mappedPOs, hierarchyRowsByPOId }, breakdownRows] = await Promise.all([
+    loadMappedPOsWithHierarchy(employeeId, companyId),
+    employeeWorkLogRepository.getDailyHierarchyBreakdown({ employeeId, date: dateStr, companyId }),
+  ]);
+
+  const hoursByPOId = groupHoursByServicePO(breakdownRows);
+  const service_pos = buildServicePOsForDate(mappedPOs, hierarchyRowsByPOId, hoursByPOId);
+
+  return { date: dateStr, service_pos };
 };
 
-const INTERNAL_ROW_LABEL = 'Internal';
-
 /**
- * Monthly Summary: total hours per Service PO for the month, plus a
- * day-by-day breakdown (Service PO rows x day-of-month columns) for the
- * frontend matrix view. Purely informational at this stage — this is NOT
- * the 176-hour official cap (that only applies once entries are synced into
- * `timesheets`).
+ * Monthly Summary: for every date in the month, the complete Service PO ->
+ * Parent -> Child hierarchy with hours-per-node (same shape getDailyEntries
+ * returns per date — see buildServicePOsForDate). One entry per calendar
+ * date; each date lists EVERY currently-mapped Service PO (same set
+ * '/projects' returns), and every Parent/Child node under it, even when
+ * nothing was logged against it that day (hours default to 0). Purely
+ * informational at this stage — this is NOT the 176-hour official cap
+ * (that only applies once entries are synced into `timesheets`).
  *
- * Every row is one of the employee's currently-mapped Service POs (same set
- * '/projects' returns) — hours always show under the actual PO's own name,
- * even a PO whose is_billable flag is false (e.g. "Idle"). Only entries left
- * over from a Service PO the employee is no longer actively mapped to (the
- * mapping was removed after the hours were logged) fall into a catch-all
- * "Internal" row.
+ * No breadcrumb: the assembled hierarchy tree carries the same information
+ * a breadcrumb string used to.
  *
  * @param {number} employeeId
  * @param {number} month
  * @param {number} year
  * @param {number} companyId
- * @returns {Promise<{ byServicePO: Array, totalHours: number, days: number[], rows: Array, columnTotals: object, grandTotal: number }>}
+ * @returns {Promise<Array<{ date: string, service_pos: Array }>>}
  */
 const getMonthlySummary = async (employeeId, month, year, companyId) => {
-  const [byServicePORows, dayBreakdownRows, mappings] = await Promise.all([
-    employeeWorkLogRepository.getMonthlySummary({ employeeId, month, year, companyId }),
-    employeeWorkLogRepository.getMonthlyDayBreakdown({ employeeId, month, year, companyId }),
-    employeeServicePOMappingRepository.findByEmployee(employeeId, companyId, 'active'),
+  const [{ mappedPOs, hierarchyRowsByPOId }, breakdownRows] = await Promise.all([
+    loadMappedPOsWithHierarchy(employeeId, companyId),
+    employeeWorkLogRepository.getMonthlyHierarchyBreakdown({ employeeId, month, year, companyId }),
   ]);
 
-  const totalHours = byServicePORows.reduce(
-    (sum, row) => sum + (parseFloat(row.get('total_hours')) || 0),
-    0
-  );
-
-  const byServicePO = byServicePORows.map((row) => ({
-    servicePOId: row.service_po_id,
-    servicePOCode: row.servicePO?.service_po_code,
-    servicePOName: row.servicePO?.service_po_name,
-    totalHours: parseFloat(row.get('total_hours')) || 0,
-    entryCount: parseInt(row.get('entry_count'), 10) || 0,
-  }));
-
-  const { endDate } = dateHelper.getMonthBounds(month, year);
-  const daysInMonth = parseInt(endDate.split('-')[2], 10);
-  const days = Array.from({ length: daysInMonth }, (_, i) => i + 1);
-  const emptyHoursByDay = () => days.reduce((acc, d) => ({ ...acc, [d]: 0 }), {});
-
-  const rowsByKey = new Map();
-  const mappedPOsById = new Map();
-  // Seed every currently-mapped Service PO up front (same source as
-  // getMappedProjects/'/projects') so a PO with zero hours this month still
-  // shows up as an all-zero row instead of being silently dropped.
-  for (const mapping of mappings) {
-    if (!mapping.servicePO) continue;
-    mappedPOsById.set(mapping.servicePO.id, mapping.servicePO);
-    rowsByKey.set(`po-${mapping.servicePO.id}`, {
-      servicePOId: mapping.servicePO.id,
-      label: mapping.servicePO.service_po_name,
-      hoursByDay: emptyHoursByDay(),
-      total: 0,
-    });
+  const rowsByDate = new Map();
+  for (const row of breakdownRows) {
+    const dateStr = row.work_date;
+    if (!rowsByDate.has(dateStr)) rowsByDate.set(dateStr, []);
+    rowsByDate.get(dateStr).push(row);
   }
 
-  for (const row of dayBreakdownRows) {
-    const servicePO = mappedPOsById.get(row.service_po_id);
-    const day = parseInt(row.day, 10);
-    const hours = parseFloat(row.total_hours) || 0;
+  const { startDate, endDate } = dateHelper.getMonthBounds(month, year);
+  const days = [];
+  let cursor = startDate;
+  while (cursor <= endDate) {
+    const dateStr = cursor;
+    const hoursByPOId = groupHoursByServicePO(rowsByDate.get(dateStr) || []);
+    const service_pos = buildServicePOsForDate(mappedPOs, hierarchyRowsByPOId, hoursByPOId);
 
-    const key = servicePO ? `po-${row.service_po_id}` : 'internal';
-    if (!rowsByKey.has(key)) {
-      rowsByKey.set(key, {
-        servicePOId: servicePO ? row.service_po_id : null,
-        label: servicePO ? servicePO.service_po_name : INTERNAL_ROW_LABEL,
-        hoursByDay: emptyHoursByDay(),
-        total: 0,
-      });
-    }
-    const bucket = rowsByKey.get(key);
-    bucket.hoursByDay[day] += hours;
-    bucket.total += hours;
+    days.push({ date: dateStr, service_pos });
+
+    const next = new Date(cursor);
+    next.setDate(next.getDate() + 1);
+    cursor = toDateString(next);
   }
 
-  const round2 = (n) => Math.round(n * 100) / 100;
-
-  const mappedRows = [...rowsByKey.values()]
-    .filter((row) => row.servicePOId !== null)
-    .sort((a, b) => a.label.localeCompare(b.label));
-  const internalRow = rowsByKey.get('internal');
-  const orderedRows = internalRow ? [...mappedRows, internalRow] : mappedRows;
-
-  const rows = orderedRows.map((row) => ({
-    servicePOId: row.servicePOId,
-    label: row.label,
-    hoursByDay: Object.fromEntries(
-      Object.entries(row.hoursByDay).map(([d, h]) => [d, round2(h)])
-    ),
-    total: round2(row.total),
-  }));
-
-  const columnTotals = emptyHoursByDay();
-  for (const row of orderedRows) {
-    for (const day of days) columnTotals[day] += row.hoursByDay[day];
-  }
-
-  return {
-    byServicePO,
-    totalHours: round2(totalHours),
-    days,
-    rows,
-    columnTotals: Object.fromEntries(
-      Object.entries(columnTotals).map(([d, h]) => [d, round2(h)])
-    ),
-    grandTotal: round2(orderedRows.reduce((sum, row) => sum + row.total, 0)),
-  };
+  return days;
 };
 
 /**
  * Project Loading — the only source for the Service PO dropdown. Unmapped
  * or inactive-mapping POs are never returned.
  *
+ * `hierarchy` (Parent/Child nodes from service_po_hierarchy — see
+ * servicePOHierarchyService.js) is included per PO so the employee can log
+ * hours against a Parent OR a Child, not just the PO itself. All mapped
+ * POs' hierarchies are fetched in one batched query, not one call per PO.
+ *
  * @param {number} employeeId
  * @param {number} companyId
- * @returns {Promise<Array<{ id, code, name }>>}
+ * @returns {Promise<Array<{ id, code, name, service_po_breadcrumb, hierarchy: Array<object> }>>}
  */
 const getMappedProjects = async (employeeId, companyId) => {
   const mappings = await employeeServicePOMappingRepository.findByEmployee(employeeId, companyId, 'active');
-  return mappings
+  const projects = mappings
     .filter((m) => m.servicePO)
     .map((m) => ({
       id: m.servicePO.id,
       code: m.servicePO.service_po_code,
       name: m.servicePO.service_po_name,
+      // A project listing represents the whole PO, not a specific logged
+      // node, so its breadcrumb is always just the PO name (Case 3 shape).
+      service_po_breadcrumb: m.servicePO.service_po_name,
     }));
+
+  if (projects.length === 0) return projects;
+
+  const hierarchyRows = await servicePOHierarchyRepository.findByServicePOIds(projects.map((p) => p.id));
+  const rowsByServicePOId = new Map();
+  for (const row of hierarchyRows) {
+    const key = String(row.service_po_id);
+    if (!rowsByServicePOId.has(key)) rowsByServicePOId.set(key, []);
+    rowsByServicePOId.get(key).push(row);
+  }
+
+  return projects.map((project) => ({
+    ...project,
+    hierarchy: servicePOHierarchyDTO.toTree(rowsByServicePOId.get(String(project.id)) || []),
+  }));
 };
 
 module.exports = {
-  createEntry,
+  replaceDailyEntries,
   updateEntry,
   deleteEntry,
   getCalendarSummary,
