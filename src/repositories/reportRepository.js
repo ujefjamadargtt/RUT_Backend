@@ -1796,6 +1796,110 @@ async function getResourseProjectUtilizationReport(filters) {
     count: parseInt(countResult[0].total, 10),
   };
 }
+
+/**
+ * Client Service PO Hours Report — one row per (client, Service PO) with
+ * summed hours for the given filters. Independent of getAnalyticsClientByPO
+ * (dashboardRepository.js) — not called by/from it, does not modify it.
+ *
+ * Hierarchy note: `timesheets` has no hierarchy_node_id column at all —
+ * Parent/Child hierarchy tagging only exists in `employee_work_logs` (draft
+ * data) and is dropped once synced into `timesheets`, where only
+ * service_po_id survives. So SUM(hours) GROUP BY service_po_id here is
+ * already Main + Parent + Child combined; there is no separate hierarchy
+ * row to exclude or roll up.
+ *
+ * @param {object} filters
+ * @param {number} filters.companyId
+ * @param {string} filters.startDate - "YYYY-MM-DD"
+ * @param {string} filters.endDate - "YYYY-MM-DD"
+ * @param {number} [filters.clientId]
+ * @param {number} [filters.poId]
+ * @param {number} [filters.serviceTypeId]
+ * @param {number} [filters.employeeId]
+ * @param {string} [filters.status] - Service PO status; 'all' means no filter
+ * @param {string} [filters.hoursSource] - 'O' = hours_logged; default = COALESCE(modified_hours, hours_logged)
+ * @param {number|string} [filters.roleId] - 5 = exclude unpublished timesheet rows
+ * @returns {Promise<Array<{ client_id, client_name, service_po_id, service_po_code, service_po_name, hours }>>}
+ */
+async function getClientServicePOHours(filters) {
+  const {
+    companyId,
+    startDate,
+    endDate,
+    clientId,
+    poId,
+    serviceTypeId,
+    employeeId,
+    status,
+    hoursSource,
+    roleId,
+  } = filters;
+
+  // hoursSource = 'O' -> original hours_logged. Anything else/default
+  // (including no roleId, or roleId != 5) -> modified_hours falling back to
+  // hours_logged. Same convention used throughout this file.
+  const hoursCol = (hoursSource === 'O')
+    ? 't.hours_logged'
+    : 'COALESCE(t.modified_hours, t.hours_logged)';
+
+  const replacements = { companyId, startDate, endDate };
+  const conditions = [
+    't.company_id = :companyId',
+    't.timesheet_date >= :startDate',
+    't.timesheet_date <= :endDate',
+  ];
+
+  if (clientId) {
+    conditions.push('sp.client_id = :clientId');
+    replacements.clientId = clientId;
+  }
+  if (poId) {
+    conditions.push('sp.id = :poId');
+    replacements.poId = poId;
+  }
+  if (serviceTypeId) {
+    conditions.push('st.id = :serviceTypeId');
+    replacements.serviceTypeId = serviceTypeId;
+  }
+  if (employeeId) {
+    conditions.push('t.employee_id = :employeeId');
+    replacements.employeeId = employeeId;
+  }
+  if (status && status !== 'all') {
+    conditions.push('sp.status = :status');
+    replacements.status = status;
+  }
+  // Role ID 5 only: exclude unpublished timesheet rows — same guard used
+  // throughout this file.
+  if (Number(roleId) === 5) {
+    conditions.push(
+      'EXISTS (SELECT 1 FROM timesheet_import_history h WHERE h.id = t.timesheet_import_id AND h.is_publish = true)'
+    );
+  }
+
+  const whereClause = `WHERE ${conditions.join(' AND ')}`;
+
+  const query = `
+    SELECT
+      c.id                                AS client_id,
+      c.client_name,
+      sp.id                               AS service_po_id,
+      sp.service_po_code,
+      sp.service_po_name,
+      ROUND(SUM(${hoursCol})::NUMERIC, 2) AS hours
+    FROM timesheets t
+    INNER JOIN service_pos sp   ON sp.id = t.service_po_id
+    INNER JOIN clients c        ON c.id  = sp.client_id
+    INNER JOIN service_types st ON st.id = sp.service_type_id
+    ${whereClause}
+    GROUP BY c.id, c.client_name, sp.id, sp.service_po_code, sp.service_po_name
+    ORDER BY c.client_name ASC, sp.service_po_name ASC
+  `;
+
+  return sequelize.query(query, { replacements, type: QueryTypes.SELECT });
+}
+
 module.exports = {
   getEmployeeHourlyRate,
   getMonthlyCostSummary,
@@ -1809,4 +1913,5 @@ module.exports = {
   getResourceUtilization,
   getMonthlyResourceUtilization,
   getResourseProjectUtilizationReport,
+  getClientServicePOHours,
 };

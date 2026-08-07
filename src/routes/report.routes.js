@@ -812,4 +812,65 @@ router.get(
   reportController.getResourseProjectUtilizationReport
 );
 
+/**
+ * @swagger
+ * /reports/client-service-po-hours:
+ *   get:
+ *     summary: Hours grouped by Client then Service PO
+ *     description: >
+ *       Independent of the Dashboard's "Client x Service PO (Hours)" chart —
+ *       grouped server-side by Client, each Client listing all its Service
+ *       POs with summed hours (Main + Parent + Child hierarchy hours
+ *       combined — timesheets has no separate hierarchy rows to begin with)
+ *       and a backend-computed total_hrs_of_client.
+ *     tags: [Reports]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         schema: { type: integer, minimum: 1, maximum: 12 }
+ *         description: Required together with year (mutually exclusive with startDate/endDate)
+ *       - in: query
+ *         name: year
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: startDate
+ *         schema: { type: string, format: date }
+ *         description: Required together with endDate (mutually exclusive with month/year)
+ *       - in: query
+ *         name: endDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: clientId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: poId
+ *         schema: { type: integer }
+ *         description: Filter by Service PO (project)
+ *       - in: query
+ *         name: serviceTypeId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: employeeId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, enum: [in-progress, completed, on-hold, pending, cancelled, closed, all] }
+ *     responses:
+ *       200:
+ *         description: >
+ *           Array of { client_id, client_name, total_hrs_of_client,
+ *           service_pos: [{ service_po_id, service_po_code, service_po_name, hours }] }
+ *       401:
+ *         description: Unauthorized
+ *       422:
+ *         description: Missing/ambiguous date filter (must provide exactly one of month+year or startDate+endDate)
+ */
+router.get(
+  '/client-service-po-hours',
+  authenticate,
+  reportController.getClientServicePOHoursReport
+);
+
 module.exports = router;

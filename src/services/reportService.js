@@ -3,6 +3,7 @@
 const reportRepo = require('../repositories/reportRepository');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
 const logger = require('../utils/logger');
+const dateHelper = require('../helpers/dateHelper');
 
 /**
  * Report Service
@@ -833,6 +834,113 @@ async function getResourseProjectUtilizationReport(query, companyId) {
   };
 }
 
+const round2 = (n) => Math.round((parseFloat(n) || 0) * 100) / 100;
+
+/**
+ * Resolve exactly one filter mode — month+year XOR startDate+endDate — into
+ * a concrete { startDate, endDate } range for getClientServicePOHoursReport.
+ * Throws 422 on any ambiguous or incomplete combination.
+ *
+ * @param {object} query
+ * @returns {{ startDate: string, endDate: string }}
+ */
+function resolveClientServicePODateRange(query) {
+  const month = query.month !== undefined ? parseInt(query.month, 10) : undefined;
+  const year = query.year !== undefined ? parseInt(query.year, 10) : undefined;
+  const startDate = query.startDate || undefined;
+  const endDate = query.endDate || undefined;
+
+  const hasMonthYear = month !== undefined || year !== undefined;
+  const hasRange = startDate !== undefined || endDate !== undefined;
+
+  if (hasMonthYear && hasRange) {
+    const err = new Error('Provide either month and year, or startDate and endDate — not both.');
+    err.statusCode = 422;
+    throw err;
+  }
+  if (!hasMonthYear && !hasRange) {
+    const err = new Error('Provide either month and year, or startDate and endDate.');
+    err.statusCode = 422;
+    throw err;
+  }
+
+  if (hasMonthYear) {
+    if (month === undefined || year === undefined || isNaN(month) || isNaN(year)) {
+      const err = new Error('Both month and year are required together.');
+      err.statusCode = 422;
+      throw err;
+    }
+    if (month < 1 || month > 12) {
+      const err = new Error('month must be between 1 and 12.');
+      err.statusCode = 422;
+      throw err;
+    }
+    return dateHelper.getMonthBounds(month, year);
+  }
+
+  if (!startDate || !endDate) {
+    const err = new Error('Both startDate and endDate are required together.');
+    err.statusCode = 422;
+    throw err;
+  }
+  return { startDate, endDate };
+}
+
+/**
+ * Client Service PO Hours Report — grouped by Client, each Client listing
+ * all its Service POs with summed hours and a backend-computed
+ * total_hrs_of_client. Independent of getAnalyticsClientByPO's Dashboard
+ * chart (dashboardService.js) — does not call or alter it.
+ *
+ * @param {object} query - req.query (month+year XOR startDate+endDate required)
+ * @param {number} companyId - req.companyId
+ * @returns {Promise<Array<{ client_id, client_name, total_hrs_of_client, service_pos: Array }>>}
+ */
+async function getClientServicePOHoursReport(query, companyId) {
+  const { startDate, endDate } = resolveClientServicePODateRange(query);
+
+  const filters = {
+    companyId,
+    startDate,
+    endDate,
+    clientId: query.clientId ? parseInt(query.clientId, 10) : undefined,
+    poId: query.poId ? parseInt(query.poId, 10) : undefined,
+    serviceTypeId: query.serviceTypeId ? parseInt(query.serviceTypeId, 10) : undefined,
+    employeeId: query.employeeId ? parseInt(query.employeeId, 10) : undefined,
+    status: query.status || undefined,
+    hoursSource: query.hoursSource,
+    roleId: query.roleId,
+  };
+
+  logger.info('Report: getClientServicePOHoursReport', { filters });
+
+  const rows = await reportRepo.getClientServicePOHours(filters);
+
+  const clientsById = new Map();
+  for (const row of rows) {
+    const clientId = row.client_id;
+    if (!clientsById.has(clientId)) {
+      clientsById.set(clientId, {
+        client_id: clientId,
+        client_name: row.client_name,
+        total_hrs_of_client: 0,
+        service_pos: [],
+      });
+    }
+    const hours = round2(row.hours);
+    const client = clientsById.get(clientId);
+    client.service_pos.push({
+      service_po_id: row.service_po_id,
+      service_po_code: row.service_po_code,
+      service_po_name: row.service_po_name,
+      hours,
+    });
+    client.total_hrs_of_client = round2(client.total_hrs_of_client + hours);
+  }
+
+  return Array.from(clientsById.values());
+}
+
 module.exports = {
   getEmployeeHourlyRate,
   getMonthlyCostSummary,
@@ -845,5 +953,6 @@ module.exports = {
   getServicePOSummary,
   getResourceUtilization,
   getMonthlyResourceUtilization,
-  getResourseProjectUtilizationReport
+  getResourseProjectUtilizationReport,
+  getClientServicePOHoursReport,
 };

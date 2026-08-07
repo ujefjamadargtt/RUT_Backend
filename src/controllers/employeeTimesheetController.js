@@ -56,10 +56,18 @@ const getDaily = async (req, res, next) => {
 
 /**
  * GET /api/v1/employee-timesheets/monthly-summary
+ * viewType=day (default) — unchanged existing per-date response.
+ * viewType=month — aggregated Service PO totals for the month, no dates.
  */
 const getMonthlySummary = async (req, res, next) => {
   try {
-    const { month, year } = req.query;
+    const { month, year, viewType } = req.query;
+
+    if (viewType === 'month') {
+      const summary = await employeeTimesheetService.getMonthlySummaryByServicePO(req.employeeId, month, year, req.companyId);
+      return sendSuccess(res, summary, 'Monthly summary fetched successfully.');
+    }
+
     const summary = await employeeTimesheetService.getMonthlySummary(req.employeeId, month, year, req.companyId);
     return sendSuccess(res, summary, 'Monthly summary fetched successfully.');
   } catch (err) {

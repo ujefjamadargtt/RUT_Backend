@@ -1,7 +1,7 @@
 'use strict';
 
 const reportService = require('../services/reportService');
-const { sendPaginated, sendError } = require('../utils/response');
+const { sendPaginated, sendSuccess, sendError } = require('../utils/response');
 const logger = require('../utils/logger');
 
 /**
@@ -273,6 +273,32 @@ async function getResourseProjectUtilizationReport(req, res, next) {
   }
 }
 
+/**
+ * GET /api/v1/reports/client-service-po-hours
+ *
+ * Query params:
+ *   month + year, OR startDate + endDate (exactly one mode, required),
+ *   clientId, poId (project), serviceTypeId, employeeId, status
+ *
+ * Independent of the Dashboard's "Client x Service PO (Hours)" chart
+ * (getAnalyticsDashboard/getAnalyticsClientByPO) — not called by it, does
+ * not modify it. Not paginated — one row per Client, each with a nested
+ * service_pos array.
+ */
+async function getClientServicePOHoursReport(req, res, next) {
+  try {
+    const filters = { ...req.body, ...req.query };
+    const data = await reportService.getClientServicePOHoursReport(filters, req.companyId);
+    return sendSuccess(res, data, 'Client Service PO Hours Report fetched successfully.');
+  } catch (err) {
+    if (err.statusCode) {
+      return sendError(res, err.message, err.statusCode);
+    }
+    logger.error('getClientServicePOHoursReport error', { error: err.message, stack: err.stack });
+    next(err);
+  }
+}
+
 module.exports = {
   getEmployeeHourlyRate,
   getMonthlyCostSummary,
@@ -285,5 +311,6 @@ module.exports = {
   getServicePOSummary,
   getResourceUtilization,
   getMonthlyResourceUtilization,
-  getResourseProjectUtilizationReport
+  getResourseProjectUtilizationReport,
+  getClientServicePOHoursReport,
 };

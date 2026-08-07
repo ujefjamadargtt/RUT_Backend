@@ -475,6 +475,104 @@ const existsForHierarchyNodes = async (hierarchyNodeIds, companyId) => {
   return !!row;
 };
 
+/**
+ * Hard-delete EVERY work log entry (any log_type) for one employee whose
+ * work_date falls within an inclusive date range — the "clear the month"
+ * half of the Monthly Work Log REPLACE SAVE flow
+ * (employeeMonthlyWorkLogService.submitMonthlyWorkLog). Mirrors
+ * deleteByEmployeeAndDate above, scoped to a range instead of one date, so
+ * a single call clears both any existing Daily entries for the month and
+ * any previous Monthly entry, before the new Monthly rows are inserted in
+ * the same transaction.
+ * @param {number} employeeId
+ * @param {string} startDate - "YYYY-MM-DD"
+ * @param {string} endDate - "YYYY-MM-DD"
+ * @param {number} companyId
+ * @param {object} transaction
+ * @returns {Promise<number>} rows deleted
+ */
+const deleteByEmployeeAndDateRange = async (employeeId, startDate, endDate, companyId, transaction) => {
+  return EmployeeWorkLog.destroy({
+    where: {
+      employee_id: employeeId,
+      work_date: { [Op.gte]: startDate, [Op.lte]: endDate },
+      company_id: companyId,
+    },
+    transaction,
+  });
+};
+
+/**
+ * Monthly Work Log hierarchy breakdown for ONE date (the month's last day)
+ * — same shape as getDailyHierarchyBreakdown, but filtered to
+ * log_type: 'monthly' so a Daily row that happens to land on the month's
+ * last day never leaks into the Monthly Work Log view.
+ * @param {object} params - { employeeId, date, companyId }
+ * @returns {Promise<Array<{ service_po_id, hierarchy_node_id, total_hours }>>}
+ */
+const getMonthlyLogHierarchyBreakdown = async ({ employeeId, date, companyId }) => {
+  return EmployeeWorkLog.findAll({
+    attributes: [
+      'service_po_id',
+      'hierarchy_node_id',
+      [fn('SUM', col('hours')), 'total_hours'],
+    ],
+    where: {
+      work_date: date,
+      employee_id: parseInt(employeeId, 10),
+      company_id: companyId,
+      log_type: 'monthly',
+    },
+    group: ['service_po_id', 'hierarchy_node_id'],
+    raw: true,
+  });
+};
+
+/**
+ * Hard-delete the Monthly Work Log entries (log_type: 'monthly' only —
+ * never touches Daily rows) for one employee within a date range. Backs
+ * employeeMonthlyWorkLogService.deleteMonthlyWorkLog.
+ * @param {number} employeeId
+ * @param {string} startDate - "YYYY-MM-DD"
+ * @param {string} endDate - "YYYY-MM-DD"
+ * @param {number} companyId
+ * @returns {Promise<number>} rows deleted
+ */
+const deleteMonthlyEntries = async (employeeId, startDate, endDate, companyId) => {
+  return EmployeeWorkLog.destroy({
+    where: {
+      employee_id: employeeId,
+      work_date: { [Op.gte]: startDate, [Op.lte]: endDate },
+      company_id: companyId,
+      log_type: 'monthly',
+    },
+  });
+};
+
+/**
+ * Whether a Monthly Work Log entry already exists for this employee within
+ * a date range — backs the Daily-side guard
+ * (employeeTimesheetService.assertNoMonthlyLogForDate) that blocks Daily
+ * create/update for a month that already has a Monthly entry.
+ * @param {number} employeeId
+ * @param {string} startDate - "YYYY-MM-DD"
+ * @param {string} endDate - "YYYY-MM-DD"
+ * @param {number} companyId
+ * @returns {Promise<boolean>}
+ */
+const hasMonthlyEntry = async (employeeId, startDate, endDate, companyId) => {
+  const row = await EmployeeWorkLog.findOne({
+    where: {
+      employee_id: employeeId,
+      work_date: { [Op.gte]: startDate, [Op.lte]: endDate },
+      company_id: companyId,
+      log_type: 'monthly',
+    },
+    attributes: ['id'],
+  });
+  return !!row;
+};
+
 module.exports = {
   findAll,
   findById,
@@ -483,12 +581,16 @@ module.exports = {
   create,
   bulkCreate,
   deleteByEmployeeAndDate,
+  deleteByEmployeeAndDateRange,
   update,
   deleteById,
   getDailyHours,
   getCalendarSummary,
   getDailyHierarchyBreakdown,
   getMonthlyHierarchyBreakdown,
+  getMonthlyLogHierarchyBreakdown,
+  deleteMonthlyEntries,
+  hasMonthlyEntry,
   findForSync,
   markSyncedByTuples,
   revertSyncStatusByImportIds,

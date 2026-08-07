@@ -89,6 +89,26 @@ async function assertProjectMapped(employeeId, servicePOId, companyId) {
 }
 
 /**
+ * Reject a Daily create/update for a date whose month already has a
+ * Monthly Work Log entry (employeeMonthlyWorkLogService.submitMonthlyWorkLog)
+ * — the two modes are mutually exclusive per month, so a Daily row can never
+ * coexist with (and double-count against) a Monthly total for the same
+ * month. No-op when no Monthly entry exists for that month.
+ */
+async function assertNoMonthlyLogForDate(employeeId, dateStr, companyId) {
+  const year = parseInt(dateStr.slice(0, 4), 10);
+  const month = parseInt(dateStr.slice(5, 7), 10);
+  const { startDate, endDate } = dateHelper.getMonthBounds(month, year);
+  const hasMonthly = await employeeWorkLogRepository.hasMonthlyEntry(employeeId, startDate, endDate, companyId);
+  if (hasMonthly) {
+    throw conflictError(
+      `A Monthly Work Log already exists for ${dateHelper.formatDate(dateStr, 'MMMM YYYY')}. ` +
+      'Delete it before logging daily entries for this month.'
+    );
+  }
+}
+
+/**
  * When a hierarchy node (Parent or Child — see servicePOHierarchyService.js)
  * is supplied, confirm it actually belongs to the Service PO being logged
  * against and return it (with its parentNode loaded, for
@@ -152,6 +172,7 @@ async function assertDailyCap(employeeId, dateStr, hoursRequested, companyId, ex
  */
 const replaceDailyEntries = async (employeeId, companyId, data) => {
   const dateStr = assertNotFutureDate(data.timesheet_date);
+  await assertNoMonthlyLogForDate(employeeId, dateStr, companyId);
   const lines = data.entries || [];
 
   // Two lines at the same (service_po_id, hierarchy_node_id) would collide
@@ -258,6 +279,7 @@ const updateEntry = async (employeeId, companyId, id, data) => {
   const hierarchyNodeId = data.hierarchy_node_id !== undefined ? data.hierarchy_node_id : existing.hierarchy_node_id;
   const hours = data.hours ?? existing.hours;
   const dateStr = data.timesheet_date ? assertNotFutureDate(data.timesheet_date) : existing.work_date;
+  await assertNoMonthlyLogForDate(employeeId, dateStr, companyId);
 
   await assertProjectMapped(employeeId, servicePOId, companyId);
 
@@ -532,6 +554,77 @@ const getMonthlySummary = async (employeeId, month, year, companyId) => {
 };
 
 /**
+ * Collapse a set of (date, service_po_id, hierarchy_node_id, total_hours)
+ * rows spanning MULTIPLE dates into one row per (service_po_id,
+ * hierarchy_node_id), summing total_hours across every date. Needed before
+ * calling groupHoursByServicePO, which .set()s rather than accumulates —
+ * safe when given one date's rows (each key already appears once, thanks
+ * to the SQL GROUP BY), not safe across a whole month's.
+ *
+ * @param {Array<{ service_po_id, hierarchy_node_id, total_hours }>} rows
+ * @returns {Array<{ service_po_id, hierarchy_node_id, total_hours }>}
+ */
+const collapseRowsAcrossDates = (rows) => {
+  const totals = new Map();
+  for (const row of rows) {
+    const key = `${row.service_po_id}|${row.hierarchy_node_id || ''}`;
+    const hours = parseFloat(row.total_hours) || 0;
+    if (!totals.has(key)) {
+      totals.set(key, { service_po_id: row.service_po_id, hierarchy_node_id: row.hierarchy_node_id, total_hours: 0 });
+    }
+    totals.get(key).total_hours += hours;
+  }
+  return Array.from(totals.values());
+};
+
+/**
+ * Monthly Summary — Service PO view (viewType=month on the
+ * /monthly-summary endpoint, see employeeTimesheetController.getMonthlySummary).
+ * Same Service PO -> Parent -> Child hierarchy shape Day View returns per
+ * date — reuses buildServicePOsForDate/toHierarchyTreeWithHours completely
+ * unchanged, just fed month-aggregated hours instead of one date's. Every
+ * node's `hours` is that node's OWN direct hours only (a Parent's hours
+ * does NOT include its Children's — same independent-per-node meaning
+ * Day View already uses, since hours can be logged directly against any
+ * node). Only the Service PO's own top-level `hours` is a total — direct-
+ * to-PO plus everything under it (via sumHierarchyHours, safe here because
+ * every node's hours is independent/non-overlapping). Every Parent/Child
+ * node is always present, even at 0 hours, for a shown Service PO — the
+ * hierarchy is never flattened. Zero-hour Service POs (no activity
+ * anywhere in the month) are omitted, matching the plain summary table
+ * this view is for.
+ *
+ * @param {number} employeeId
+ * @param {number} month
+ * @param {number} year
+ * @param {number} companyId
+ * @returns {Promise<{ service_pos: Array<{ service_po_id, service_po_name, hours, children }>, total_hours: number }>}
+ */
+const getMonthlySummaryByServicePO = async (employeeId, month, year, companyId) => {
+  const [{ mappedPOs, hierarchyRowsByPOId }, breakdownRows] = await Promise.all([
+    loadMappedPOsWithHierarchy(employeeId, companyId),
+    employeeWorkLogRepository.getMonthlyHierarchyBreakdown({ employeeId, month, year, companyId }),
+  ]);
+
+  const round2 = (n) => Math.round(n * 100) / 100;
+
+  const hoursByPOId = groupHoursByServicePO(collapseRowsAcrossDates(breakdownRows));
+
+  const service_pos = buildServicePOsForDate(mappedPOs, hierarchyRowsByPOId, hoursByPOId)
+    .map(({ service_po_id, service_po_name, po_total_hrs, children }) => ({
+      service_po_id,
+      service_po_name,
+      hours: po_total_hrs,
+      children,
+    }))
+    .filter((po) => po.hours > 0);
+
+  const total_hours = round2(service_pos.reduce((sum, po) => sum + po.hours, 0));
+
+  return { service_pos, total_hours };
+};
+
+/**
  * Project Loading — the only source for the Service PO dropdown. Unmapped
  * or inactive-mapping POs are never returned.
  *
@@ -580,6 +673,17 @@ module.exports = {
   getCalendarSummary,
   getDailyEntries,
   getMonthlySummary,
+  getMonthlySummaryByServicePO,
   getMappedProjects,
   DAILY_HOUR_CAP,
+
+  // Shared with employeeMonthlyWorkLogService.js — reused as-is rather than
+  // duplicated, since both modules need the identical project-mapping/
+  // hierarchy-node validation and hierarchy-tree-building logic.
+  assertProjectMapped,
+  resolveHierarchyNode,
+  loadMappedPOsWithHierarchy,
+  groupHoursByServicePO,
+  buildServicePOsForDate,
+  toDateString,
 };

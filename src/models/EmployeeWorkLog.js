@@ -95,12 +95,33 @@ module.exports = (sequelize) => {
         },
       },
       hours: {
-        type: DataTypes.DECIMAL(4, 2),
+        type: DataTypes.DECIMAL(6, 2),
         allowNull: false,
         validate: {
           notNull: { msg: 'Hours is required.' },
           min: { args: [0.01], msg: 'Hours must be greater than 0.' },
-          max: { args: [12], msg: 'Hours cannot exceed 12 per day.' },
+          // Daily rows (log_type: 'daily', the column default) keep the
+          // original 12-hours/day ceiling exactly as before; Monthly rows
+          // (log_type: 'monthly') allow up to the 176-hour monthly cap
+          // (see employeeMonthlyWorkLogService.MONTHLY_HOUR_CAP).
+          isWithinLogTypeCap(value) {
+            const cap = this.log_type === 'monthly' ? 176 : 12;
+            if (parseFloat(value) > cap) {
+              throw new Error(`Hours cannot exceed ${cap} for a ${this.log_type || 'daily'} entry.`);
+            }
+          },
+        },
+      },
+      // 'daily'   - one row per calendar date (existing Daily Work Log).
+      // 'monthly' - one row per Service PO/hierarchy node for an entire
+      //             month, dated on that month's last calendar day (Monthly
+      //             Work Log — see employeeMonthlyWorkLogService.js).
+      log_type: {
+        type: DataTypes.STRING(10),
+        allowNull: false,
+        defaultValue: 'daily',
+        validate: {
+          isIn: { args: [['daily', 'monthly']], msg: 'log_type must be daily or monthly.' },
         },
       },
       description: {

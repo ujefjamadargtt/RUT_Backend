@@ -9,6 +9,7 @@ const {
   replaceDailyEntriesSchema,
   updateEntrySchema,
   monthYearQuerySchema,
+  monthlySummaryQuerySchema,
   dailyQuerySchema,
 } = require('../validations/employeeTimesheetValidation');
 const controller = require('../controllers/employeeTimesheetController');
@@ -88,7 +89,7 @@ router.get(
  * @swagger
  * /employee-timesheets/monthly-summary:
  *   get:
- *     summary: Per-date Service PO -> Parent -> Child hierarchy with hours-per-node, for one month
+ *     summary: Monthly summary — per-date hierarchy breakdown (default) or aggregated Service PO totals
  *     tags: [Employee Timesheet]
  *     security:
  *       - bearerAuth: []
@@ -101,19 +102,27 @@ router.get(
  *         name: year
  *         required: true
  *         schema: { type: integer }
+ *       - in: query
+ *         name: viewType
+ *         required: false
+ *         schema: { type: string, enum: [day, month], default: day }
+ *         description: >
+ *           'day' (default) — unchanged existing response. 'month' —
+ *           aggregated Service PO totals for the whole month, no dates.
  *     responses:
  *       200:
  *         description: >
- *           Array of { date, service_pos: [{ service_po_id, service_po_name,
- *           hours, po_total_hrs, children: [{ hierarchy_id, name, type,
- *           hours, children? }] }] } — one entry per calendar date, every
- *           mapped Service PO and its complete hierarchy always present
- *           (hours default to 0).
+ *           viewType=day (default): array of { date, service_pos: [{ service_po_id,
+ *           service_po_name, hours, po_total_hrs, children: [...] }] } — one
+ *           entry per calendar date, unchanged from before.
+ *           viewType=month: { service_pos: [{ service_po_id, service_po_name,
+ *           hours }], total_hours } — one row per Service PO with hours
+ *           logged this month (zero-hour POs omitted), plus the month's total.
  */
 router.get(
   '/monthly-summary',
   employeeAuth,
-  validate(monthYearQuerySchema, 'query'),
+  validate(monthlySummaryQuerySchema, 'query'),
   controller.getMonthlySummary
 );
 

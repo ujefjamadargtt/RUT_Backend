@@ -167,9 +167,42 @@ function nowFilenamePrefix() {
   return moment().format('YYYY-MM-DD-HH-mm-ss');
 }
 
+/**
+ * Whether a Monthly Work Log may be submitted for the given month/year —
+ * only once that month is no longer "in progress":
+ *
+ *  Case 1: the selected month has already ended (it's before the current
+ *          month/year).
+ *  Case 2: the selected month IS the current month, and today is its last
+ *          calendar day.
+ *
+ * Any future month, or the current month before its last day, is not
+ * eligible.
+ *
+ * @param {number} month - 1-based month.
+ * @param {number} year
+ * @returns {boolean}
+ */
+function isMonthlyLogEligible(month, year) {
+  const today = moment();
+  const currentMonth = today.month() + 1;
+  const currentYear = today.year();
+
+  if (year < currentYear || (year === currentYear && month < currentMonth)) {
+    return true; // Case 1 — month already ended
+  }
+
+  if (year === currentYear && month === currentMonth) {
+    return today.date() === today.daysInMonth(); // Case 2 — today is the last day
+  }
+
+  return false; // future month
+}
+
 module.exports = {
   getCurrentMonth,
   getCurrentYear,
+  isMonthlyLogEligible,
   formatDate,
   formatDisplayDate,
   formatDateTime,

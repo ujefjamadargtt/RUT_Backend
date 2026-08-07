@@ -82,7 +82,6 @@ const updateEntrySchema = Joi.object({
 
 /**
  * GET /employee-timesheets/calendar
- * GET /employee-timesheets/monthly-summary
  */
 const monthYearQuerySchema = Joi.object({
   month: Joi.number().integer().min(1).max(12).required().messages({
@@ -90,6 +89,24 @@ const monthYearQuerySchema = Joi.object({
   }),
   year: Joi.number().integer().min(2000).required().messages({
     'any.required': 'year is required.',
+  }),
+});
+
+/**
+ * GET /employee-timesheets/monthly-summary
+ * viewType is optional and defaults to 'day' — omitting it entirely keeps
+ * today's exact response (per-date Service PO hierarchy breakdown).
+ * viewType=month switches to the aggregated Service PO totals table.
+ */
+const monthlySummaryQuerySchema = Joi.object({
+  month: Joi.number().integer().min(1).max(12).required().messages({
+    'any.required': 'month is required.',
+  }),
+  year: Joi.number().integer().min(2000).required().messages({
+    'any.required': 'year is required.',
+  }),
+  viewType: Joi.string().valid('day', 'month').optional().default('day').messages({
+    'any.only': 'viewType must be either day or month.',
   }),
 });
 
@@ -107,5 +124,6 @@ module.exports = {
   replaceDailyEntriesSchema,
   updateEntrySchema,
   monthYearQuerySchema,
+  monthlySummaryQuerySchema,
   dailyQuerySchema,
 };

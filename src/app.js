@@ -36,6 +36,7 @@ const aiInsightRoutes = require('./routes/aiInsight.routes');
 const aiCopilotRoutes = require('./routes/aiCopilot.routes');
 const employeeServicePOMappingRoutes = require('./routes/employeeServicePOMapping.routes');
 const employeeTimesheetRoutes = require('./routes/employeeTimesheet.routes');
+const employeeMonthlyWorkLogRoutes = require('./routes/employeeMonthlyWorkLog.routes');
 const employeeReportRoutes = require('./routes/employeeReport.routes');
 
 const app = express();
@@ -209,6 +210,7 @@ app.use(`${API_PREFIX}/ai-insights`, aiInsightRoutes);
 app.use(`${API_PREFIX}/ai`, aiCopilotRoutes);
 app.use(`${API_PREFIX}/employee-servicepo-mapping`, employeeServicePOMappingRoutes);
 app.use(`${API_PREFIX}/employee-timesheets`, employeeTimesheetRoutes);
+app.use(`${API_PREFIX}/employee-timesheets/monthly`, employeeMonthlyWorkLogRoutes);
 app.use(`${API_PREFIX}/employee-reports`, employeeReportRoutes);
 
 // ─── 404 Handler ──────────────────────────────────────────────────────────────

@@ -17,11 +17,15 @@ const {
  * Raw database access — no business logic.
  */
 
-// Service PO statuses eligible for timesheet logging. Shared by the Excel
-// import's validateRows() (timesheetService.js) and the manual single-entry
-// create path (findEligibleServicePOById below) so both paths can never
-// silently drift apart on which PO statuses are loggable.
-const ELIGIBLE_PO_STATUSES = ['in-progress', 'on-hold', 'pending'];
+// Service PO statuses eligible for timesheet logging — every status except
+// the two terminal/locked ones (cancelled, closed; see servicePOService.js's
+// own update() guard, which treats exactly these two as locked). A
+// 'completed' PO is still loggable — completion is not the same as
+// cancelled/closed here. Shared by the Excel import's validateRows()
+// (timesheetService.js) and the manual single-entry create path
+// (findEligibleServicePOById below) so both paths can never silently drift
+// apart on which PO statuses are loggable.
+const ELIGIBLE_PO_STATUSES = ['in-progress', 'on-hold', 'pending', 'completed'];
 
 /**
  * Fetch a single active, non-deleted employee by ID — the same eligibility
