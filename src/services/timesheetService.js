@@ -718,6 +718,37 @@ function detectDuplicateRows(validRows) {
 }
 
 /**
+ * Collapse rows sharing the same employee + Service PO + date into a single
+ * row, summing their hours. The `timesheets` table only has one slot per
+ * (employee, PO, date) — see `timesheets_employee_po_date_unique` — but
+ * `employee_work_logs` (Employee Self Timesheet) is keyed one level deeper,
+ * per task/hierarchy node, so the same PO+date can legitimately have several
+ * work-log rows (e.g. an 8h entry on one task and a 2h entry on another,
+ * same day). Without this collapse, bulkCreate() below inserts both rows
+ * and the DB's unique constraint rejects the second one. Non-hours fields
+ * (sub_project_id, etc.) are taken from the first row encountered for that
+ * key.
+ *
+ * @param {object[]} validRows - Output from adjustHoursTo176()
+ * @returns {object[]} rows with one entry per employee+PO+date
+ */
+function mergeDuplicateRows(validRows) {
+  const byKey = new Map();
+
+  for (const row of validRows) {
+    const key = `${row.employeeId}|${row.poId}|${row.date}`;
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.hours += row.hours;
+    } else {
+      byKey.set(key, { ...row });
+    }
+  }
+
+  return Array.from(byKey.values());
+}
+
+/**
  * Validate a parsed array of rows against the database.
  *
  * For each row checks:
@@ -1147,9 +1178,14 @@ const confirmImport = async (importId, userId, ipAddress = null, companyId) => {
     throw err;
   }
 
-  if (importRecord.status !== 'pending') {
+  // A 'failed' import is allowed to retry: confirmImport() always re-fetches
+  // and re-validates the source rows from scratch below (never trusts the
+  // stale preview), so a retry is functionally identical to a first
+  // confirm. Without this, one bad row permanently locks the import — the
+  // operator has no way back to 'pending' and every retry 409s.
+  if (!['pending', 'failed'].includes(importRecord.status)) {
     const err = new Error(
-      `Import #${importId} has already been ${importRecord.status}. Only pending imports can be confirmed.`
+      `Import #${importId} has already been ${importRecord.status}. Only pending or failed imports can be confirmed.`
     );
     err.statusCode = 409;
     throw err;
@@ -1192,18 +1228,22 @@ const confirmImport = async (importId, userId, ipAddress = null, companyId) => {
   logErrorRowBreakdown(errorRows, { fileName: importRecord.file_name, importId, stage: 'confirm' });
   const validRows = adjustHoursTo176(rawValidRows);
 
-  // Detect (not block) rows sharing the same employee + PO + date. Note this
-  // combination is also enforced by the timesheets table's own unique
-  // constraint, so if duplicates remain unresolved the bulk insert below will
-  // fail — this is reported for visibility only, it does not deduplicate.
+  // Detect rows sharing the same employee + PO + date, for logging/audit
+  // visibility. This combination is also the timesheets table's own unique
+  // constraint, so these rows are merged (hours summed) below rather than
+  // inserted separately — see mergeDuplicateRows().
   const duplicates = detectDuplicateRows(validRows);
   if (duplicates.length > 0) {
-    logger.warn('Timesheet import confirm: duplicate employee+PO+date rows detected', {
+    logger.warn('Timesheet import confirm: duplicate employee+PO+date rows detected — hours will be summed into one row', {
       importId,
       duplicateCount: duplicates.length,
       duplicates,
     });
   }
+
+  // Collapse any employee+PO+date duplicates (summing hours) BEFORE
+  // building timesheet records — see mergeDuplicateRows() doc comment.
+  const mergedRows = mergeDuplicateRows(validRows);
 
   if (validRows.length === 0) {
     await timesheetImportRepository.updateImportHistory(importId, {
@@ -1234,7 +1274,7 @@ const confirmImport = async (importId, userId, ipAddress = null, companyId) => {
       companyId
     );
 
-    const records = validRows.map((row) => ({
+    const records = mergedRows.map((row) => ({
       employee_id:         row.employeeId,
       service_po_id:       row.poId,
       sub_project_id:      row.subProjectId || null,
@@ -1315,7 +1355,7 @@ const confirmImport = async (importId, userId, ipAddress = null, companyId) => {
     // row can never be left 'pending' after its official record exists (or
     // vice versa).
     if (importRecord.source === 'pms') {
-      const tuples = validRows.map((row) => ({ employeeId: row.employeeId, poId: row.poId, date: row.date }));
+      const tuples = mergedRows.map((row) => ({ employeeId: row.employeeId, poId: row.poId, date: row.date }));
       const syncedCount = await employeeWorkLogRepository.markSyncedByTuples(companyId, tuples, importId, t);
       logger.info('Employee work logs marked as synced', { importId, syncedCount });
     }
