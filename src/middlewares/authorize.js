@@ -1,32 +1,31 @@
 'use strict';
 
 const logger = require('../utils/logger');
+const roleHierarchyService = require('../services/roleHierarchyService');
 
 /**
- * Role-based Authorization Middleware Factory
- * @param {string[]} roles - Array of allowed role names
+ * Capability-based Authorization Middleware Factory
+ *
+ * @param {string|string[]} capabilities - one or more capability keys (see
+ *   database/migrations/20260836_seed_target_roles_and_capabilities.sql);
+ *   passing any one of them is sufficient (OR, not AND). An empty array
+ *   means "any authenticated user."
  * @returns {Function} Express middleware
  *
  * Usage:
- *   router.get('/admin', authenticate, authorize(['HR', 'Finance']), handler)
+ *   router.post('/', authenticate, authorize('bu.create_client'), handler)
+ *
+ * Replaces the old role-name-string version and its hardcoded
+ * SUPERUSER_ROLES bypass list with req.capabilities (computed once per
+ * request by auth.js via roleHierarchyService — the single place
+ * inheritance logic lives) plus a generic, rank-based senior-tier bypass
+ * (see roleHierarchyService.isSeniorTier) — Platform Admin/Admin/Entity
+ * Admin/BU Admin manage everything within their own scope, the same
+ * privilege the old bypass granted 'super admin'/'bu admin' specifically,
+ * generalized to the new hierarchy instead of hardcoded by name.
  */
-// Neither role appears in any per-route authorize([...]) array, so both are
-// treated as a bypass here instead of appending them to ~60 route
-// declarations:
-//  - "Super Admin": pre-existing business role (id=6) that predates
-//    per-route authorize() arrays and keeps its original full-access behavior.
-//  - "BU Admin" (renamed from "Company Admin" — see
-//    database/migrations/20260807_rename_company_admin_to_bu_admin.sql): new
-//    per-company role from the multi-tenancy retrofit — "manages everything
-//    within their own company." Company-scoping is already fully enforced
-//    separately by resolveCompany, so this bypass only grants full CRUD
-//    within their own company, never cross-company reach.
-const SUPERUSER_ROLES = ['super admin', 'bu admin'];
-
-const authorize = (roles = []) => {
-  if (typeof roles === 'string') {
-    roles = [roles];
-  }
+const authorize = (capabilities = []) => {
+  const requiredCapabilities = typeof capabilities === 'string' ? [capabilities] : capabilities;
 
   return (req, res, next) => {
     if (!req.user) {
@@ -41,50 +40,29 @@ const authorize = (roles = []) => {
       });
     }
 
-    const userRoles = Array.isArray(req.userRoles)
-      ? req.userRoles
-      : req.userRole
-      ? [req.userRole]
-      : [];
-
-    if (userRoles.length === 0) {
-      logger.warn('User has no role assigned', {
-        userId: req.userId,
-        path: req.path,
-      });
-      return res.status(403).json({
-        success: false,
-        message: 'Access denied. No role assigned to your account.',
-        code: 'NO_ROLE',
-      });
-    }
-
-    if (userRoles.some((userRole) => SUPERUSER_ROLES.includes(userRole.toLowerCase()))) {
+    if (roleHierarchyService.isSeniorTier(req.user.role)) {
       return next();
     }
 
-    if (roles.length === 0) {
-      // No roles specified means any authenticated user is allowed
+    if (requiredCapabilities.length === 0) {
+      // No capability specified means any authenticated user is allowed
       return next();
     }
 
-    const isAuthorized = roles.some((role) =>
-      userRoles.some((userRole) => userRole.toLowerCase() === role.toLowerCase())
-    );
+    const isAuthorized = roleHierarchyService.hasCapability(req.capabilities || new Set(), requiredCapabilities);
 
     if (!isAuthorized) {
-      const userRolesDisplay = userRoles.join(', ');
       logger.warn('Unauthorized access attempt', {
         userId: req.userId,
-        userRoles: userRolesDisplay,
-        requiredRoles: roles,
+        userRole: req.userRoleName,
+        requiredCapabilities,
         path: req.path,
         method: req.method,
         ip: req.ip,
       });
       return res.status(403).json({
         success: false,
-        message: `Access denied. Required role(s): ${roles.join(', ')}. Your roles: ${userRolesDisplay}.`,
+        message: `Access denied. This action requires one of: ${requiredCapabilities.join(', ')}.`,
         code: 'FORBIDDEN',
       });
     }

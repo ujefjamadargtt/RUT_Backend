@@ -3,7 +3,8 @@
 const express = require('express');
 const router = express.Router();
 
-const employeeAuth = require('../middlewares/employeeAuth');
+const authenticate = require('../middlewares/auth');
+const authorize = require('../middlewares/authorize');
 const { validate } = require('../middlewares/validateRequest');
 const {
   submitMonthlyWorkLogSchema,
@@ -51,7 +52,8 @@ const controller = require('../controllers/employeeMonthlyWorkLogController');
  */
 router.get(
   '/',
-  employeeAuth,
+  authenticate,
+  authorize('employee.view_timesheet'),
   validate(monthYearQuerySchema, 'query'),
   controller.getMonthly
 );
@@ -101,7 +103,8 @@ router.get(
  */
 router.post(
   '/',
-  employeeAuth,
+  authenticate,
+  authorize('employee.fill_worklog'),
   validate(submitMonthlyWorkLogSchema),
   controller.submitMonthly
 );
@@ -120,7 +123,8 @@ router.post(
  */
 router.put(
   '/',
-  employeeAuth,
+  authenticate,
+  authorize('employee.fill_worklog'),
   validate(submitMonthlyWorkLogSchema),
   controller.submitMonthly
 );
@@ -148,7 +152,8 @@ router.put(
  */
 router.delete(
   '/',
-  employeeAuth,
+  authenticate,
+  authorize('employee.fill_worklog'),
   validate(monthYearQuerySchema, 'query'),
   controller.deleteMonthly
 );

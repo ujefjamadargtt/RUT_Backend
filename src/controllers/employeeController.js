@@ -40,7 +40,7 @@ const getById = async (req, res, next) => {
     if (isNaN(id)) {
       return sendError(res, 'Invalid employee ID.', 400);
     }
-    const employee = await employeeService.getById(id, req.companyId);
+    const employee = await employeeService.getByIdWithEmail(id, req.companyId);
     return sendSuccess(res, employee, 'Employee fetched successfully.');
   } catch (err) {
     if (err.statusCode === 404) {
@@ -52,14 +52,20 @@ const getById = async (req, res, next) => {
 
 /**
  * POST /api/v1/employees
+ *
+ * Creates the Employee, its linked User (login) account, and the mandatory
+ * Primary Manager mapping (plus optional Secondary) in one transaction —
+ * see employeeService.create(). Response includes `temporaryPassword`
+ * exactly once, ONLY when the caller omitted `password` (server-generated,
+ * never retrievable again after this response).
  */
 const create = async (req, res, next) => {
   try {
-    const employee = await employeeService.create(req.body, req.userId, getIpAddress(req), req.companyId);
-    return sendCreated(res, employee, 'Employee created successfully.');
+    const result = await employeeService.create(req.body, req.userId, getIpAddress(req), req.companyId);
+    return sendCreated(res, result, 'Employee created successfully.');
   } catch (err) {
-    if (err.statusCode === 409) {
-      return sendError(res, err.message, 409);
+    if (err.statusCode === 409 || err.statusCode === 400 || err.statusCode === 404) {
+      return sendError(res, err.message, err.statusCode);
     }
     next(err);
   }
@@ -77,11 +83,8 @@ const update = async (req, res, next) => {
     const employee = await employeeService.update(id, req.body, req.userId, getIpAddress(req), req.companyId);
     return sendSuccess(res, employee, 'Employee updated successfully.');
   } catch (err) {
-    if (err.statusCode === 404) {
-      return sendNotFound(res, 'Employee');
-    }
-    if (err.statusCode === 409) {
-      return sendError(res, err.message, 409);
+    if (err.statusCode === 404 || err.statusCode === 409 || err.statusCode === 400) {
+      return sendError(res, err.message, err.statusCode);
     }
     next(err);
   }
@@ -104,25 +107,6 @@ const deleteEmployee = async (req, res, next) => {
     }
     if (err.statusCode === 409) {
       return sendError(res, err.message, 409);
-    }
-    next(err);
-  }
-};
-
-/**
- * PUT /api/v1/employees/:id/reset-password
- */
-const resetPassword = async (req, res, next) => {
-  try {
-    const id = parseInt(req.params.id, 10);
-    if (isNaN(id)) {
-      return sendError(res, 'Invalid employee ID.', 400);
-    }
-    await employeeService.resetPassword(id, req.body.password, req.userId, getIpAddress(req), req.companyId);
-    return sendSuccess(res, null, 'Employee password reset successfully.');
-  } catch (err) {
-    if (err.statusCode === 404) {
-      return sendNotFound(res, 'Employee');
     }
     next(err);
   }
@@ -155,6 +139,20 @@ const importEmployees = async (req, res, next) => {
   }
 };
 
+/**
+ * GET /api/v1/employees/eligible-delivery-heads
+ * Eligible candidates for Service PO Delivery Head selection — active,
+ * non-deleted employees in the caller's own company.
+ */
+const getEligibleDeliveryHeads = async (req, res, next) => {
+  try {
+    const employees = await employeeService.getEligibleDeliveryHeads(req.companyId);
+    return sendSuccess(res, employees, 'Eligible Delivery Head employees fetched successfully.');
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getAll,
   getById,
@@ -162,6 +160,6 @@ module.exports = {
   update,
   delete: deleteEmployee,
   getActiveEmployees,
+  getEligibleDeliveryHeads,
   importEmployees,
-  resetPassword,
 };

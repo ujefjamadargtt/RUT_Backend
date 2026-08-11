@@ -4,11 +4,11 @@ const express = require('express');
 const router = express.Router();
 
 const authenticate = require('../middlewares/auth');
+const authorize = require('../middlewares/authorize');
 const { validate } = require('../middlewares/validateRequest');
 const {
   createEmployeeSchema,
   updateEmployeeSchema,
-  resetEmployeePasswordSchema,
 } = require('../validations/employeeValidation');
 const employeeController = require('../controllers/employeeController');
 const { handleEmployeeUpload } = require('../middlewares/upload');
@@ -109,6 +109,28 @@ router.get(
 
 /**
  * @swagger
+ * /employees/eligible-delivery-heads:
+ *   get:
+ *     summary: Get employees eligible for Service PO Delivery Head selection
+ *     description: >
+ *       Active, non-deleted employees in the caller's own company. `email`
+ *       is sourced from the employee's linked User account (Employee
+ *       itself carries no email) and is `null` if none exists yet.
+ *     tags: [Employees]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Eligible Delivery Head employee list
+ */
+router.get(
+  '/eligible-delivery-heads',
+  authenticate,
+  employeeController.getEligibleDeliveryHeads
+);
+
+/**
+ * @swagger
  * /employees:
  *   get:
  *     summary: List employees with pagination, search, and filters
@@ -198,6 +220,7 @@ router.get(
 router.post(
   '/',
   authenticate,
+  authorize('hr.create_employee'),
   validate(createEmployeeSchema),
   employeeController.create
 );
@@ -263,39 +286,10 @@ router.delete(
   employeeController.delete
 );
 
-/**
- * @swagger
- * /employees/{id}/reset-password:
- *   put:
- *     summary: Admin-side reset of an Employee's Self Timesheet login password
- *     tags: [Employees]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema: { type: integer }
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [password]
- *             properties:
- *               password: { type: string, minLength: 8 }
- *     responses:
- *       200:
- *         description: Password reset
- *       404:
- *         description: Not found
- */
-router.put(
-  '/:id/reset-password',
-  authenticate,
-  validate(resetEmployeePasswordSchema),
-  employeeController.resetPassword
-);
+// Resetting an Employee's login password is now a User Master operation —
+// use PUT /api/v1/users/:id (userService.update supports a `password`
+// field) against the Employee's linked users.id, since Employee itself no
+// longer carries a password column (see database/migrations/
+// 20260842_employees_drop_login_columns.sql). No dedicated endpoint here.
 
 module.exports = router;

@@ -9,6 +9,7 @@ const {
   createUserSchema,
   updateUserSchema,
   changePasswordSchema,
+  adminResetPasswordSchema,
 } = require('../validations/userValidation');
 const userController = require('../controllers/userController');
 
@@ -213,6 +214,44 @@ router.put(
   authenticate,
   validate(changePasswordSchema),
   userController.changePassword
+);
+
+/**
+ * @swagger
+ * /users/{id}/reset-password:
+ *   put:
+ *     summary: Admin-side password reset (HR or a senior admin tier only) — no old password required
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [new_password, confirm_password]
+ *             properties:
+ *               new_password: { type: string }
+ *               confirm_password: { type: string }
+ *     responses:
+ *       200:
+ *         description: Password reset
+ *       403:
+ *         description: Not authorised
+ *       404:
+ *         description: User not found
+ */
+router.put(
+  '/:id/reset-password',
+  authenticate,
+  validate(adminResetPasswordSchema),
+  userController.resetPassword
 );
 
 module.exports = router;

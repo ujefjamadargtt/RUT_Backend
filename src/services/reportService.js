@@ -608,6 +608,7 @@ async function getServicePOSummary(query, companyId) {
       acc.total_available_hours         += round2(row.available_hours);
       acc.total_monthly_billable_amount += round2(row.monthly_billable_amount);
       acc.total_invoiced_amount         += round2(row.invoiced_amount);
+      acc.total_billed_amount           += round2(row.billed_amount);
       acc.total_unbilled_amount         += round2(row.unbilled_amount);
       return acc;
     },
@@ -618,6 +619,7 @@ async function getServicePOSummary(query, companyId) {
       total_available_hours: 0,
       total_monthly_billable_amount: 0,
       total_invoiced_amount: 0,
+      total_billed_amount: 0,
       total_unbilled_amount: 0,
     }
   );
@@ -632,6 +634,7 @@ async function getServicePOSummary(query, companyId) {
       total_available_hours:              round2(pageTotals.total_available_hours),
       total_monthly_billable_amount:      round2(pageTotals.total_monthly_billable_amount),
       total_invoiced_amount:              round2(pageTotals.total_invoiced_amount),
+      total_billed_amount:                round2(pageTotals.total_billed_amount),
       total_unbilled_amount:              round2(pageTotals.total_unbilled_amount),
     },
   };

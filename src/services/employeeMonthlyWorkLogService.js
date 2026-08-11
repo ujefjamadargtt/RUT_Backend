@@ -2,6 +2,7 @@
 
 const { sequelize } = require('../models');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
+const employeeRepository = require('../repositories/employeeRepository');
 const timesheetService = require('./timesheetService');
 const employeeTimesheetService = require('./employeeTimesheetService');
 const dateHelper = require('../helpers/dateHelper');
@@ -137,10 +138,10 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data) => {
     resolvedLines.push({ line, po, hierarchyNode });
   }
 
-  await sequelize.transaction(async (transaction) => {
+  const insertedRows = await sequelize.transaction(async (transaction) => {
     await employeeWorkLogRepository.deleteByEmployeeAndDateRange(employeeId, startDate, endDate, companyId, transaction);
 
-    await employeeWorkLogRepository.bulkCreate(
+    return employeeWorkLogRepository.bulkCreate(
       resolvedLines.map(({ line }) => ({
         employee_id: employeeId,
         service_po_id: line.service_po_id,
@@ -158,6 +159,14 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data) => {
       transaction
     );
   });
+
+  // Approval happens BEFORE Sync — see the matching comment in
+  // employeeTimesheetService.replaceDailyEntries. Same additive
+  // post-creation step, not a change to creation itself.
+  const employee = await employeeRepository.findById(employeeId, companyId);
+  if (employee && !employee.is_timesheet_approval_required && insertedRows.length > 0) {
+    await employeeWorkLogRepository.markApprovedByIds(insertedRows.map((row) => row.id), companyId);
+  }
 
   logger.info('Employee monthly work log submitted', {
     employeeId, companyId, month, year, workDate: endDate, entryCount: resolvedLines.length,

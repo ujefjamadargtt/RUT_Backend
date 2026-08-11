@@ -33,15 +33,22 @@ const sequelize = new Sequelize(
 // Model imports
 // ---------------------------------------------------------------------------
 const Company                = require('./Company')(sequelize);
+const Entity                 = require('./Entity')(sequelize);
 const Role                   = require('./Role')(sequelize);
 const Employee               = require('./Employee')(sequelize);
 const User                   = require('./User')(sequelize);
 const Client                 = require('./Client')(sequelize);
+const Project                = require('./Project')(sequelize);
 const ServiceCategory        = require('./ServiceCategory')(sequelize);
 const ServiceType            = require('./ServiceType')(sequelize);
+const DefaultCategory        = require('./DefaultCategory')(sequelize);
+const DefaultType            = require('./DefaultType')(sequelize);
+const CompanyCategory        = require('./CompanyCategory')(sequelize);
+const CompanyType            = require('./CompanyType')(sequelize);
 const ServicePO              = require('./ServicePO')(sequelize);
 const ServicePOResource      = require('./ServicePOResource')(sequelize);
 const ServicePOHierarchy     = require('./ServicePOHierarchy')(sequelize);
+const ServicePOMonthlyBudget = require('./ServicePOMonthlyBudget')(sequelize);
 const SubProject             = require('./SubProject')(sequelize);
 const MonthlyCost            = require('./MonthlyCost')(sequelize);
 const Timesheet              = require('./Timesheet')(sequelize);
@@ -50,16 +57,19 @@ const UserSession            = require('./UserSession')(sequelize);
 const TimesheetImportHistory = require('./TimesheetImportHistory')(sequelize);
 const TimesheetImportError   = require('./TimesheetImportError')(sequelize);
 const Notification           = require('./Notification')(sequelize);
-const UserRole               = require('./UserRole')(sequelize);
 const FormMaster             = require('./FormMaster')(sequelize);
 const RoleFormMapping        = require('./RoleFormMapping')(sequelize);
+const RoleCapability         = require('./RoleCapability')(sequelize);
 const AiInsightJob           = require('./AiInsightJob')(sequelize);
 const AiInsight              = require('./AiInsight')(sequelize);
-const EmployeeSession        = require('./EmployeeSession')(sequelize);
 const EmployeeServicePOMapping = require('./EmployeeServicePOMapping')(sequelize);
+const TeamMapping            = require('./TeamMapping')(sequelize);
+const ManagerEmployeeMapping = require('./ManagerEmployeeMapping')(sequelize);
+const ManagerServicePOMapping = require('./ManagerServicePOMapping')(sequelize);
 const EmployeeWorkLog        = require('./EmployeeWorkLog')(sequelize);
 const PasswordResetOtp       = require('./PasswordResetOtp')(sequelize);
 const PasswordResetHistory   = require('./PasswordResetHistory')(sequelize);
+const UserAdditionalRole     = require('./UserAdditionalRole')(sequelize);
 
 // ---------------------------------------------------------------------------
 // Associations
@@ -69,10 +79,12 @@ const PasswordResetHistory   = require('./PasswordResetHistory')(sequelize);
 // itself is done via plain `where: { company_id }`, not these includes).
 Company.hasMany(User,                   { foreignKey: 'company_id', as: 'users' });
 Company.hasMany(Client,                 { foreignKey: 'company_id', as: 'clients' });
+Company.hasMany(Project,                { foreignKey: 'company_id', as: 'projects' });
 Company.hasMany(Employee,               { foreignKey: 'company_id', as: 'employees' });
 Company.hasMany(MonthlyCost,            { foreignKey: 'company_id', as: 'monthlyCosts' });
 Company.hasMany(ServicePO,              { foreignKey: 'company_id', as: 'servicePOs' });
 Company.hasMany(ServicePOResource,      { foreignKey: 'company_id', as: 'servicePOResources' });
+Company.hasMany(ServicePOMonthlyBudget, { foreignKey: 'company_id', as: 'servicePOMonthlyBudgets' });
 Company.hasMany(ServiceType,            { foreignKey: 'company_id', as: 'serviceTypes' });
 Company.hasMany(ServiceCategory,        { foreignKey: 'company_id', as: 'serviceCategories' });
 Company.hasMany(SubProject,             { foreignKey: 'company_id', as: 'subProjects' });
@@ -84,10 +96,12 @@ Company.hasMany(AiInsightJob,           { foreignKey: 'company_id', as: 'aiInsig
 
 User.belongsTo(Company,                   { foreignKey: 'company_id', as: 'company' });
 Client.belongsTo(Company,                 { foreignKey: 'company_id', as: 'company' });
+Project.belongsTo(Company,                { foreignKey: 'company_id', as: 'company' });
 Employee.belongsTo(Company,               { foreignKey: 'company_id', as: 'company' });
 MonthlyCost.belongsTo(Company,            { foreignKey: 'company_id', as: 'company' });
 ServicePO.belongsTo(Company,              { foreignKey: 'company_id', as: 'company' });
 ServicePOResource.belongsTo(Company,      { foreignKey: 'company_id', as: 'company' });
+ServicePOMonthlyBudget.belongsTo(Company, { foreignKey: 'company_id', as: 'company' });
 ServiceType.belongsTo(Company,            { foreignKey: 'company_id', as: 'company' });
 ServiceCategory.belongsTo(Company,        { foreignKey: 'company_id', as: 'company' });
 SubProject.belongsTo(Company,             { foreignKey: 'company_id', as: 'company' });
@@ -97,9 +111,57 @@ TimesheetImportError.belongsTo(Company,   { foreignKey: 'company_id', as: 'compa
 AiInsight.belongsTo(Company,              { foreignKey: 'company_id', as: 'company' });
 AiInsightJob.belongsTo(Company,           { foreignKey: 'company_id', as: 'company' });
 
-// Role <-> User
+// Entity <-> User (ownership) and Entity <-> Company — the new tenancy
+// tier: Platform Admin -> Entity Admin (owns Entities) -> Entity ->
+// Company (BU Admin). One User (an Entity Admin) may own several
+// Entities; each Entity has exactly one owner at a time.
+Entity.belongsTo(User, { foreignKey: 'entity_admin_user_id', as: 'entityAdmin' });
+User.hasMany(Entity, { foreignKey: 'entity_admin_user_id', as: 'ownedEntities' });
+Entity.hasMany(Company, { foreignKey: 'entity_id', as: 'companies' });
+Company.belongsTo(Entity, { foreignKey: 'entity_id', as: 'entity' });
+
+// Role <-> User: users.role_id is the sole PRIMARY role and the sole
+// source of truth for hierarchy rank / company-entity scoping / the
+// role-creation matrix — the old user_roles many-to-many table was dropped
+// specifically because it competed with this column, see
+// 20260840_collapse_user_roles.sql.
 Role.hasMany(User, { foreignKey: 'role_id', as: 'users' });
 User.belongsTo(Role, { foreignKey: 'role_id', as: 'role' });
+
+// Role <-> User (ADDITIONAL, operational-only roles) — a purely additive
+// capability grant on top of the primary role above; NEVER read for
+// hierarchy/scoping decisions, only unioned into effective-capability
+// checks. See src/services/roleHierarchyService.js's
+// getEffectiveCapabilitiesForRoleIds() and
+// database/migrations/20260850_add_user_additional_roles.sql. Deliberately
+// a separate join table (user_additional_roles), not a revival of the
+// dropped user_roles table, so the two can never be confused.
+User.belongsToMany(Role, {
+  through: UserAdditionalRole,
+  foreignKey: 'user_id',
+  otherKey: 'role_id',
+  as: 'additionalRoles',
+});
+Role.belongsToMany(User, {
+  through: UserAdditionalRole,
+  foreignKey: 'role_id',
+  otherKey: 'user_id',
+  as: 'usersWithAdditionalRole',
+});
+UserAdditionalRole.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+UserAdditionalRole.belongsTo(Role, { foreignKey: 'role_id', as: 'role' });
+
+// Role self-referencing inheritance edge (see roleHierarchyService.js) —
+// only ever set for the two edges the RBAC spec states (Service PO Admin <-
+// Manager, Project Admin <- Service PO Admin); NULL for every other role.
+Role.belongsTo(Role, { foreignKey: 'inherits_role_id', as: 'inheritsFrom' });
+Role.hasMany(Role, { foreignKey: 'inherits_role_id', as: 'inheritedBy' });
+
+// Role <-> RoleCapability — a role's OWN directly-granted capabilities only;
+// inherited ones are computed at read time (roleHierarchyService.js), never
+// duplicated into this table.
+Role.hasMany(RoleCapability, { foreignKey: 'role_id', as: 'capabilities' });
+RoleCapability.belongsTo(Role, { foreignKey: 'role_id', as: 'role' });
 
 // Employee <-> User
 Employee.hasMany(User, { foreignKey: 'employee_id', as: 'users' });
@@ -121,24 +183,6 @@ Timesheet.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
 User.hasMany(UserSession, { foreignKey: 'user_id', as: 'sessions' });
 UserSession.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
 
-// User <-> UserRole (many-to-many roles)
-User.belongsToMany(Role, {
-  through: UserRole,
-  foreignKey: 'user_id',
-  otherKey: 'role_id',
-  as: 'roles',
-});
-Role.belongsToMany(User, {
-  through: UserRole,
-  foreignKey: 'role_id',
-  otherKey: 'user_id',
-  as: 'usersWithRoles',
-});
-User.hasMany(UserRole, { foreignKey: 'user_id', as: 'userRoles' });
-Role.hasMany(UserRole, { foreignKey: 'role_id', as: 'userRoles' });
-UserRole.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
-UserRole.belongsTo(Role, { foreignKey: 'role_id', as: 'role' });
-
 // Role <-> FormMaster (many-to-many through RoleFormMapping)
 Role.belongsToMany(FormMaster, { through: RoleFormMapping, foreignKey: 'role_id', otherKey: 'form_id', as: 'forms' });
 FormMaster.belongsToMany(Role, { through: RoleFormMapping, foreignKey: 'form_id', otherKey: 'role_id', as: 'roles' });
@@ -159,9 +203,61 @@ Notification.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
 Client.hasMany(ServicePO, { foreignKey: 'client_id', as: 'servicePOs' });
 ServicePO.belongsTo(Client, { foreignKey: 'client_id', as: 'client' });
 
+// Client <-> Project — every Project belongs to exactly one Client (see
+// database/migrations/20260848_add_projects_client_id.sql).
+Client.hasMany(Project, { foreignKey: 'client_id', as: 'projects' });
+Project.belongsTo(Client, { foreignKey: 'client_id', as: 'client' });
+
+// Project <-> ServicePO — independent of Client (a Service PO has both a
+// project_id and a client_id, unrelated to each other).
+Project.hasMany(ServicePO, { foreignKey: 'project_id', as: 'servicePOs' });
+ServicePO.belongsTo(Project, { foreignKey: 'project_id', as: 'project' });
+
+// ServicePO <-> Employee (Delivery Head) — a direct staffing attribute,
+// distinct from the employees/resources many-to-many further down. Always
+// an Employee Master id (see database/migrations/20260849_add_service_pos_delivery_head.sql).
+ServicePO.belongsTo(Employee, { foreignKey: 'delivery_head_employee_id', as: 'deliveryHead' });
+Employee.hasMany(ServicePO, { foreignKey: 'delivery_head_employee_id', as: 'deliveryHeadServicePOs' });
+
 // ServiceCategory <-> ServiceType
 ServiceCategory.hasMany(ServiceType, { foreignKey: 'service_category_id', as: 'serviceTypes' });
 ServiceType.belongsTo(ServiceCategory, { foreignKey: 'service_category_id', as: 'serviceCategory' });
+
+// Manager hierarchy chain: Service PO Admin -> Manager -> Employee/
+// ServicePO (one hop shorter than before "Head Manager" was retired — see
+// database/migrations/20260844_rename_head_manager_mappings_to_team_mappings.sql).
+// Three distinct mapping tables, each a strict "one owner" or plain
+// many-to-many relationship — see the individual model files for the exact
+// cardinality each one enforces at the DB level.
+TeamMapping.belongsTo(User, { foreignKey: 'service_po_admin_user_id', as: 'servicePOAdmin' });
+TeamMapping.belongsTo(User, { foreignKey: 'manager_user_id', as: 'manager' });
+TeamMapping.belongsTo(Company, { foreignKey: 'company_id', as: 'company' });
+User.hasMany(TeamMapping, { foreignKey: 'service_po_admin_user_id', as: 'managedTeamMappings' });
+
+ManagerEmployeeMapping.belongsTo(User, { foreignKey: 'manager_user_id', as: 'manager' });
+ManagerEmployeeMapping.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
+ManagerEmployeeMapping.belongsTo(Company, { foreignKey: 'company_id', as: 'company' });
+User.hasMany(ManagerEmployeeMapping, { foreignKey: 'manager_user_id', as: 'managedEmployeeMappings' });
+
+ManagerServicePOMapping.belongsTo(User, { foreignKey: 'manager_user_id', as: 'manager' });
+ManagerServicePOMapping.belongsTo(ServicePO, { foreignKey: 'service_po_id', as: 'servicePO' });
+ManagerServicePOMapping.belongsTo(Company, { foreignKey: 'company_id', as: 'company' });
+User.hasMany(ManagerServicePOMapping, { foreignKey: 'manager_user_id', as: 'grantedServicePOMappings' });
+
+// Default Category/Type Master + per-company mapping tables — does NOT
+// replace ServiceCategory/ServiceType above; see DefaultCategory.js's doc.
+DefaultCategory.hasMany(DefaultType, { foreignKey: 'default_category_id', as: 'defaultTypes' });
+DefaultType.belongsTo(DefaultCategory, { foreignKey: 'default_category_id', as: 'defaultCategory' });
+
+Company.hasMany(CompanyCategory, { foreignKey: 'company_id', as: 'companyCategories' });
+CompanyCategory.belongsTo(Company, { foreignKey: 'company_id', as: 'company' });
+CompanyCategory.belongsTo(DefaultCategory, { foreignKey: 'default_category_id', as: 'defaultCategory' });
+DefaultCategory.hasMany(CompanyCategory, { foreignKey: 'default_category_id', as: 'companyCategories' });
+
+CompanyCategory.hasMany(CompanyType, { foreignKey: 'company_category_id', as: 'companyTypes' });
+CompanyType.belongsTo(CompanyCategory, { foreignKey: 'company_category_id', as: 'companyCategory' });
+CompanyType.belongsTo(DefaultType, { foreignKey: 'default_type_id', as: 'defaultType' });
+DefaultType.hasMany(CompanyType, { foreignKey: 'default_type_id', as: 'companyTypes' });
 
 // ServiceType <-> ServicePO
 ServiceType.hasMany(ServicePO, { foreignKey: 'service_type_id', as: 'servicePOs' });
@@ -209,10 +305,6 @@ TimesheetImportError.belongsTo(TimesheetImportHistory, { foreignKey: 'import_id'
 AiInsightJob.hasMany(AiInsight, { foreignKey: 'job_id', as: 'insights' });
 AiInsight.belongsTo(AiInsightJob, { foreignKey: 'job_id', as: 'job' });
 
-// Employee <-> EmployeeSession
-Employee.hasMany(EmployeeSession, { foreignKey: 'employee_id', as: 'sessions' });
-EmployeeSession.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
-
 // Employee <-> ServicePO (many-to-many through EmployeeServicePOMapping —
 // Phase 2's "which projects can this employee self-log time against" table,
 // distinct from the existing ServicePOResource allocation table)
@@ -249,6 +341,13 @@ ServicePOHierarchy.hasMany(ServicePOHierarchy, { foreignKey: 'parent_hierarchy_i
 ServicePOHierarchy.hasMany(EmployeeWorkLog, { foreignKey: 'hierarchy_node_id', as: 'workLogs', onDelete: 'SET NULL' });
 EmployeeWorkLog.belongsTo(ServicePOHierarchy, { foreignKey: 'hierarchy_node_id', as: 'hierarchyNode', onDelete: 'SET NULL' });
 
+// ServicePO <-> ServicePOMonthlyBudget — one row per (service_po_id, month,
+// year), see database/migrations/20260853_create_service_po_monthly_budgets.sql.
+// Consumed by reportRepository.getServicePOSummary() for invoice/billed
+// amounts instead of computing them from timesheets/monthly_costs.
+ServicePO.hasMany(ServicePOMonthlyBudget, { foreignKey: 'service_po_id', as: 'monthlyBudgets' });
+ServicePOMonthlyBudget.belongsTo(ServicePO, { foreignKey: 'service_po_id', as: 'servicePO' });
+
 // Forgot Password module — User/Employee <-> PasswordResetOtp/PasswordResetHistory
 User.hasMany(PasswordResetOtp, { foreignKey: 'user_id', as: 'passwordResetOtps' });
 PasswordResetOtp.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
@@ -270,15 +369,22 @@ module.exports = {
   sequelize,
   Sequelize,
   Company,
+  Entity,
   Role,
   Employee,
   User,
   Client,
+  Project,
   ServiceCategory,
   ServiceType,
+  DefaultCategory,
+  DefaultType,
+  CompanyCategory,
+  CompanyType,
   ServicePO,
   ServicePOResource,
   ServicePOHierarchy,
+  ServicePOMonthlyBudget,
   SubProject,
   MonthlyCost,
   Timesheet,
@@ -287,14 +393,17 @@ module.exports = {
   TimesheetImportHistory,
   TimesheetImportError,
   Notification,
-  UserRole,
   FormMaster,
   RoleFormMapping,
+  RoleCapability,
   AiInsightJob,
   AiInsight,
-  EmployeeSession,
   EmployeeServicePOMapping,
+  TeamMapping,
+  ManagerEmployeeMapping,
+  ManagerServicePOMapping,
   EmployeeWorkLog,
   PasswordResetOtp,
   PasswordResetHistory,
+  UserAdditionalRole,
 };

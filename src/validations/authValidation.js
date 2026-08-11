@@ -4,19 +4,11 @@ const Joi = require('joi');
 
 /**
  * Auth Validation Schemas
+ *
+ * Every account tier (including Employees) authenticates through User
+ * Master only now — see database/migrations/20260842_employees_drop_login_columns.sql
+ * — so there is no longer a `loginType` field anywhere in this file.
  */
-
-// Shared by loginSchema and the forgot-password family below — 'user' |
-// 'employee', OPTIONAL for /login and /forgot-password (only needed when
-// the email resolves to both a User and an Employee), REQUIRED for
-// /verify-otp and /reset-password (see their schemas further down).
-const loginTypeField = Joi.string()
-  .trim()
-  .lowercase()
-  .valid('user', 'employee')
-  .messages({
-    'any.only': "loginType must be 'user' or 'employee'.",
-  });
 
 /**
  * POST /auth/login
@@ -43,11 +35,6 @@ const loginSchema = Joi.object({
       'string.empty': 'Password is required.',
       'any.required': 'Password is required.',
     }),
-
-  // Optional — only required when the email is registered as BOTH a User
-  // and an Employee (see authService.login's dual-lookup / accountTypes
-  // disambiguation). Omitting it is fully backward compatible.
-  loginType: loginTypeField.optional(),
 });
 
 /**
@@ -143,10 +130,10 @@ const passwordPolicyField = Joi.string()
 
 /**
  * PUT /auth/change-password
- * Body is ONLY { newPassword } — id/userType are resolved from the verified
- * JWT (see middlewares/dualAuth.js), never accepted from the request body,
- * per the "trust only the authenticated token" security requirement.
- * Reuses the SAME password-complexity policy as /auth/reset-password.
+ * Body is ONLY { newPassword } — the user id is resolved from the verified
+ * JWT (see middlewares/auth.js), never accepted from the request body, per
+ * the "trust only the authenticated token" security requirement. Reuses the
+ * SAME password-complexity policy as /auth/reset-password.
  */
 const directChangePasswordSchema = Joi.object({
   newPassword: passwordPolicyField,
@@ -154,41 +141,28 @@ const directChangePasswordSchema = Joi.object({
 
 /**
  * POST /auth/forgot-password
- * loginType is OPTIONAL — only required when the email resolves to both a
- * User and an Employee (mirrors loginSchema's loginType).
  */
 const forgotPasswordSchema = Joi.object({
   email: emailField,
-  loginType: loginTypeField.optional(),
 });
 
 /**
  * POST /auth/verify-otp
- * loginType is REQUIRED here — it disambiguates which OTP stream (User's
- * or Employee's) is being verified, and is the enforcement point for
- * "never allow a User OTP to verify against an Employee reset, or vice
- * versa" (see passwordResetRepository.findLivePendingByEmail).
  */
 const verifyOtpSchema = Joi.object({
   email: emailField,
   otp: otpField,
-  loginType: loginTypeField.required().messages({
-    'any.required': 'loginType is required.',
-  }),
 });
 
 /**
  * POST /auth/resend-otp
- * loginType is OPTIONAL — same disambiguation semantics as forgot-password.
  */
 const resendOtpSchema = Joi.object({
   email: emailField,
-  loginType: loginTypeField.optional(),
 });
 
 /**
  * POST /auth/reset-password
- * loginType is REQUIRED — same reasoning as verify-otp.
  */
 const resetPasswordSchema = Joi.object({
   email: emailField,
@@ -201,9 +175,6 @@ const resetPasswordSchema = Joi.object({
       'any.only': 'Passwords do not match.',
       'any.required': 'Confirm password is required.',
     }),
-  loginType: loginTypeField.required().messages({
-    'any.required': 'loginType is required.',
-  }),
 });
 
 module.exports = {

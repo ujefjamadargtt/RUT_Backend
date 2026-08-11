@@ -4,14 +4,17 @@ const { sequelize } = require('../models');
 const rbacRepository = require('../repositories/rbacRepository');
 const roleRepository = require('../repositories/roleRepository');
 const formRepository = require('../repositories/formMasterRepository');
-const userRepository = require('../repositories/userRepository');
 const { createAuditLog } = require('../middlewares/auditLog');
 
 /**
  * RBAC Service
- * Business logic for the user_roles and role_form_mapping junction tables:
- * existence checks, duplicate-mapping guards, and the Get Accessible Forms
+ * Business logic for the role_form_mapping junction table: existence
+ * checks, duplicate-mapping guards, and the Get Accessible Forms
  * aggregation. Raw DB access lives in rbacRepository.js.
+ *
+ * The old User <-> Role mapping functions (user_roles table) were removed
+ * with the RBAC redesign — see database/migrations/20260840_collapse_user_roles.sql
+ * and rbacRepository.js's header comment.
  */
 
 /**
@@ -23,17 +26,6 @@ function fail(message, statusCode) {
   const err = new Error(message);
   err.statusCode = statusCode;
   throw err;
-}
-
-/**
- * Confirm a user exists, or throw 404.
- * @param {number} userId
- */
-async function ensureUserExists(userId) {
-  const user = await userRepository.findById(userId);
-  if (!user) {
-    fail(`User with ID ${userId} not found.`, 404);
-  }
 }
 
 /**
@@ -114,93 +106,6 @@ async function assertFormRoleMappingAllowed(roleId, formId, status) {
     fail('This form must always stay mapped to the Platform Admin role and cannot be unmapped.', 403);
   }
 }
-
-// ── User <-> Role mappings ───────────────────────────────────────────────────
-
-/**
- * List every role currently mapped to one user.
- * @param {number} userId
- * @returns {Promise<UserRole[]>}
- */
-const listUserMappings = async (userId) => {
-  await ensureUserExists(userId);
-  return rbacRepository.listUserMappings(userId);
-};
-
-/**
- * Map one additional role onto one user.
- * @param {object} data - { user_id, role_id }
- * @param {number} actorId
- * @param {string} ipAddress
- * @returns {Promise<UserRole>}
- */
-const createUserMapping = async ({ user_id: userId, role_id: roleId }, actorId, ipAddress) => {
-  await ensureUserExists(userId);
-  await ensureRoleExists(roleId);
-
-  const existing = await rbacRepository.findUserMapping(userId, roleId);
-  if (existing) {
-    fail('This user-role mapping already exists.', 409);
-  }
-
-  const mapping = await rbacRepository.createUserMapping({ user_id: userId, role_id: roleId });
-
-  await createAuditLog(actorId, 'CREATE', 'user_roles', mapping.id, null, mapping.toJSON(), ipAddress);
-
-  return mapping;
-};
-
-/**
- * Remove one role mapping from one user.
- * @param {object} data - { user_id, role_id }
- * @param {number} actorId
- * @param {string} ipAddress
- * @returns {Promise<void>}
- */
-const deleteUserMapping = async ({ user_id: userId, role_id: roleId }, actorId, ipAddress) => {
-  const deletedCount = await rbacRepository.deleteUserMapping(userId, roleId);
-  if (deletedCount === 0) {
-    fail('User-role mapping not found.', 404);
-  }
-
-  await createAuditLog(actorId, 'DELETE', 'user_roles', null, { user_id: userId, role_id: roleId }, null, ipAddress);
-};
-
-/**
- * Replace ALL of a user's role mappings with the given set in one
- * transaction — every existing mapping for this user is removed and the new
- * list is inserted, so a failure partway through leaves the user's previous
- * roles untouched rather than half-updated.
- *
- * @param {number} userId
- * @param {number[]} roleIds
- * @param {number} actorId
- * @param {string} ipAddress
- * @returns {Promise<UserRole[]>} the user's mappings after the replace
- */
-const replaceUserRoles = async (userId, roleIds, actorId, ipAddress) => {
-  await ensureUserExists(userId);
-  for (const roleId of roleIds) {
-    await ensureRoleExists(roleId);
-  }
-
-  const t = await sequelize.transaction();
-  try {
-    await rbacRepository.deleteAllUserMappings(userId, t);
-    await rbacRepository.bulkCreateUserMappings(
-      roleIds.map((roleId) => ({ user_id: userId, role_id: roleId })),
-      t
-    );
-    await t.commit();
-  } catch (err) {
-    await t.rollback();
-    throw err;
-  }
-
-  await createAuditLog(actorId, 'UPDATE', 'user_roles', userId, null, { user_id: userId, role_ids: roleIds }, ipAddress);
-
-  return rbacRepository.listUserMappings(userId);
-};
 
 // ── Role <-> Form mappings ───────────────────────────────────────────────────
 
@@ -298,9 +203,8 @@ const mapForm = async ({ roleId, formId, status }, actorId, ipAddress) => {
  * Replace ALL of a role's form mappings with the given set in one
  * transaction: every form_id in the list is set active (inserted or
  * reactivated), every other form currently mapped to this role is soft-
- * unmapped (status set to false, never deleted) — mirrors replaceUserRoles()
- * above exactly, just for the role<->form side. An empty formIds array is a
- * valid "give this role no forms" request.
+ * unmapped (status set to false, never deleted). An empty formIds array is
+ * a valid "give this role no forms" request.
  *
  * @param {number} roleId
  * @param {number[]} formIds
@@ -392,12 +296,21 @@ const getFormsWithMappingStatus = async (roleIds) => {
  * (authService.js) to build the forms a user should actually see;
  * unmapped/inactive forms are excluded entirely, never just flagged.
  *
+ * Platform Admin (hierarchyRank === 1) is a deliberate bypass of the
+ * role_form_mapping table entirely — "All Forms" per the RBAC spec is
+ * implemented as every currently-active form, not literal seeded mapping
+ * rows, so a newly-added form is visible to Platform Admin immediately with
+ * no reseed needed (see database/migrations/
+ * 20260845_reseed_form_master_and_role_form_mapping.sql's header comment).
+ *
  * @param {number[]} roleIds
+ * @param {number|null} [hierarchyRank] - the caller's role.hierarchy_rank, if known
  * @returns {Promise<object>} forms grouped by module_name: { [module]: {id, name}[] }
  */
-const getActiveFormsForRoles = async (roleIds) => {
-  const requestedRoleIds = [...new Set(roleIds)];
-  const forms = await rbacRepository.findAccessibleForms(requestedRoleIds);
+const getActiveFormsForRoles = async (roleIds, hierarchyRank = null) => {
+  const forms = hierarchyRank === 1
+    ? await rbacRepository.findAllActiveForms()
+    : await rbacRepository.findAccessibleForms([...new Set(roleIds)]);
 
   return forms.reduce((formsByModule, form) => {
     if (!formsByModule[form.module_name]) {
@@ -409,10 +322,6 @@ const getActiveFormsForRoles = async (roleIds) => {
 };
 
 module.exports = {
-  listUserMappings,
-  createUserMapping,
-  deleteUserMapping,
-  replaceUserRoles,
   listRoleFormMappings,
   getRoleFormMappingById,
   createRoleFormMapping,

@@ -3,47 +3,39 @@
 const bcrypt = require('bcrypt');
 const { literal } = require('sequelize');
 const userRepository = require('../repositories/userRepository');
-const employeeRepository = require('../repositories/employeeRepository');
 const passwordResetRepository = require('../repositories/passwordResetRepository');
 const emailService = require('../utils/emailService');
 const { OTP_EMAIL_SUBJECT, buildOtpEmailHtml } = require('../utils/emailTemplates');
-const {
-  resolveAccountCase,
-  ACCOUNT_TYPES,
-  emailNotRegisteredError,
-  invalidLoginTypeError,
-} = require('../utils/loginTypeResolver');
 const logger = require('../utils/logger');
 
 /**
- * Forgot Password Service (User + Employee)
+ * Forgot Password Service
  *
- * Resolves an email using the SAME shared case logic as the dynamic
- * /auth/login flow (src/utils/loginTypeResolver.js) — both lookups
- * (userRepository.findByEmail / employeeRepository.findByEmail) always run,
- * never a sequential "try User, fall back to Employee", so an email
- * registered in BOTH tables is properly disambiguated via `loginType`
- * instead of one silently winning.
+ * Resolves an email against User Master only — Employees authenticate
+ * exclusively through their linked User row now (see
+ * database/migrations/20260842_employees_drop_login_columns.sql), so there
+ * is no longer a dual User/Employee lookup or loginType disambiguation.
+ * `password_reset_otps`/`password_reset_history` still carry a `login_type`
+ * column from when both account types existed — every row this service
+ * writes simply passes the literal `'user'`, keeping that schema untouched
+ * (it's an OTP-stream partition key, not a business concept this service
+ * needs to reintroduce).
  *
- * Unlike the previous design, this flow EXPLICITLY discloses whether an
- * email is registered ("Email ID is not registered.") — a deliberate,
- * repeated product requirement for both /login and /forgot-password,
- * overriding the more defensive generic-response posture used before.
- * Every outcome (found, not found, ambiguous, inactive) still writes a
+ * This flow EXPLICITLY discloses whether an email is registered ("Email ID
+ * is not registered.") — a deliberate, repeated product requirement.
+ * Every outcome (found, not found, inactive) still writes a
  * password_reset_history row for audit purposes.
  *
  * All expiry/cooldown timing is delegated to passwordResetRepository.js's
- * SQL-side NOW() comparisons — never a JS `new Date()` comparison against a
- * value pulled from this table. See that file's module doc for why (a
- * pre-existing, confirmed timezone bug in how this project's two Sequelize
- * instances hydrate "timestamp without time zone" columns).
+ * SQL-side NOW() comparisons — see that file's module doc.
  */
 
+const LOGIN_TYPE = 'user';
 const OTP_LENGTH = 6;
 const OTP_VALIDITY_MINUTES = 5;
 const MAX_ATTEMPTS = 5;
 const RESEND_COOLDOWN_SECONDS = 60;
-const BCRYPT_ROUNDS = 12; // matches User.js / Employee.js's own password hashing
+const BCRYPT_ROUNDS = 12; // matches User.js's own password hashing
 const PURPOSE = 'password_reset';
 
 function badRequest(message) {
@@ -56,6 +48,14 @@ function cooldownError() {
   const err = new Error('An OTP was already sent recently. Please wait before requesting another.');
   err.statusCode = 429;
   err.code = 'OTP_COOLDOWN_ACTIVE';
+  err.isOperational = true;
+  return err;
+}
+
+function emailNotRegisteredError() {
+  const err = new Error('Email ID is not registered.');
+  err.statusCode = 404;
+  err.code = 'EMAIL_NOT_REGISTERED';
   err.isOperational = true;
   return err;
 }
@@ -80,58 +80,21 @@ function generateOtp() {
 }
 
 /**
- * Normalise a resolved User/Employee record into the shape the rest of
- * this file works with.
- * @param {object} record - Sequelize User or Employee instance
- * @param {'user'|'employee'} loginType
+ * Expire any prior pending OTP for this email, generate+hash a new one, and
+ * persist it, returning the plaintext value for emailing (never persisted
+ * in plaintext).
  */
-function toAccountShape(record, loginType) {
-  return {
-    loginType,
-    accountId: record.id,
-    companyId: record.company_id,
-    isUsable: record.status === 'active' && !record.is_deleted,
-  };
-}
-
-function accountIds(account) {
-  return {
-    user_id: account.loginType === 'user' ? account.accountId : null,
-    employee_id: account.loginType === 'employee' ? account.accountId : null,
-  };
-}
-
-/**
- * Resolve an email against BOTH Users and Employees (never a sequential
- * fallback) and apply the shared case logic.
- * @param {string} email - already lowercased/trimmed
- * @param {string} [loginType]
- * @returns {Promise<{ resolvedCase: object, userRecord: object|null, employeeRecord: object|null }>}
- */
-async function resolveAccounts(email, loginType) {
-  const [userRecord, employeeRecord] = await Promise.all([
-    userRepository.findByEmail(email),
-    employeeRepository.findByEmail(email),
-  ]);
-  const resolvedCase = resolveAccountCase(!!userRecord, !!employeeRecord, loginType);
-  return { resolvedCase, userRecord, employeeRecord };
-}
-
-/**
- * Expire any prior pending OTP for this (email, loginType), generate+hash a
- * new one, persist it, and return the plaintext value for emailing (never
- * persisted in plaintext).
- */
-async function issueOtp(account, email, ipAddress) {
-  await passwordResetRepository.expirePendingByEmail(email, PURPOSE, account.loginType);
+async function issueOtp(user, email, ipAddress) {
+  await passwordResetRepository.expirePendingByEmail(email, PURPOSE, LOGIN_TYPE);
 
   const plainOtp = generateOtp();
   const hashedOtp = await bcrypt.hash(plainOtp, BCRYPT_ROUNDS);
 
   await passwordResetRepository.createOtp({
-    company_id: account.companyId,
-    login_type: account.loginType,
-    ...accountIds(account),
+    company_id: user.company_id,
+    login_type: LOGIN_TYPE,
+    user_id: user.id,
+    employee_id: null,
     email,
     otp: hashedOtp,
     purpose: PURPOSE,
@@ -148,8 +111,7 @@ async function issueOtp(account, email, ipAddress) {
  * Send the OTP email. A transport failure is logged but never surfaced to
  * the caller as a distinct error — the OTP has already been persisted and
  * the caller still gets a normal success response regardless of whether
- * the Company Email API is reachable (matches how upstream modules already
- * treat sendEmail() failures as non-fatal/logged-only).
+ * the Company Email API is reachable.
  */
 async function sendOtpEmail(email, plainOtp) {
   const html = buildOtpEmailHtml(plainOtp, OTP_VALIDITY_MINUTES);
@@ -164,9 +126,9 @@ async function sendOtpEmail(email, plainOtp) {
  * Shared body of forgotPassword()/resendOtp() — they differ only in the
  * history action recorded ('OTP_SENT' vs 'OTP_RESENT') and log message.
  */
-async function sendOrResendOtp(email, loginType, ipAddress, userAgent, historyAction) {
+async function sendOrResendOtp(email, ipAddress, userAgent, historyAction) {
   const normalizedEmail = email.toLowerCase().trim();
-  const { resolvedCase, userRecord, employeeRecord } = await resolveAccounts(normalizedEmail, loginType);
+  const user = await userRepository.findByEmail(normalizedEmail);
 
   const failNotFound = async (remarks) => {
     await passwordResetRepository.logHistory({
@@ -179,124 +141,84 @@ async function sendOrResendOtp(email, loginType, ipAddress, userAgent, historyAc
     throw emailNotRegisteredError();
   };
 
-  let account;
-  switch (resolvedCase.case) {
-    case 'NOT_FOUND':
-      return failNotFound('No account found for this email/login type.');
-    case 'INVALID_LOGIN_TYPE':
-      throw invalidLoginTypeError();
-    case 'AMBIGUOUS':
-      return {
-        requiresUserTypeSelection: true,
-        message: 'This email is associated with multiple account types. Please choose an account type.',
-        accountTypes: ACCOUNT_TYPES,
-      };
-    case 'USER':
-      account = toAccountShape(userRecord, 'user');
-      break;
-    case 'EMPLOYEE':
-      account = toAccountShape(employeeRecord, 'employee');
-      break;
-    default:
-      return failNotFound('Unresolved account case.');
+  if (!user) {
+    return failNotFound('No account found for this email.');
   }
 
-  if (!account.isUsable) {
+  if (user.status !== 'active') {
     // Deliberately treated the same as NOT_FOUND for this specific flow:
-    // unlike login (where the caller already proved they hold valid
-    // credentials), an unauthenticated forgot-password request revealing
-    // "this account exists but is deactivated" is its own disclosure risk
-    // the spec never asked to take on. Login's own inactive-account
-    // messaging (ACCOUNT_INACTIVE) is untouched.
+    // an unauthenticated forgot-password request revealing "this account
+    // exists but is deactivated" is its own disclosure risk.
     return failNotFound('Account is inactive.');
   }
 
-  const hasRecent = await passwordResetRepository.hasRecentOtp(
-    normalizedEmail, PURPOSE, account.loginType, RESEND_COOLDOWN_SECONDS
-  );
+  const hasRecent = await passwordResetRepository.hasRecentOtp(normalizedEmail, PURPOSE, LOGIN_TYPE, RESEND_COOLDOWN_SECONDS);
   if (hasRecent) {
     throw cooldownError();
   }
 
-  const plainOtp = await issueOtp(account, normalizedEmail, ipAddress);
+  const plainOtp = await issueOtp(user, normalizedEmail, ipAddress);
   await sendOtpEmail(normalizedEmail, plainOtp);
 
   await passwordResetRepository.logHistory({
-    company_id: account.companyId,
+    company_id: user.company_id,
     email: normalizedEmail,
-    login_type: account.loginType,
-    ...accountIds(account),
+    login_type: LOGIN_TYPE,
+    user_id: user.id,
+    employee_id: null,
     action: historyAction,
     ip_address: ipAddress || null,
     user_agent: userAgent || null,
   });
 
   const isResend = historyAction === 'OTP_RESENT';
-  logger.info(`Password reset OTP ${isResend ? 'resent' : 'issued'}`, {
-    email: normalizedEmail,
-    loginType: account.loginType,
-  });
+  logger.info(`Password reset OTP ${isResend ? 'resent' : 'issued'}`, { email: normalizedEmail });
 
-  // Return the RESOLVED loginType alongside the success message — once
-  // this endpoint has determined which account the OTP was issued for
-  // (either because the email was unambiguous, or because the caller
-  // explicitly chose one), the frontend has no other way to know it and
-  // must carry it forward into /verify-otp and /reset-password verbatim.
-  // Those two endpoints deliberately do NOT re-resolve or infer the
-  // account type — they trust and validate against exactly this value,
-  // avoiding a second dual-table lookup for the same decision.
-  return {
-    message: isResend ? 'OTP resent successfully.' : 'OTP sent successfully.',
-    loginType: account.loginType,
-  };
+  return { message: isResend ? 'OTP resent successfully.' : 'OTP sent successfully.' };
 }
 
 /**
  * POST /auth/forgot-password
  * @param {string} email
- * @param {string} [loginType] - 'user' | 'employee', required only when the email resolves to both
  * @param {string} [ipAddress]
  * @param {string} [userAgent]
- * @returns {Promise<{ message: string, loginType: 'user'|'employee' }|{ requiresUserTypeSelection: true, message: string, accountTypes: object[] }>}
- * @throws {Error} statusCode 404 EMAIL_NOT_REGISTERED / 422 INVALID_LOGIN_TYPE / 429 OTP_COOLDOWN_ACTIVE
+ * @returns {Promise<{ message: string }>}
+ * @throws {Error} statusCode 404 EMAIL_NOT_REGISTERED / 429 OTP_COOLDOWN_ACTIVE
  */
-const forgotPassword = async (email, loginType, ipAddress, userAgent) => {
-  return sendOrResendOtp(email, loginType, ipAddress, userAgent, 'OTP_SENT');
+const forgotPassword = async (email, ipAddress, userAgent) => {
+  return sendOrResendOtp(email, ipAddress, userAgent, 'OTP_SENT');
 };
 
 /**
  * POST /auth/resend-otp
  * @param {string} email
- * @param {string} [loginType]
  * @param {string} [ipAddress]
  * @param {string} [userAgent]
- * @returns {Promise<object>} same shape as forgotPassword()
+ * @returns {Promise<{ message: string }>}
  */
-const resendOtp = async (email, loginType, ipAddress, userAgent) => {
-  return sendOrResendOtp(email, loginType, ipAddress, userAgent, 'OTP_RESENT');
+const resendOtp = async (email, ipAddress, userAgent) => {
+  return sendOrResendOtp(email, ipAddress, userAgent, 'OTP_RESENT');
 };
 
 /**
  * POST /auth/verify-otp
  * @param {string} email
  * @param {string} otp - plaintext, as submitted by the user
- * @param {string} loginType - 'user' | 'employee', REQUIRED (disambiguates which OTP stream this is)
  * @param {string} [ipAddress]
  * @param {string} [userAgent]
  * @returns {Promise<{ message: string }>}
  * @throws {Error} statusCode 400 — invalid/expired OTP or attempts exceeded
  */
-const verifyOtp = async (email, otp, loginType, ipAddress, userAgent) => {
+const verifyOtp = async (email, otp, ipAddress, userAgent) => {
   const normalizedEmail = email.toLowerCase().trim();
-  const normalizedType = String(loginType).toLowerCase();
 
-  await passwordResetRepository.expireElapsedPending(normalizedEmail, PURPOSE, normalizedType);
-  const candidates = await passwordResetRepository.findLivePendingByEmail(normalizedEmail, PURPOSE, normalizedType);
+  await passwordResetRepository.expireElapsedPending(normalizedEmail, PURPOSE, LOGIN_TYPE);
+  const candidates = await passwordResetRepository.findLivePendingByEmail(normalizedEmail, PURPOSE, LOGIN_TYPE);
 
   const fail = async (remarks, message) => {
     await passwordResetRepository.logHistory({
       email: normalizedEmail,
-      login_type: normalizedType,
+      login_type: LOGIN_TYPE,
       action: 'OTP_FAILED',
       ip_address: ipAddress || null,
       user_agent: userAgent || null,
@@ -314,12 +236,6 @@ const verifyOtp = async (email, otp, loginType, ipAddress, userAgent) => {
   }
 
   if (!matched) {
-    // candidates is already ordered newest-first, pre-filtered to live
-    // (unexpired) rows, AND scoped to this exact login_type by
-    // findLivePendingByEmail — the first entry is the one a wrong guess
-    // should count against. This is also the enforcement point that a
-    // User OTP can never be consumed against an Employee verify request:
-    // a User-issued OTP simply never appears in an 'employee'-scoped query.
     const mostRecentLive = candidates[0];
     if (mostRecentLive) {
       const newCount = mostRecentLive.attempt_count + 1;
@@ -346,9 +262,8 @@ const verifyOtp = async (email, otp, loginType, ipAddress, userAgent) => {
   await passwordResetRepository.logHistory({
     company_id: matched.company_id,
     email: normalizedEmail,
-    login_type: matched.login_type,
+    login_type: LOGIN_TYPE,
     user_id: matched.user_id,
-    employee_id: matched.employee_id,
     action: 'OTP_VERIFIED',
     ip_address: ipAddress || null,
     user_agent: userAgent || null,
@@ -362,20 +277,18 @@ const verifyOtp = async (email, otp, loginType, ipAddress, userAgent) => {
  * @param {string} email
  * @param {string} otp - plaintext, must match the already-'verified' row
  * @param {string} password - plaintext new password (already Joi-validated for policy)
- * @param {string} loginType - 'user' | 'employee', REQUIRED
  * @param {string} [ipAddress]
  * @param {string} [userAgent]
  * @returns {Promise<{ message: string }>}
- * @throws {Error} statusCode 400 — no verified/unexpired OTP for this email+loginType
+ * @throws {Error} statusCode 400 — no verified/unexpired OTP for this email
  */
-const resetPassword = async (email, otp, password, loginType, ipAddress, userAgent) => {
+const resetPassword = async (email, otp, password, ipAddress, userAgent) => {
   const normalizedEmail = email.toLowerCase().trim();
-  const normalizedType = String(loginType).toLowerCase();
 
   const fail = async (remarks) => {
     await passwordResetRepository.logHistory({
       email: normalizedEmail,
-      login_type: normalizedType,
+      login_type: LOGIN_TYPE,
       action: 'PASSWORD_RESET_FAILED',
       ip_address: ipAddress || null,
       user_agent: userAgent || null,
@@ -384,24 +297,15 @@ const resetPassword = async (email, otp, password, loginType, ipAddress, userAge
     throw badRequest('OTP is not verified or has expired. Please verify your OTP again.');
   };
 
-  // findVerifiedLiveByEmail's own WHERE clause already excludes expired
-  // rows (expires_at > NOW(), evaluated in SQL) AND scopes to this exact
-  // login_type — the enforcement point for "never allow a User OTP to
-  // reset an Employee password, or vice versa."
-  const verified = await passwordResetRepository.findVerifiedLiveByEmail(normalizedEmail, PURPOSE, normalizedType);
+  const verified = await passwordResetRepository.findVerifiedLiveByEmail(normalizedEmail, PURPOSE, LOGIN_TYPE);
   if (!verified) {
-    return fail('No verified, unexpired OTP found for this email/login type.');
+    return fail('No verified, unexpired OTP found for this email.');
   }
   if (!(await bcrypt.compare(otp, verified.otp))) {
     return fail('Submitted OTP does not match the verified OTP.');
   }
 
-  // Update ONLY the account type the OTP was actually issued for.
-  if (verified.login_type === 'user') {
-    await userRepository.update(verified.user_id, { password }, {}, verified.company_id);
-  } else {
-    await employeeRepository.update(verified.employee_id, { password }, verified.company_id);
-  }
+  await userRepository.update(verified.user_id, { password }, {}, verified.company_id);
 
   await passwordResetRepository.updateOtpById(verified.id, {
     status: 'used',
@@ -411,15 +315,14 @@ const resetPassword = async (email, otp, password, loginType, ipAddress, userAge
   await passwordResetRepository.logHistory({
     company_id: verified.company_id,
     email: normalizedEmail,
-    login_type: verified.login_type,
+    login_type: LOGIN_TYPE,
     user_id: verified.user_id,
-    employee_id: verified.employee_id,
     action: 'PASSWORD_RESET',
     ip_address: ipAddress || null,
     user_agent: userAgent || null,
   });
 
-  logger.info('Password reset completed', { email: normalizedEmail, loginType: verified.login_type });
+  logger.info('Password reset completed', { email: normalizedEmail });
 
   return { message: 'Password reset successfully. You can now log in with your new password.' };
 };

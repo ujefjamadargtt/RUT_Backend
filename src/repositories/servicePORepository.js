@@ -5,6 +5,7 @@ const {
   ServicePO,
   ServicePOResource,
   Client,
+  Project,
   ServiceType,
   ServiceCategory,
   Employee,
@@ -27,7 +28,7 @@ const {
  * @returns {Promise<{ rows: ServicePO[], count: number }>}
  */
 const findAll = async (filters = {}, pagination = {}, sort = {}) => {
-  const { search, status, client_id, service_category_id, service_type_id, service_po_id, is_billable, start_date_from, start_date_to, companyId } = filters;
+  const { search, status, client_id, project_id, service_category_id, service_type_id, service_po_id, is_billable, start_date_from, start_date_to, companyId } = filters;
   const { limit = 10, offset = 0 } = pagination;
   const { sortBy = 'created_at', sortOrder = 'DESC' } = sort;
 
@@ -39,6 +40,10 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
 
   if (client_id) {
     where.client_id = client_id;
+  }
+
+  if (project_id) {
+    where.project_id = project_id;
   }
 
   if (service_type_id) {
@@ -98,6 +103,17 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
         as: 'client',
         attributes: ['id', 'client_code', 'client_name'],
       },
+      {
+        model: Project,
+        as: 'project',
+        attributes: ['id', 'project_code', 'project_name'],
+      },
+      {
+        model: Employee,
+        as: 'deliveryHead',
+        attributes: ['id', 'employee_code', 'full_name'],
+        required: false,
+      },
       serviceTypeInclude,
     ],
     limit,
@@ -125,9 +141,20 @@ const findById = async (id, companyId) => {
         attributes: ['id', 'client_code', 'client_name', 'industry'],
       },
       {
+        model: Project,
+        as: 'project',
+        attributes: ['id', 'project_code', 'project_name'],
+      },
+      {
         model: ServiceType,
         as: 'serviceType',
         attributes: ['id', 'service_type_name'],
+      },
+      {
+        model: Employee,
+        as: 'deliveryHead',
+        attributes: ['id', 'employee_code', 'full_name'],
+        required: false,
       },
       {
         model: Employee,
@@ -306,9 +333,20 @@ const getActivePOs = async (companyId) => {
         attributes: ['id', 'client_code', 'client_name'],
       },
       {
+        model: Project,
+        as: 'project',
+        attributes: ['id', 'project_code', 'project_name'],
+      },
+      {
         model: ServiceType,
         as: 'serviceType',
         attributes: ['id', 'service_type_name'],
+      },
+      {
+        model: Employee,
+        as: 'deliveryHead',
+        attributes: ['id', 'employee_code', 'full_name'],
+        required: false,
       },
     ],
     attributes: ['id', 'service_po_code', 'service_po_name', 'start_date', 'end_date', 'is_billable'],

@@ -1,6 +1,7 @@
 'use strict';
 
 const userService = require('../services/userService');
+const roleHierarchyService = require('../services/roleHierarchyService');
 const {
   sendSuccess,
   sendCreated,
@@ -51,7 +52,7 @@ const getById = async (req, res, next) => {
  */
 const create = async (req, res, next) => {
   try {
-    const user = await userService.create(req.body, req.userId, getIpAddress(req), req.companyId);
+    const user = await userService.create(req.body, req.userId, getIpAddress(req), req.companyId, req.userRoleName);
     return sendCreated(res, user, 'User created successfully.');
   } catch (err) {
     if (err.statusCode === 409) {
@@ -59,6 +60,9 @@ const create = async (req, res, next) => {
     }
     if (err.statusCode === 404) {
       return sendError(res, err.message, 404);
+    }
+    if (err.statusCode === 403) {
+      return sendError(res, err.message, 403);
     }
     next(err);
   }
@@ -73,14 +77,14 @@ const update = async (req, res, next) => {
     if (isNaN(id)) {
       return sendError(res, 'Invalid user ID.', 400);
     }
-    const user = await userService.update(id, req.body, req.userId, getIpAddress(req), req.companyId);
+    const user = await userService.update(id, req.body, req.userId, getIpAddress(req), req.companyId, req.userRoleName);
     return sendSuccess(res, user, 'User updated successfully.');
   } catch (err) {
     if (err.statusCode === 404) {
       return sendNotFound(res, 'User');
     }
-    if (err.statusCode === 409) {
-      return sendError(res, err.message, 409);
+    if (err.statusCode === 409 || err.statusCode === 403) {
+      return sendError(res, err.message, err.statusCode);
     }
     next(err);
   }
@@ -119,12 +123,19 @@ const changePassword = async (req, res, next) => {
       return sendError(res, 'Invalid user ID.', 400);
     }
 
-    // A user can only change their own password unless they are HR/Management
+    // A user can only change their own password unless they hold HR's
+    // 'hr.manage_employee' capability (owns Employee lifecycle management —
+    // checked via req.capabilities, not a primary-role string match, so an
+    // Employee-primary user granted HR as an ADDITIONAL role correctly
+    // qualifies too, see database/migrations/20260850_add_user_additional_roles.sql)
+    // or a senior admin tier (Platform Admin/Admin/Entity Admin/BU Admin
+    // manage everything within their own scope — see
+    // roleHierarchyService.isSeniorTier, the generalized replacement for
+    // the old hardcoded ['HR', 'Management'] check; 'Management' no longer
+    // exists as a role — see database/migrations/20260838_remap_legacy_roles.sql).
     const isSelf = req.userId === id;
-    const userRoles = Array.isArray(req.userRoles) ? req.userRoles : req.userRole ? [req.userRole] : [];
-    const isAdmin = ['HR', 'Management'].some((role) =>
-      userRoles.includes(role)
-    );
+    const isAdmin = roleHierarchyService.hasCapability(req.capabilities, 'hr.manage_employee')
+      || roleHierarchyService.isSeniorTier(req.user.role);
 
     if (!isSelf && !isAdmin) {
       return sendError(res, 'You are not authorised to change this user\'s password.', 403);
@@ -152,6 +163,39 @@ const changePassword = async (req, res, next) => {
   }
 };
 
+/**
+ * PUT /api/v1/users/:id/reset-password
+ *
+ * Admin-side reset — sets a new password WITHOUT requiring the old one.
+ * Restricted to HR or a senior admin tier (same rule as the "reset
+ * someone else's password" branch of changePassword() above) — a plain
+ * user may never reset their own or anyone else's password this way; use
+ * PUT /:id/change-password (self-service, requires the old password)
+ * instead.
+ */
+const resetPassword = async (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) {
+      return sendError(res, 'Invalid user ID.', 400);
+    }
+
+    const isAdmin = roleHierarchyService.hasCapability(req.capabilities, 'hr.manage_employee')
+      || roleHierarchyService.isSeniorTier(req.user.role);
+    if (!isAdmin) {
+      return sendError(res, 'You are not authorised to reset this user\'s password.', 403);
+    }
+
+    await userService.resetPassword(id, req.body.new_password, req.userId, getIpAddress(req), req.companyId);
+    return sendSuccess(res, null, 'Password reset successfully.');
+  } catch (err) {
+    if (err.statusCode === 404) {
+      return sendNotFound(res, 'User');
+    }
+    next(err);
+  }
+};
+
 module.exports = {
   getAll,
   getById,
@@ -159,4 +203,5 @@ module.exports = {
   update,
   delete: deleteUser,
   changePassword,
+  resetPassword,
 };

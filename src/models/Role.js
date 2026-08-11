@@ -3,20 +3,7 @@
 const { Model, DataTypes } = require('sequelize');
 
 module.exports = (sequelize) => {
-  class Role extends Model {
-    static associate(models) {
-      Role.hasMany(models.User, {
-        foreignKey: 'role_id',
-        as: 'users',
-      });
-      Role.belongsToMany(models.User, {
-        through: models.UserRole,
-        foreignKey: 'role_id',
-        otherKey: 'user_id',
-        as: 'usersWithRoles',
-      });
-    }
-  }
+  class Role extends Model {}
 
   Role.init(
     {
@@ -54,6 +41,30 @@ module.exports = (sequelize) => {
         },
       },
       is_deleted: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
+      },
+      // 1 (Platform Admin) .. 8 (Employee) for the admin chain; NULL for
+      // roles outside it (HR is a parallel branch, not part of the numeric
+      // hierarchy). See database/migrations/20260836_seed_target_roles_and_capabilities.sql.
+      hierarchy_rank: {
+        type: DataTypes.SMALLINT,
+        allowNull: true,
+      },
+      // Self-referencing FK — this role's users also get every capability
+      // granted (directly or transitively) to the referenced role. Only set
+      // for the two edges the RBAC spec states (Service PO Admin <- Manager,
+      // Project Admin <- Service PO Admin); NULL otherwise. See
+      // src/services/roleHierarchyService.js.
+      inherits_role_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        references: { model: 'roles', key: 'id' },
+      },
+      // True for the 9 roles this RBAC redesign seeds — blocks
+      // delete/rename via the dynamic Role CRUD (see roleService.js).
+      is_system: {
         type: DataTypes.BOOLEAN,
         allowNull: false,
         defaultValue: false,

@@ -131,8 +131,11 @@ module.exports = (sequelize) => {
           notEmpty: { msg: 'Description is required.' },
         },
       },
-      // 'pending'  - entered by the employee, not yet part of the official
-      //              Timesheet.
+      // 'pending'  - entered by the employee, awaiting approval (or Sync,
+      //              if approval isn't required for this employee).
+      // 'approved' - approved (by a Manager, or automatically because
+      //              approval isn't required for this employee) but Sync
+      //              has not run yet. Eligible for Sync.
       // 'synced'   - included in a completed Sync run; the corresponding
       //              official record now lives in `timesheets`, linked via
       //              timesheet_import_id. Synced rows are read-only.
@@ -141,7 +144,7 @@ module.exports = (sequelize) => {
         allowNull: false,
         defaultValue: 'pending',
         validate: {
-          isIn: { args: [['pending', 'synced']], msg: 'Status must be pending or synced.' },
+          isIn: { args: [['pending', 'approved', 'synced']], msg: 'Status must be pending, approved, or synced.' },
         },
       },
       synced_at: {

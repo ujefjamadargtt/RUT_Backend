@@ -3,7 +3,6 @@
 const { Router } = require('express');
 const authController = require('../controllers/authController');
 const authenticate = require('../middlewares/auth');
-const dualAuth = require('../middlewares/dualAuth');
 const { validate } = require('../middlewares/validateRequest');
 const { authLimiter } = require('../middlewares/rateLimiters');
 const {
@@ -483,6 +482,6 @@ router.get('/profile', authenticate, authController.getProfile);
  *       422:
  *         description: Validation error (weak password) or an unresolvable account type
  */
-router.put('/change-password', authLimiter, dualAuth, validate(directChangePasswordSchema), authController.changePassword);
+router.put('/change-password', authLimiter, authenticate, validate(directChangePasswordSchema), authController.changePassword);
 
 module.exports = router;

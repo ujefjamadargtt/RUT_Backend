@@ -9,7 +9,12 @@ const { User, Employee, Role, sequelize } = require('../models');
  */
 
 /**
- * Standard include config for user queries: joins employee and role data.
+ * Standard include config for user queries: joins employee, PRIMARY role,
+ * and ADDITIONAL role data. users.role_id (the `role` include) remains the
+ * sole source of truth for hierarchy/scoping — the `additionalRoles`
+ * include is a purely additive capability grant, never read for those
+ * decisions. See database/migrations/20260850_add_user_additional_roles.sql
+ * and roleHierarchyService.getEffectiveCapabilitiesForRoleIds().
  */
 const DEFAULT_INCLUDE = [
   {
@@ -21,13 +26,13 @@ const DEFAULT_INCLUDE = [
   {
     model: Role,
     as: 'role',
-    attributes: ['id', 'role_name', 'permission', 'status'],
+    attributes: ['id', 'role_name', 'permission', 'status', 'hierarchy_rank', 'inherits_role_id'],
     required: false,
   },
   {
     model: Role,
-    as: 'roles',
-    attributes: ['id', 'role_name', 'permission', 'status'],
+    as: 'additionalRoles',
+    attributes: ['id', 'role_name', 'permission', 'status', 'hierarchy_rank', 'inherits_role_id'],
     through: { attributes: [] },
     required: false,
   },
@@ -66,41 +71,17 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
     where.email = { [Op.iLike]: `%${search.trim()}%` };
   }
 
-  const include = DEFAULT_INCLUDE.map((inc) => ({
-    ...inc,
-    through: inc.through ? { ...inc.through } : undefined,
-  }));
-
-  let subQuery;
-
   if (role_id) {
-    include.forEach((inc) => {
-      if (inc.as === 'roles') {
-        inc.required = false;
-        inc.where = { id: parseInt(role_id, 10) };
-      }
-    });
-
-    where[Op.or] = [
-      { role_id: parseInt(role_id, 10) },
-      { '$roles.id$': parseInt(role_id, 10) },
-    ];
-
-    // Referencing the joined "roles" table in a top-level where is incompatible
-    // with Sequelize's default subQuery pagination (the inner LIMIT/OFFSET
-    // subquery has no join to "roles" yet), which raises a Postgres
-    // "missing FROM-clause entry for table roles" error. Disable it here.
-    subQuery = false;
+    where.role_id = parseInt(role_id, 10);
   }
 
   return User.findAndCountAll({
     where,
-    include,
+    include: DEFAULT_INCLUDE,
     limit,
     offset,
     order: [[sortBy, safeSortOrder]],
     distinct: true,
-    subQuery,
   });
 };
 
@@ -126,6 +107,43 @@ const findById = async (id, companyId) => {
  */
 const findByEmail = async (email) => {
   return User.findOne({ where: { email: email.toLowerCase(), is_deleted: false } });
+};
+
+/**
+ * Find the single User linked to one Employee (users.employee_id — a
+ * partial unique index enforces at most one). Used by employeeService.js
+ * to update an Employee's login email, since Employee itself carries no
+ * email column.
+ * @param {number} employeeId
+ * @param {number} companyId
+ * @returns {Promise<User|null>}
+ */
+const findByEmployeeId = async (employeeId, companyId) => {
+  return User.findOne({ where: { employee_id: employeeId, company_id: companyId, is_deleted: false } });
+};
+
+/**
+ * Fetch multiple users by id in one query, including their linked
+ * Employee's full_name — used to resolve a display name for a set of
+ * Manager user ids at once (e.g. employeeService.js's Primary/Secondary
+ * Manager id+name attachment) without N+1 queries.
+ * @param {number[]} ids
+ * @returns {Promise<User[]>}
+ */
+const findByIds = async (ids) => {
+  if (!ids || ids.length === 0) return [];
+  return User.findAll({
+    where: { id: { [Op.in]: ids }, is_deleted: false },
+    attributes: ['id', 'email'],
+    include: [
+      {
+        model: Employee,
+        as: 'employee',
+        attributes: ['full_name'],
+        required: false,
+      },
+    ],
+  });
 };
 
 /**
@@ -176,12 +194,112 @@ const softDelete = async (id, updatedBy, companyId) => {
   return user.update({ status: 'inactive', is_deleted: true, updated_by: updatedBy });
 };
 
+/**
+ * Fetch a paginated list of Users scoped to MULTIPLE companies at once,
+ * filtered to a specific role — the "BU Admin Master" module's data source
+ * (Entity Admin manages BU Admins across every Company under their owned
+ * Entities, unlike every other caller of this repository which is scoped
+ * to a single companyId). Additive export — findAll above is untouched.
+ *
+ * @param {number[]} companyIds
+ * @param {number} roleId - resolved by the caller via roleRepository.findByName
+ * @param {object} filters - { search, status }
+ * @param {object} pagination - { limit, offset }
+ * @param {object} sort - { sortBy, sortOrder }
+ * @returns {Promise<{ rows: User[], count: number }>}
+ */
+const findByCompanyIdsAndRole = async (companyIds, roleId, filters = {}, pagination = {}, sort = {}) => {
+  const { search, status } = filters;
+  const { limit = 20, offset = 0 } = pagination;
+  const { sortBy: requestedSortBy = 'created_at', sortOrder = 'DESC' } = sort;
+  const allowedSortColumns = ['email', 'created_at', 'last_login'];
+  const sortBy = allowedSortColumns.includes(requestedSortBy) ? requestedSortBy : 'created_at';
+  const safeSortOrder = ['ASC', 'DESC'].includes((sortOrder || '').toUpperCase())
+    ? sortOrder.toUpperCase()
+    : 'DESC';
+
+  if (!companyIds || companyIds.length === 0) {
+    return { rows: [], count: 0 };
+  }
+
+  const where = {
+    is_deleted: false,
+    company_id: { [Op.in]: companyIds },
+    role_id: roleId,
+  };
+
+  if (status && status !== 'all') {
+    where.status = status;
+  }
+
+  if (search && search.trim()) {
+    where.email = { [Op.iLike]: `%${search.trim()}%` };
+  }
+
+  return User.findAndCountAll({
+    where,
+    include: DEFAULT_INCLUDE,
+    limit,
+    offset,
+    order: [[sortBy, safeSortOrder]],
+    distinct: true,
+  });
+};
+
+/**
+ * Fetch a paginated list of Users holding one role, scoped to whoever
+ * created them — Admin's "View Entity Admins" module's data source. Entity
+ * Admin (and Admin) users always have company_id NULL by design (see
+ * resolveCompany.js), so there is no company to scope by; created_by (the
+ * Admin who created this Entity Admin) is the scoping axis instead — see
+ * entityAdminService.js's doc comment.
+ *
+ * @param {number} roleId - resolved by the caller via roleRepository.findByName
+ * @param {object} filters - { search, status, createdBy }
+ * @param {object} pagination - { limit, offset }
+ * @param {object} sort - { sortBy, sortOrder }
+ * @returns {Promise<{ rows: User[], count: number }>}
+ */
+const findByRole = async (roleId, filters = {}, pagination = {}, sort = {}) => {
+  const { search, status, createdBy } = filters;
+  const { limit = 20, offset = 0 } = pagination;
+  const { sortBy: requestedSortBy = 'created_at', sortOrder = 'DESC' } = sort;
+  const allowedSortColumns = ['email', 'created_at', 'last_login'];
+  const sortBy = allowedSortColumns.includes(requestedSortBy) ? requestedSortBy : 'created_at';
+  const safeSortOrder = ['ASC', 'DESC'].includes((sortOrder || '').toUpperCase())
+    ? sortOrder.toUpperCase()
+    : 'DESC';
+
+  const where = { is_deleted: false, role_id: roleId, created_by: createdBy };
+
+  if (status && status !== 'all') {
+    where.status = status;
+  }
+
+  if (search && search.trim()) {
+    where.email = { [Op.iLike]: `%${search.trim()}%` };
+  }
+
+  return User.findAndCountAll({
+    where,
+    include: DEFAULT_INCLUDE,
+    limit,
+    offset,
+    order: [[sortBy, safeSortOrder]],
+    distinct: true,
+  });
+};
+
 module.exports = {
   findAll,
   findById,
   findByEmail,
   findByEmailWithPassword,
+  findByEmployeeId,
+  findByIds,
   create,
   update,
   softDelete,
+  findByCompanyIdsAndRole,
+  findByRole,
 };

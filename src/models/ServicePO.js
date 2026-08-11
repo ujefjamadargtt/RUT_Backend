@@ -31,6 +31,13 @@ module.exports = (sequelize) => {
         otherKey: 'employee_id',
         as: 'employees',
       });
+      // Delivery Head — a direct staffing attribute of the Service PO,
+      // distinct from the employees/resources many-to-many above. Always
+      // an Employee Master id, never a User Master id.
+      ServicePO.belongsTo(models.Employee, {
+        foreignKey: 'delivery_head_employee_id',
+        as: 'deliveryHead',
+      });
     }
   }
 
@@ -76,6 +83,19 @@ module.exports = (sequelize) => {
           notNull: { msg: 'Client is required.' },
         },
       },
+      // Independent of client_id — Project Master (see Project.js) is a
+      // separate, standalone grouping every Service PO must belong to.
+      project_id: {
+        type: DataTypes.INTEGER,
+        allowNull: false,
+        references: {
+          model: 'projects',
+          key: 'id',
+        },
+        validate: {
+          notNull: { msg: 'Project is required.' },
+        },
+      },
       service_type_id: {
         type: DataTypes.INTEGER,
         allowNull: false,
@@ -85,6 +105,18 @@ module.exports = (sequelize) => {
         },
         validate: {
           notNull: { msg: 'Service type is required.' },
+        },
+      },
+      // Delivery Head — always an employees(id), never a users(id) (see
+      // model doc comment on the association above). Nullable at the DB
+      // level so a Service PO created before this feature isn't broken;
+      // required by Joi only on create (servicePOValidation.js).
+      delivery_head_employee_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        references: {
+          model: 'employees',
+          key: 'id',
         },
       },
       po_value: {

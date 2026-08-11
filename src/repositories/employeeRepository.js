@@ -1,7 +1,7 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { Employee, ServicePOResource, ServicePO } = require('../models');
+const { Employee, ServicePOResource, ServicePO, User } = require('../models');
 
 /**
  * Employee Repository
@@ -48,12 +48,19 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
       { full_name: { [Op.iLike]: term } },
       { employee_code: { [Op.iLike]: term } },
       { designation: { [Op.iLike]: term } },
-      { email_id: { [Op.iLike]: term } },
     ];
   }
 
   return Employee.findAndCountAll({
     where,
+    include: [
+      {
+        model: User,
+        as: 'users',
+        attributes: ['email'],
+        required: false,
+      },
+    ],
     limit,
     offset,
     order: [[sortBy, safeSortOrder]],
@@ -71,6 +78,31 @@ const findById = async (id, companyId) => {
 };
 
 /**
+ * Find a single employee by primary key, including their linked User's
+ * email — a separate function from findById() (which has 9 other call
+ * sites across validation/service code that don't need this extra join)
+ * so that GET/PUT /employees/:id can flatten `email` onto the response the
+ * same way GET /employees already does, without adding an unnecessary
+ * include everywhere else findById() is used.
+ * @param {number} id
+ * @param {number} companyId
+ * @returns {Promise<Employee|null>}
+ */
+const findByIdWithEmail = async (id, companyId) => {
+  return Employee.findOne({
+    where: { id, is_deleted: false, company_id: companyId },
+    include: [
+      {
+        model: User,
+        as: 'users',
+        attributes: ['email'],
+        required: false,
+      },
+    ],
+  });
+};
+
+/**
  * Find a single employee by employee_code, scoped to one company
  * (uniqueness is per-company — see uq_employees_company_code), regardless
  * of status or soft-delete state, so a code held by an inactive or deleted
@@ -83,29 +115,28 @@ const findByCode = async (code, companyId) => {
   return Employee.findOne({ where: { employee_code: code, company_id: companyId } });
 };
 
-const findByEmail = async (email) => {
-  return Employee.findOne({ where: { email_id: email.toLowerCase(), is_deleted: false } });
-};
-
 /**
  * Insert a new employee record.
  * @param {object} data
+ * @param {object} [options] - Sequelize options (e.g. { transaction })
  * @returns {Promise<Employee>}
  */
-const create = async (data) => {
-  return Employee.create(data);
+const create = async (data, options = {}) => {
+  return Employee.create(data, options);
 };
 
 /**
  * Update an existing employee by primary key.
  * @param {number} id
  * @param {object} data
+ * @param {number} companyId
+ * @param {object} [options] - Sequelize options (e.g. { transaction })
  * @returns {Promise<Employee>}
  */
-const update = async (id, data, companyId) => {
-  const employee = await Employee.findOne({ where: { id, company_id: companyId } });
+const update = async (id, data, companyId, options = {}) => {
+  const employee = await Employee.findOne({ where: { id, company_id: companyId }, transaction: options.transaction });
   if (!employee) return null;
-  return employee.update(data);
+  return employee.update(data, options);
 };
 
 /**
@@ -139,6 +170,33 @@ const getActiveEmployees = async (companyId) => {
       'company_experience',
       'status',
     ],
+  });
+};
+
+/**
+ * Return every active, non-deleted Employee in one Company — the eligible
+ * candidate list for Service PO Delivery Head selection. Employee no
+ * longer carries its own email (see database/migrations/
+ * 20260842_employees_drop_login_columns.sql) — it's sourced here from the
+ * Employee's linked User account (at most one, per the one-User-per-
+ * Employee unique index) instead.
+ *
+ * @param {number} companyId
+ * @returns {Promise<Employee[]>}
+ */
+const getEligibleDeliveryHeads = async (companyId) => {
+  return Employee.findAll({
+    where: { status: 'active', is_deleted: false, company_id: companyId },
+    include: [
+      {
+        model: User,
+        as: 'users',
+        attributes: ['email'],
+        required: false,
+      },
+    ],
+    attributes: ['id', 'employee_code', 'full_name', 'status', 'company_id'],
+    order: [['full_name', 'ASC']],
   });
 };
 
@@ -182,29 +240,14 @@ const findActiveAllocations = async (employeeId, companyId) => {
  * Lightweight fetch of employees in one company (including inactive/
  * soft-deleted) for bulk import code-uniqueness validation, so a code held
  * by a deleted employee in this company is still flagged as taken rather
- * than silently reused. Email uniqueness is checked separately and stays
- * global — see findAllEmailsGlobal().
+ * than silently reused.
  * @param {number} companyId
- * @returns {Promise<{ employee_code: string, email_id: string|null }[]>}
+ * @returns {Promise<{ employee_code: string }[]>}
  */
 const findAllForImport = async (companyId) => {
   return Employee.findAll({
     where: { company_id: companyId },
-    attributes: ['employee_code', 'email_id'],
-    raw: true,
-  });
-};
-
-/**
- * Fetch every non-null employee email across ALL companies — email_id
- * uniqueness is intentionally global, not per-company (tied to a person's
- * identity, unlike employee_code).
- * @returns {Promise<{ email_id: string }[]>}
- */
-const findAllEmailsGlobal = async () => {
-  return Employee.findAll({
-    where: { email_id: { [Op.ne]: null } },
-    attributes: ['email_id'],
+    attributes: ['employee_code'],
     raw: true,
   });
 };
@@ -212,14 +255,14 @@ const findAllEmailsGlobal = async () => {
 module.exports = {
   findAll,
   findById,
+  findByIdWithEmail,
   findByCode,
-  findByEmail,
   create,
   update,
   softDelete,
   getActiveEmployees,
+  getEligibleDeliveryHeads,
   findByIds,
   findActiveAllocations,
   findAllForImport,
-  findAllEmailsGlobal,
 };

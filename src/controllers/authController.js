@@ -20,73 +20,29 @@ function resolveIp(req) {
   );
 }
 
-/**
- * Send the "email exists as both a User and an Employee" disambiguation
- * response — a flat, non-standard shape (no `data` envelope) shared
- * verbatim by /login and /forgot-password (and /resend-otp), since both
- * resolve accounts via the same shared case logic
- * (src/utils/loginTypeResolver.js) and can hit this same outcome.
- *
- * @param {import('express').Response} res
- * @param {{ message: string, accountTypes: object[] }} result
- */
-function sendRequiresUserTypeSelection(res, result) {
-  return res.status(200).json({
-    success: false,
-    requiresUserTypeSelection: true,
-    message: result.message,
-    accountTypes: result.accountTypes,
-  });
-}
-
-/**
- * Send the /forgot-password and /resend-otp success response — a flat
- * shape (no `data` envelope) that includes the RESOLVED `loginType`
- * alongside the message. This is the only way the frontend learns which
- * account type an ambiguous email resolved to (or confirms the type for
- * an unambiguous one) — it must carry this value forward verbatim into
- * /verify-otp and /reset-password, which no longer re-resolve it.
- *
- * @param {import('express').Response} res
- * @param {{ message: string, loginType: string }} result
- */
-function sendOtpIssued(res, result) {
-  return res.status(200).json({
-    success: true,
-    message: result.message,
-    loginType: result.loginType,
-  });
-}
-
 // ─── Auth Controller ──────────────────────────────────────────────────────────
 
 /**
  * POST /api/auth/login
  *
- * Authenticate a User or Employee with email + password. The backend
- * resolves which account type the email belongs to; `loginType` is only
- * required when the email is registered as BOTH (see authService.login).
+ * Authenticate against User Master. Login response always includes both
+ * `user` and `employee` — `employee` is null for an account with no linked
+ * Employee record (see authService.login).
  *
  * Request body (validated upstream by Joi middleware):
- *   { email: string, password: string, loginType?: 'user'|'employee' }
+ *   { email: string, password: string }
  *
- * Response 200 (normal):
- *   { success: true, message: string, data: { accessToken, refreshToken, expiresIn, user|employee, ... } }
- * Response 200 (ambiguous — email is both a User and an Employee, no loginType given):
- *   { success: false, requiresUserTypeSelection: true, message: string, accountTypes: [...] }
+ * Response 200:
+ *   { success: true, message: string, data: { accessToken, refreshToken, expiresIn, user, employee, roles, forms } }
  * Response 404: { success: false, message: 'Email ID is not registered.' }
  */
 const login = async (req, res, next) => {
   try {
-    const { email, password, loginType } = req.body;
+    const { email, password } = req.body;
     const ipAddress = resolveIp(req);
     const userAgent = req.headers['user-agent'] || '';
 
-    const result = await authService.login(email, password, loginType, ipAddress, userAgent);
-
-    if (result.requiresUserTypeSelection) {
-      return sendRequiresUserTypeSelection(res, result);
-    }
+    const result = await authService.login(email, password, ipAddress, userAgent);
 
     return sendSuccess(res, result, 'Login successful.');
   } catch (err) {
@@ -176,31 +132,19 @@ const getProfile = async (req, res, next) => {
 /**
  * POST /api/auth/forgot-password
  *
- * Supports both User and Employee — the backend resolves which one the
- * submitted email belongs to, exactly like the dynamic /auth/login flow.
- * `loginType` is only required when the email is registered as BOTH.
- *
- * Request body: { email: string, loginType?: 'user'|'employee' }
- * Response 200 (normal): { success: true, message: 'OTP sent successfully.', loginType: 'user'|'employee' }
- *   — no `data` envelope; the frontend MUST carry this `loginType` forward
- *   into /verify-otp and /reset-password verbatim, since those endpoints
- *   no longer re-resolve it.
- * Response 200 (ambiguous): { success: false, requiresUserTypeSelection: true, message, accountTypes }
+ * Request body: { email: string }
+ * Response 200: { success: true, message: 'OTP sent successfully.' }
  * Response 404: { success: false, message: 'Email ID is not registered.' }
  */
 const forgotPassword = async (req, res, next) => {
   try {
-    const { email, loginType } = req.body;
+    const { email } = req.body;
     const ipAddress = resolveIp(req);
     const userAgent = req.headers['user-agent'] || '';
 
-    const result = await forgotPasswordService.forgotPassword(email, loginType, ipAddress, userAgent);
+    const result = await forgotPasswordService.forgotPassword(email, ipAddress, userAgent);
 
-    if (result.requiresUserTypeSelection) {
-      return sendRequiresUserTypeSelection(res, result);
-    }
-
-    return sendOtpIssued(res, result);
+    return res.status(200).json({ success: true, message: result.message });
   } catch (err) {
     next(err);
   }
@@ -209,25 +153,20 @@ const forgotPassword = async (req, res, next) => {
 /**
  * POST /api/auth/resend-otp
  *
- * Request body: { email: string, loginType?: 'user'|'employee' }
- * Response 200 (normal): { success: true, message: 'OTP resent successfully.', loginType: 'user'|'employee' }
- * Response 200 (ambiguous): { success: false, requiresUserTypeSelection: true, message, accountTypes }
+ * Request body: { email: string }
+ * Response 200: { success: true, message: 'OTP resent successfully.' }
  * Response 404: { success: false, message: 'Email ID is not registered.' }
  * Response 429: { success: false, message: '...wait before requesting another.' }
  */
 const resendOtp = async (req, res, next) => {
   try {
-    const { email, loginType } = req.body;
+    const { email } = req.body;
     const ipAddress = resolveIp(req);
     const userAgent = req.headers['user-agent'] || '';
 
-    const result = await forgotPasswordService.resendOtp(email, loginType, ipAddress, userAgent);
+    const result = await forgotPasswordService.resendOtp(email, ipAddress, userAgent);
 
-    if (result.requiresUserTypeSelection) {
-      return sendRequiresUserTypeSelection(res, result);
-    }
-
-    return sendOtpIssued(res, result);
+    return res.status(200).json({ success: true, message: result.message });
   } catch (err) {
     next(err);
   }
@@ -236,17 +175,17 @@ const resendOtp = async (req, res, next) => {
 /**
  * POST /api/auth/verify-otp
  *
- * Request body: { email: string, otp: string, loginType: 'user'|'employee' }
+ * Request body: { email: string, otp: string }
  * Response 200: { success: true, message: 'OTP verified successfully.', data: null }
  * Response 400: invalid/expired OTP or attempts exceeded
  */
 const verifyOtp = async (req, res, next) => {
   try {
-    const { email, otp, loginType } = req.body;
+    const { email, otp } = req.body;
     const ipAddress = resolveIp(req);
     const userAgent = req.headers['user-agent'] || '';
 
-    const result = await forgotPasswordService.verifyOtp(email, otp, loginType, ipAddress, userAgent);
+    const result = await forgotPasswordService.verifyOtp(email, otp, ipAddress, userAgent);
 
     return sendSuccess(res, null, result.message);
   } catch (err) {
@@ -260,17 +199,17 @@ const verifyOtp = async (req, res, next) => {
 /**
  * POST /api/auth/reset-password
  *
- * Request body: { email: string, otp: string, password: string, confirmPassword: string, loginType: 'user'|'employee' }
+ * Request body: { email: string, otp: string, password: string, confirmPassword: string }
  * Response 200: { success: true, message: string, data: null }
  * Response 400: OTP not verified / expired
  */
 const resetPassword = async (req, res, next) => {
   try {
-    const { email, otp, password, loginType } = req.body;
+    const { email, otp, password } = req.body;
     const ipAddress = resolveIp(req);
     const userAgent = req.headers['user-agent'] || '';
 
-    const result = await forgotPasswordService.resetPassword(email, otp, password, loginType, ipAddress, userAgent);
+    const result = await forgotPasswordService.resetPassword(email, otp, password, ipAddress, userAgent);
 
     return sendSuccess(res, null, result.message);
   } catch (err) {
@@ -284,26 +223,24 @@ const resetPassword = async (req, res, next) => {
 /**
  * PUT /api/v1/auth/change-password
  *
- * Directly sets a new password for the already-authenticated User or
- * Employee — supports both account types through one endpoint. `req.authId`
- * and `req.userType` are set by the `dualAuth` middleware from the verified
- * JWT; the request body only ever needs `newPassword` (any `id`/`userType`
- * a client sends is ignored — only the token's own resolved identity is used).
+ * Directly sets a new password for the already-authenticated User. The
+ * request body only ever needs `newPassword` — the account to update is
+ * resolved entirely from the Bearer access token (req.userId, set by
+ * `authenticate`), never from the request body.
  *
  * Request body: { newPassword: string }
  * Response 200: { success: true, message: 'Password updated successfully.' }
- * Response 404: { success: false, message: 'User not found.' | 'Employee not found.' }
- * Response 422: { success: false, message: 'Invalid user type.' }
+ * Response 404: { success: false, message: 'User not found.' }
  */
 const changePassword = async (req, res, next) => {
   try {
     const { newPassword } = req.body;
 
-    const result = await authService.changePassword(req.authId, req.userType, newPassword, req.companyId);
+    const result = await authService.changePassword(req.userId, newPassword, req.companyId);
 
     return sendSuccess(res, null, result.message);
   } catch (err) {
-    if (err.statusCode === 404 || err.statusCode === 422) {
+    if (err.statusCode === 404) {
       return sendError(res, err.message, err.statusCode);
     }
     next(err);

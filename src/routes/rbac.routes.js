@@ -6,9 +6,7 @@ const router = express.Router();
 const authenticate = require('../middlewares/auth');
 const { validate } = require('../middlewares/validateRequest');
 const {
-  mappingSchema,
   roleFormMappingSchema,
-  replaceUserRolesSchema,
   replaceRoleFormMappingsSchema,
   getRoleFormMappingQuerySchema,
   formsForRolesSchema,
@@ -105,138 +103,6 @@ router.post(
   authenticate,
   validate(mapFormSchema),
   rbacController.mapForm
-);
-
-/**
- * @swagger
- * /roles/user-mappings/{userId}:
- *   get:
- *     summary: List every role mapped to a user (Management only)
- *     tags: [RBAC]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: userId
- *         required: true
- *         schema: { type: integer }
- *     responses:
- *       200:
- *         description: User role mappings
- *       404:
- *         description: User not found
- */
-router.get(
-  '/user-mappings/:userId',
-  authenticate,
-  rbacController.userMappings
-);
-
-/**
- * @swagger
- * /roles/user-mappings:
- *   post:
- *     summary: Map one additional role onto a user (Management only)
- *     tags: [RBAC]
- *     security:
- *       - bearerAuth: []
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [user_id, role_id]
- *             properties:
- *               user_id: { type: integer }
- *               role_id: { type: integer }
- *     responses:
- *       201:
- *         description: Mapping created
- *       404:
- *         description: User or role not found
- *       409:
- *         description: Mapping already exists
- *       422:
- *         description: Validation error
- */
-router.post(
-  '/user-mappings',
-  authenticate,
-  validate(mappingSchema),
-  rbacController.createUserMapping
-);
-
-/**
- * @swagger
- * /roles/user-mappings/{userId}:
- *   put:
- *     summary: Replace all of a user's role mappings at once (Management only)
- *     description: >
- *       Removes every role currently mapped to the user and inserts the
- *       given set instead, in a single transaction.
- *     tags: [RBAC]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: userId
- *         required: true
- *         schema: { type: integer }
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [role_ids]
- *             properties:
- *               role_ids:
- *                 type: array
- *                 items: { type: integer }
- *                 example: [1, 3]
- *     responses:
- *       200:
- *         description: Updated mappings
- *       404:
- *         description: User or one of the given roles not found
- *       422:
- *         description: Validation error
- */
-router.put(
-  '/user-mappings/:userId',
-  authenticate,
-  validate(replaceUserRolesSchema),
-  rbacController.replaceUserRoles
-);
-
-/**
- * @swagger
- * /roles/user-mappings/{userId}/{roleId}:
- *   delete:
- *     summary: Remove one role mapping from a user (Management only)
- *     tags: [RBAC]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: userId
- *         required: true
- *         schema: { type: integer }
- *       - in: path
- *         name: roleId
- *         required: true
- *         schema: { type: integer }
- *     responses:
- *       200:
- *         description: Mapping deleted
- *       404:
- *         description: Mapping not found
- */
-router.delete(
-  '/user-mappings/:userId/:roleId',
-  authenticate,
-  rbacController.deleteUserMapping
 );
 
 /**

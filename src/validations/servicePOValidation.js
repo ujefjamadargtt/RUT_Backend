@@ -42,6 +42,29 @@ const createServicePOSchema = Joi.object({
       'any.required': 'Client is required.',
     }),
 
+  project_id: Joi.number()
+    .integer()
+    .positive()
+    .required()
+    .messages({
+      'number.base': 'Project ID must be a number.',
+      'number.positive': 'Project ID must be a positive integer.',
+      'any.required': 'Project is required.',
+    }),
+
+  // Employee Master ID — never a User Master ID. Mandatory on create per
+  // the Client -> Project -> Service PO -> Delivery Head flow; see
+  // updateServicePOSchema below for why it's optional on update.
+  delivery_head_employee_id: Joi.number()
+    .integer()
+    .positive()
+    .required()
+    .messages({
+      'number.base': 'Delivery Head employee ID must be a number.',
+      'number.positive': 'Delivery Head employee ID must be a positive integer.',
+      'any.required': 'Delivery Head is required.',
+    }),
+
   service_type_id: Joi.number()
     .integer()
     .positive()
@@ -169,6 +192,20 @@ const updateServicePOSchema = Joi.object({
 
   client_id: Joi.number().integer().positive().optional(),
 
+  project_id: Joi.number().integer().positive().optional(),
+
+  // Optional on update — mandatory only for NEW Service PO creation, so a
+  // pre-existing PO created before this feature (no Delivery Head yet)
+  // isn't broken, and one can be added later via edit.
+  delivery_head_employee_id: Joi.number()
+    .integer()
+    .positive()
+    .optional()
+    .messages({
+      'number.base': 'Delivery Head employee ID must be a number.',
+      'number.positive': 'Delivery Head employee ID must be a positive integer.',
+    }),
+
   service_type_id: Joi.number().integer().positive().optional(),
 
   po_value: Joi.number()
@@ -291,6 +328,7 @@ const listServicePOsQuerySchema = Joi.object({
   limit: Joi.number().integer().min(1).max(200).default(20),
   status: Joi.string().valid('in-progress', 'completed', 'on-hold', 'pending', 'cancelled', 'closed', 'all').default('all'),
   client_id: Joi.number().integer().positive().optional(),
+  project_id: Joi.number().integer().positive().optional(),
   service_category_id: Joi.number().integer().positive().optional(),
   service_type_id: Joi.number().integer().positive().optional(),
   service_po_id: Joi.number().integer().positive().optional(),

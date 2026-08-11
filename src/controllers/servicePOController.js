@@ -73,7 +73,10 @@ const createServicePO = async (req, res) => {
     return sendCreated(res, po, 'Service PO created successfully.');
   } catch (error) {
     if (error.statusCode === 404) {
-      return sendNotFound(res, error.message.includes('Client') ? 'Client' : 'Service type');
+      // create() can 404 on Client, Project, or Delivery Head — the service
+      // already produces a precise message for each, so surface it as-is
+      // rather than guessing which entity failed.
+      return sendError(res, error.message, 404);
     }
     const details = error.errors ? error.errors.map((e) => e.message) : [];
     logger.error('createServicePO error', {
@@ -100,7 +103,10 @@ const updateServicePO = async (req, res) => {
     return sendSuccess(res, po, 'Service PO updated successfully.');
   } catch (error) {
     if (error.statusCode === 404) {
-      return sendNotFound(res, 'Service PO');
+      // update() can 404 on the Service PO itself, or on Client/Project/
+      // Delivery Head when those are being changed — surface the service's
+      // precise message rather than always assuming it's the Service PO.
+      return sendError(res, error.message, 404);
     }
     logger.error('updateServicePO error', { error: error.message, id: req.params.id });
     return sendError(res, error.message, error.statusCode || 500);

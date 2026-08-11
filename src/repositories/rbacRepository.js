@@ -1,89 +1,17 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { UserRole, RoleFormMapping, Role, FormMaster } = require('../models');
+const { RoleFormMapping, Role, FormMaster } = require('../models');
 
 /**
  * RBAC Repository
- * Raw database access for the user_roles and role_form_mapping junction
- * tables — no business logic (existence/duplicate checks live in
- * rbacService.js).
+ * Raw database access for the role_form_mapping junction table — no
+ * business logic (existence/duplicate checks live in rbacService.js).
+ *
+ * The old User <-> Role mapping functions (user_roles table) were removed
+ * with the RBAC redesign — every user now holds exactly one role via
+ * `users.role_id` directly (see database/migrations/20260840_collapse_user_roles.sql).
  */
-
-// ── User <-> Role mappings ───────────────────────────────────────────────────
-
-/**
- * Find a single user-role mapping row, if it exists.
- * @param {number} userId
- * @param {number} roleId
- * @returns {Promise<UserRole|null>}
- */
-const findUserMapping = async (userId, roleId) => {
-  return UserRole.findOne({ where: { user_id: userId, role_id: roleId } });
-};
-
-/**
- * Insert a single user-role mapping.
- * @param {object} data - { user_id, role_id }
- * @param {object} [options] - Sequelize options (e.g. { transaction })
- * @returns {Promise<UserRole>}
- */
-const createUserMapping = async (data, options = {}) => {
-  return UserRole.create(data, options);
-};
-
-/**
- * Delete a single user-role mapping.
- * @param {number} userId
- * @param {number} roleId
- * @param {object} [options] - Sequelize options (e.g. { transaction })
- * @returns {Promise<number>} number of rows deleted (0 or 1)
- */
-const deleteUserMapping = async (userId, roleId, options = {}) => {
-  return UserRole.destroy({ where: { user_id: userId, role_id: roleId }, ...options });
-};
-
-/**
- * List every role mapped to one user, with the role's own fields eager-loaded.
- * @param {number} userId
- * @returns {Promise<UserRole[]>}
- */
-const listUserMappings = async (userId) => {
-  return UserRole.findAll({
-    where: { user_id: userId },
-    include: [
-      {
-        model: Role,
-        as: 'role',
-        attributes: ['id', 'role_name', 'permission', 'status'],
-      },
-    ],
-    order: [['role_id', 'ASC']],
-  });
-};
-
-/**
- * Delete every role mapping currently assigned to one user — the first half
- * of a "replace all roles for this user" operation. Always called inside the
- * same transaction as bulkCreateUserMappings() below.
- * @param {number} userId
- * @param {object} transaction
- * @returns {Promise<number>} number of rows deleted
- */
-const deleteAllUserMappings = async (userId, transaction) => {
-  return UserRole.destroy({ where: { user_id: userId }, transaction });
-};
-
-/**
- * Bulk-insert several user-role mappings in one statement — the second half
- * of a "replace all roles for this user" operation.
- * @param {{ user_id: number, role_id: number }[]} rows
- * @param {object} transaction
- * @returns {Promise<UserRole[]>}
- */
-const bulkCreateUserMappings = async (rows, transaction) => {
-  return UserRole.bulkCreate(rows, { transaction });
-};
 
 // ── Role <-> Form mappings ───────────────────────────────────────────────────
 
@@ -321,13 +249,28 @@ const findAllFormsWithMappingStatus = async (roleIds) => {
   }));
 };
 
+/**
+ * Fetch EVERY active form in the system, regardless of role_form_mapping —
+ * backs Platform Admin's implicit "All Forms" access (hierarchy_rank === 1),
+ * which is never represented as stored mapping rows (see
+ * database/migrations/20260845_reseed_form_master_and_role_form_mapping.sql's
+ * header comment) so a newly-added form is visible to Platform Admin
+ * immediately, with no reseed required.
+ * @returns {Promise<FormMaster[]>}
+ */
+const findAllActiveForms = async () => {
+  return FormMaster.findAll({
+    attributes: ['id', 'module_name', 'form_name'],
+    where: { status: 'active' },
+    order: [
+      ['module_name', 'ASC'],
+      ['form_name', 'ASC'],
+    ],
+  });
+};
+
 module.exports = {
-  findUserMapping,
-  createUserMapping,
-  deleteUserMapping,
-  listUserMappings,
-  deleteAllUserMappings,
-  bulkCreateUserMappings,
+  findAllActiveForms,
   findRoleFormMapping,
   findRoleFormMappingById,
   createRoleFormMapping,

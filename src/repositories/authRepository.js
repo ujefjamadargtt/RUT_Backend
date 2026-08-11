@@ -1,7 +1,19 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { User, UserSession, Role, Employee, Company, EmployeeSession } = require('../models');
+const { User, UserSession, Role, Employee, Company } = require('../models');
+
+// PRIMARY role stays the sole source of truth for hierarchy/scoping; this
+// is a purely additive capability grant, unioned into effective
+// capabilities only — see database/migrations/20260850_add_user_additional_roles.sql
+// and authService.js's serialiseRoles().
+const ADDITIONAL_ROLES_INCLUDE = {
+  model: Role,
+  as: 'additionalRoles',
+  attributes: ['id', 'role_name', 'permission', 'status', 'hierarchy_rank', 'inherits_role_id'],
+  through: { attributes: [] },
+  required: false,
+};
 const logger = require('../utils/logger');
 const dateHelper = require('../helpers/dateHelper');
 
@@ -10,12 +22,17 @@ const dateHelper = require('../helpers/dateHelper');
  *
  * Responsible exclusively for data-access operations related to authentication.
  * No business logic lives here — all decisions belong in authService.js.
+ *
+ * Single identity table (`users`) for every account tier, including
+ * Employees — see database/migrations/20260842_employees_drop_login_columns.sql.
+ * There is no longer a parallel Employee lookup/session store.
  */
 
 /**
  * Find a user by email address.
- * Returns the user with their role joined (password excluded via defaultScope).
- * Use User.scope('withPassword') before calling if the password hash is needed.
+ * Returns the user with their role and linked employee joined (password
+ * excluded via defaultScope). Use User.scope('withPassword') before calling
+ * if the password hash is needed.
  *
  * @param {string} email - Normalised, lowercase email address.
  * @returns {Promise<User|null>}
@@ -25,23 +42,22 @@ async function findUserByEmail(email) {
     where: {
       email: email.toLowerCase().trim(),
     },
-    // The Role includes below deliberately do NOT list
-    // is_original_data_visible, and the Company include below deliberately
-    // DOES: the login response's roles[].is_original_data_visible is sourced
-    // from the user's COMPANY (see authService.js's serialiseRoles()), not
-    // from Role, and not from a users-table column — see
-    // database/migrations/20260808_add_company_original_data_visibility.sql.
+    // The Role include deliberately does NOT list is_original_data_visible,
+    // and the Company include DOES: the login response's
+    // roles[].is_original_data_visible is sourced from the user's COMPANY
+    // (see authService.js's serialiseRoles()), not from Role, and not from
+    // a users-table column — see database/migrations/
+    // 20260808_add_company_original_data_visibility.sql.
     include: [
       {
         model: Role,
         as: 'role',
-        attributes: ['id', 'role_name', 'permission', 'status'],
+        attributes: ['id', 'role_name', 'permission', 'status', 'hierarchy_rank', 'inherits_role_id'],
       },
+      ADDITIONAL_ROLES_INCLUDE,
       {
-        model: Role,
-        as: 'roles',
-        attributes: ['id', 'role_name', 'permission', 'status'],
-        through: { attributes: [] },
+        model: Employee,
+        as: 'employee',
         required: false,
       },
       {
@@ -69,28 +85,12 @@ async function findUserById(id) {
       {
         model: Role,
         as: 'role',
-        attributes: ['id', 'role_name', 'permission', 'status'],
+        attributes: ['id', 'role_name', 'permission', 'status', 'hierarchy_rank', 'inherits_role_id'],
       },
-      {
-        model: Role,
-        as: 'roles',
-        attributes: ['id', 'role_name', 'permission', 'status'],
-        through: { attributes: [] },
-        required: false,
-      },
+      ADDITIONAL_ROLES_INCLUDE,
       {
         model: Employee,
         as: 'employee',
-        attributes: [
-          'id',
-          'employee_code',
-          'full_name',
-          'designation',
-          'total_experience',
-          'company_experience',
-          'date_of_joining',
-          'status',
-        ],
         required: false,
       },
       {
@@ -101,89 +101,6 @@ async function findUserById(id) {
       },
     ],
     attributes: { exclude: ['password'] },
-  });
-}
-
-/**
- * Find an Employee by email address (email_id column), for the dynamic
- * login fallback when no User matches. Mirrors findUserByEmail: uses
- * Employee.scope('withPassword') to bypass the model's defaultScope
- * exclusion, and eager-loads the company.
- *
- * @param {string} email
- * @returns {Promise<Employee|null>}
- */
-async function findEmployeeByEmail(email) {
-  return Employee.scope('withPassword').findOne({
-    where: {
-      email_id: email.toLowerCase().trim(),
-    },
-    include: [
-      {
-        model: Company,
-        as: 'company',
-        attributes: ['id', 'company_code', 'company_name', 'status'],
-        required: false,
-      },
-    ],
-  });
-}
-
-/**
- * Persist a new employee session record (mirrors createSession for Users).
- *
- * @param {object} sessionData
- * @param {number} sessionData.employee_id
- * @param {string} sessionData.refresh_token
- * @param {Date}   sessionData.expires_at
- * @param {string} [sessionData.ip_address]
- * @param {string} [sessionData.user_agent]
- * @returns {Promise<EmployeeSession>}
- */
-async function createEmployeeSession(sessionData) {
-  return EmployeeSession.create({
-    employee_id: sessionData.employee_id,
-    refresh_token: sessionData.refresh_token,
-    expires_at: sessionData.expires_at,
-    ip_address: sessionData.ip_address || null,
-    user_agent: sessionData.user_agent || null,
-  });
-}
-
-/**
- * Look up an employee session by refresh token that has not yet expired.
- *
- * @param {string} refreshToken
- * @returns {Promise<EmployeeSession|null>}
- */
-async function findEmployeeSession(refreshToken) {
-  return EmployeeSession.findOne({
-    where: {
-      refresh_token: refreshToken,
-      expires_at: {
-        [Op.gt]: dateHelper.nowDate(),
-      },
-    },
-    include: [
-      {
-        model: Employee,
-        as: 'employee',
-        attributes: ['id', 'employee_code', 'full_name', 'email_id', 'company_id', 'status', 'is_deleted'],
-      },
-    ],
-  });
-}
-
-/**
- * Remove a specific employee session by its refresh token.
- * Returns the number of rows deleted.
- *
- * @param {string} refreshToken
- * @returns {Promise<number>}
- */
-async function deleteEmployeeSession(refreshToken) {
-  return EmployeeSession.destroy({
-    where: { refresh_token: refreshToken },
   });
 }
 
@@ -244,15 +161,9 @@ async function findSession(refreshToken) {
           {
             model: Role,
             as: 'role',
-            attributes: ['id', 'role_name', 'permission', 'status'],
+            attributes: ['id', 'role_name', 'permission', 'status', 'hierarchy_rank', 'inherits_role_id'],
           },
-          {
-            model: Role,
-            as: 'roles',
-            attributes: ['id', 'role_name', 'permission', 'status'],
-            through: { attributes: [] },
-            required: false,
-          },
+          ADDITIONAL_ROLES_INCLUDE,
           // is_original_data_visible sourced from the user's COMPANY, not
           // from Role or a users-table column — see authService.js's
           // serialiseRoles() and database/migrations/
@@ -305,8 +216,4 @@ module.exports = {
   findSession,
   deleteSession,
   deleteUserSessions,
-  findEmployeeByEmail,
-  createEmployeeSession,
-  findEmployeeSession,
-  deleteEmployeeSession,
 };

@@ -79,129 +79,27 @@ function verifyRefreshToken(token) {
 }
 
 /**
- * Generate both access and refresh tokens for a user session.
+ * Generate both access and refresh tokens for a user session. Every
+ * account tier (including Employees, who now authenticate exclusively
+ * through User Master — see database/migrations/20260842_employees_drop_login_columns.sql)
+ * shares this one token shape; there is no longer a separate Employee
+ * audience/payload.
  *
- * @param {object} user - User record (plain object or Sequelize instance).
- * @returns {{ accessToken: string, refreshToken: string, expiresIn: string }}
+ * @param {object} user - User record (plain object or Sequelize instance), with `role` included.
+ * @returns {{ accessToken: string, refreshToken: string, expiresIn: string, refreshExpiresIn: string }}
  */
 function generateTokens(user) {
-  const roleMap = new Map();
-
-  if (user.role && user.role.id) {
-    roleMap.set(user.role.id, user.role.role_name);
-  }
-
-  if (Array.isArray(user.roles)) {
-    user.roles.forEach((role) => {
-      if (role && role.id) {
-        roleMap.set(role.id, role.role_name);
-      }
-    });
-  }
-
-  const roleIds = Array.from(roleMap.keys());
-  const roleNames = Array.from(roleMap.values());
-
   const payload = {
     id: user.id,
     email: user.email,
     roleId: user.role_id,
-    roleIds,
-    roleNames,
+    roleName: user.role ? user.role.role_name : null,
+    hierarchyRank: user.role ? user.role.hierarchy_rank : null,
     employeeId: user.employee_id,
   };
 
   const accessToken = signToken(payload);
   const refreshToken = signRefreshToken({ id: user.id });
-
-  return {
-    accessToken,
-    refreshToken,
-    expiresIn: ACCESS_TOKEN_EXPIRY,
-    refreshExpiresIn: REFRESH_TOKEN_EXPIRY,
-  };
-}
-
-/**
- * Sign an Employee access token. Uses the SAME secrets as User tokens but a
- * distinct audience ('rut-portal-employee-client' vs. 'rut-portal-client')
- * so an Employee token can never be mistaken for a User token (or vice
- * versa) by any code that checks audience — on top of the payload shape
- * itself already being incompatible (no `id`/`roleId` field).
- *
- * @param {object} payload
- * @param {string} [expiresIn]
- * @returns {string}
- */
-function signEmployeeToken(payload, expiresIn = ACCESS_TOKEN_EXPIRY) {
-  return jwt.sign(payload, JWT_SECRET, {
-    expiresIn,
-    issuer: 'rut-portal',
-    audience: 'rut-portal-employee-client',
-  });
-}
-
-/**
- * Verify an Employee access token.
- *
- * @param {string} token
- * @returns {object} Decoded payload.
- * @throws {JsonWebTokenError|TokenExpiredError}
- */
-function verifyEmployeeToken(token) {
-  return jwt.verify(token, JWT_SECRET, {
-    issuer: 'rut-portal',
-    audience: 'rut-portal-employee-client',
-  });
-}
-
-/**
- * Sign an Employee refresh token.
- *
- * @param {object} payload
- * @param {string} [expiresIn]
- * @returns {string}
- */
-function signEmployeeRefreshToken(payload, expiresIn = REFRESH_TOKEN_EXPIRY) {
-  return jwt.sign(payload, JWT_REFRESH_SECRET, {
-    expiresIn,
-    issuer: 'rut-portal',
-    audience: 'rut-portal-employee-refresh',
-  });
-}
-
-/**
- * Verify an Employee refresh token.
- *
- * @param {string} token
- * @returns {object} Decoded payload.
- * @throws {JsonWebTokenError|TokenExpiredError}
- */
-function verifyEmployeeRefreshToken(token) {
-  return jwt.verify(token, JWT_REFRESH_SECRET, {
-    issuer: 'rut-portal',
-    audience: 'rut-portal-employee-refresh',
-  });
-}
-
-/**
- * Generate both access and refresh tokens for an Employee session.
- *
- * @param {object} employee - Employee record (plain object or Sequelize instance, with `company` included).
- * @returns {{ accessToken: string, refreshToken: string, expiresIn: string, refreshExpiresIn: string }}
- */
-function generateEmployeeTokens(employee) {
-  const payload = {
-    employeeId: employee.id,
-    companyId: employee.company_id,
-    employeeCode: employee.employee_code,
-    employeeName: employee.full_name,
-    email: employee.email_id,
-    loginType: 'employee',
-  };
-
-  const accessToken = signEmployeeToken(payload);
-  const refreshToken = signEmployeeRefreshToken({ employeeId: employee.id, loginType: 'employee' });
 
   return {
     accessToken,
@@ -240,11 +138,6 @@ module.exports = {
   signRefreshToken,
   verifyRefreshToken,
   generateTokens,
-  signEmployeeToken,
-  verifyEmployeeToken,
-  signEmployeeRefreshToken,
-  verifyEmployeeRefreshToken,
-  generateEmployeeTokens,
   decodeToken,
   extractBearerToken,
   ACCESS_TOKEN_EXPIRY,

@@ -1223,11 +1223,16 @@ const confirmImport = async (importId, userId, ipAddress = null, companyId) => {
   const t = await sequelize.transaction();
 
   try {
-    // Resolved ONCE per import (not per row) — every row in the same
-    // confirm belongs to the same company, so is_publish is identical
-    // across the whole batch. See timesheetPublishPolicy.js for the rule
-    // itself (company-level, not per-user/per-role).
-    const isPublish = await timesheetPublishPolicy.resolveInitialIsPublish(companyId);
+    // Resolved ONCE per import, per DISTINCT employee in the batch — a
+    // batch can span several employees, each with their own
+    // is_timesheet_approval_required flag, so is_publish is no longer
+    // necessarily identical across the whole batch. See
+    // timesheetPublishPolicy.js for the rule itself (employee-level, not
+    // company-level).
+    const approvalRequiredMap = await timesheetPublishPolicy.resolveApprovalRequiredMap(
+      validRows.map((row) => row.employeeId),
+      companyId
+    );
 
     const records = validRows.map((row) => ({
       employee_id:         row.employeeId,
@@ -1238,7 +1243,19 @@ const confirmImport = async (importId, userId, ipAddress = null, companyId) => {
       // modified_hours always starts out equal to hours_logged on creation
       // — set here in application code, never left null.
       modified_hours:      row.hours,
-      is_publish:          isPublish,
+      // A 'pms' (Employee Work Log Sync) row only ever reaches this point
+      // already approved — findForSync excludes status='pending', so
+      // approval (Manager, or automatic when not required) has already
+      // happened at the employee_work_logs layer before Sync runs. Re-
+      // gating it here via computeInitialIsPublish would hold it back a
+      // SECOND time, contradicting "Approved/Published -> Sync." Excel
+      // imports never touch employee_work_logs and keep the original
+      // per-employee policy exactly as before.
+      is_publish:          importRecord.source === 'pms'
+        ? true
+        : timesheetPublishPolicy.computeInitialIsPublish(
+            approvalRequiredMap.get(row.employeeId) ?? true
+          ),
       company_id:          companyId,
       created_by:          userId,
       updated_by:          userId,
@@ -1264,16 +1281,20 @@ const confirmImport = async (importId, userId, ipAddress = null, companyId) => {
     const inserted = await timesheetRepository.bulkCreate(records, t);
 
     // 5. Update history: completed (also stamp month/year from actual data).
-    // is_publish uses the SAME `isPublish` value just stamped onto every
-    // `records` row above — one resolution, applied to both tables, so
-    // they can never disagree (see timesheetPublishPolicy.js).
+    // is_publish is true only if EVERY row in this batch ended up published
+    // — a batch spanning employees with different approval-required flags
+    // can now be a mix, so the history row's own flag reflects "is the
+    // WHOLE batch published," not any single row's value. When every row
+    // in the batch shares the same flag (the common case), this produces
+    // the exact same value as before.
+    const historyIsPublish = records.every((record) => record.is_publish);
     await timesheetImportRepository.updateImportHistory(importId, {
       status:       'completed',
       valid_rows:   inserted.length,
       error_rows:   errorRows.length,
       import_month: importMonth,
       import_year:  importYear,
-      is_publish:   isPublish,
+      is_publish:   historyIsPublish,
     }, null, companyId);
 
     // Persist any new error rows found on re-validation
@@ -1652,10 +1673,10 @@ const createTimesheet = async (data, companyId) => {
   // modified_hours always starts out equal to hours_logged on creation —
   // set here in application code (not a DB default/trigger) so it's never
   // left null on a new row. hours_logged itself is never touched by this.
-  // is_publish is resolved from the company's own flag — see
-  // timesheetPublishPolicy.js — not left at its DB default.
+  // is_publish is resolved from the employee's own approval-required flag
+  // — see timesheetPublishPolicy.js — not left at its DB default.
   insertData.modified_hours = insertData.hours_logged;
-  insertData.is_publish = await timesheetPublishPolicy.resolveInitialIsPublish(companyId);
+  insertData.is_publish = await timesheetPublishPolicy.resolveInitialIsPublishForEmployee(insertData.employee_id, companyId);
   insertData.company_id = companyId;
   return timesheetRepository.create(insertData);
 };

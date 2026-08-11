@@ -61,6 +61,29 @@ function generateSubProjectCode() {
 }
 
 /**
+ * Generate a Project code (Project Master — the parent grouping a Service
+ * PO now belongs to; unrelated to the existing SubProject/'SP-' entity,
+ * which is a child of a Service PO).
+ * Format: PRJ-YYYYMMDD-XXXX
+ *
+ * @returns {string}  e.g. "PRJ-20240615-Q8LX"
+ */
+function generateProjectCode() {
+  return generateCode('PRJ');
+}
+
+/**
+ * Generate an Entity code (Entity Master — the new tenancy tier every
+ * Company now belongs to).
+ * Format: ENT-YYYYMMDD-XXXX
+ *
+ * @returns {string}  e.g. "ENT-20240615-M2WD"
+ */
+function generateEntityCode() {
+  return generateCode('ENT');
+}
+
+/**
  * Verify a code matches the expected format for a given prefix.
  *
  * @param {string} code
@@ -78,5 +101,7 @@ module.exports = {
   generateClientCode,
   generatePOCode,
   generateSubProjectCode,
+  generateProjectCode,
+  generateEntityCode,
   isValidCode,
 };

@@ -114,15 +114,15 @@ module.exports = (sequelize) => {
         },
       },
       // Initial value set at insert time in application code (createTimesheet(),
-      // confirmImport()) via timesheetPublishPolicy.resolveInitialIsPublish() —
-      // based on the COMPANY's OWN companies.is_original_data_visible (see
-      // database/migrations/20260808_add_company_original_data_visibility.sql;
-      // NOT per-user or per-role): that flag true -> false (work with
-      // original data first); false -> true (published immediately). The DB
-      // default (false) below is a fallback only — every live insert site
-      // sets it explicitly. Afterward it's a one-way flag: only ever
-      // flipped true via PATCH /timesheets/:id/modified-hours or the
-      // Publish API, never reset to
+      // confirmImport()) via timesheetPublishPolicy.js — based on the
+      // EMPLOYEE's OWN employees.is_timesheet_approval_required (see
+      // database/migrations/20260851_add_employee_timesheet_approval_required.sql;
+      // NOT per-company, per-user, or per-role): that flag true -> false
+      // (held back, requires approval); false -> true (published
+      // immediately). The DB default (false) below is a fallback only —
+      // every live insert site sets it explicitly. Afterward it's a
+      // one-way flag: only ever flipped true via PATCH
+      // /timesheets/:id/modified-hours or the Publish API, never reset to
       // false anywhere.
       is_publish: {
         type: DataTypes.BOOLEAN,

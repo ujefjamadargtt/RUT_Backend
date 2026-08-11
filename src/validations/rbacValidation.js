@@ -12,18 +12,6 @@ const positiveId = Joi.number().integer().positive().messages({
 });
 
 /**
- * POST /roles/user-mappings
- */
-const mappingSchema = Joi.object({
-  user_id: positiveId.required().messages({
-    'any.required': 'user_id is required.',
-  }),
-  role_id: positiveId.required().messages({
-    'any.required': 'role_id is required.',
-  }),
-});
-
-/**
  * POST /roles/form-mappings
  */
 const roleFormMappingSchema = Joi.object({
@@ -33,23 +21,6 @@ const roleFormMappingSchema = Joi.object({
   form_id: positiveId.required().messages({
     'any.required': 'form_id is required.',
   }),
-});
-
-/**
- * PUT /roles/user-mappings/:userId
- * Replaces the user's entire set of role mappings with this list.
- */
-const replaceUserRolesSchema = Joi.object({
-  role_ids: Joi.array()
-    .items(positiveId)
-    .min(1)
-    .unique()
-    .required()
-    .messages({
-      'array.min': 'role_ids must contain at least one role.',
-      'array.unique': 'role_ids must not contain duplicate role IDs.',
-      'any.required': 'role_ids is required.',
-    }),
 });
 
 /**
@@ -120,9 +91,7 @@ const mapFormSchema = Joi.object({
 });
 
 module.exports = {
-  mappingSchema,
   roleFormMappingSchema,
-  replaceUserRolesSchema,
   replaceRoleFormMappingsSchema,
   getRoleFormMappingQuerySchema,
   formsForRolesSchema,

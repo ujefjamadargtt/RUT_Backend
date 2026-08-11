@@ -24,6 +24,22 @@ module.exports = (sequelize) => {
         len: { args: [1, 150], msg: 'Company name must be between 1 and 150 characters.' },
       },
     },
+    // Every Company must belong to exactly one Entity (Entity Admin tier —
+    // see Entity.js) — backfilled onto a single platform-wide "Default
+    // Entity" for every pre-existing row (see database/migrations/
+    // 20260824_backfill_companies_entity_id.sql), required for every new
+    // Company from companyService.createWithAdmin onward.
+    entity_id: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      references: {
+        model: 'entities',
+        key: 'id',
+      },
+      validate: {
+        notNull: { msg: 'Entity is required.' },
+      },
+    },
     status: {
       type: DataTypes.ENUM('active', 'inactive'),
       allowNull: false,

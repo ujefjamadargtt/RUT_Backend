@@ -340,6 +340,28 @@ const publishByImportId = async (importId, transaction = null, companyId) => {
 };
 
 /**
+ * Force-publish a SINGLE timesheet row — the per-row analog of
+ * publishByImportId above, used by the Manager "Approve" action
+ * (src/services/managerSelfServiceService.js's approveTimesheet()) to
+ * approve one employee's one timesheet entry without touching every other
+ * row in that entry's import batch.
+ * @param {number} id
+ * @param {number} companyId
+ * @param {object} [transaction]
+ * @returns {Promise<number>} number of rows updated (0 or 1)
+ */
+const publishById = async (id, companyId, transaction = null) => {
+  const [count] = await Timesheet.update(
+    { is_publish: true },
+    {
+      where: { id, company_id: companyId },
+      ...(transaction ? { transaction } : {}),
+    }
+  );
+  return count;
+};
+
+/**
  * Hard-delete a timesheet record.
  * @param {number} id
  * @param {number} companyId
@@ -643,6 +665,7 @@ module.exports = {
   deleteByMonth,
   update,
   publishByImportId,
+  publishById,
   deleteById,
   deleteByImportIds,
   getSummaryByEmployee,

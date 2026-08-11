@@ -4,7 +4,7 @@ const express = require('express');
 const router = express.Router();
 
 const authenticate = require('../middlewares/auth');
-const requirePlatformAdmin = require('../middlewares/requirePlatformAdmin');
+const requireEntityAdminOrAdmin = require('../middlewares/requireEntityAdminOrAdmin');
 const { validate } = require('../middlewares/validateRequest');
 const {
   createCompanySchema,
@@ -17,14 +17,18 @@ const companyController = require('../controllers/companyController');
  * @swagger
  * tags:
  *   name: Companies
- *   description: Platform-level company provisioning (Platform Admin only — the multi-tenancy retrofit's platform layer, sits above every company)
+ *   description: >
+ *     Company provisioning — Entity Admin only (repurposed from Platform
+ *     Admin when Entity Admin was introduced; see
+ *     database/migrations/20260826_add_entity_admin_role.sql). Every
+ *     endpoint is scoped to the calling Entity Admin's own owned Entities.
  */
 
 /**
  * @swagger
  * /companies:
  *   get:
- *     summary: List all companies (Platform Admin only)
+ *     summary: List companies under the caller's owned Entities (Entity Admin only)
  *     tags: [Companies]
  *     security:
  *       - bearerAuth: []
@@ -32,12 +36,12 @@ const companyController = require('../controllers/companyController');
  *       200:
  *         description: Company list
  *       403:
- *         description: Not the platform administrator
+ *         description: Not an Entity Admin
  */
 router.get(
   '/',
   authenticate,
-  requirePlatformAdmin,
+  requireEntityAdminOrAdmin,
   validate(listCompaniesQuerySchema, 'query'),
   companyController.getAll
 );
@@ -46,7 +50,7 @@ router.get(
  * @swagger
  * /companies/{id}:
  *   get:
- *     summary: Get a single company by ID (Platform Admin only)
+ *     summary: Get a single company by ID (must be under the caller's owned Entities)
  *     tags: [Companies]
  *     security:
  *       - bearerAuth: []
@@ -64,7 +68,7 @@ router.get(
 router.get(
   '/:id',
   authenticate,
-  requirePlatformAdmin,
+  requireEntityAdminOrAdmin,
   companyController.getById
 );
 
@@ -72,10 +76,12 @@ router.get(
  * @swagger
  * /companies:
  *   post:
- *     summary: Create a company and its first BU Admin (Platform Admin only)
+ *     summary: Create a company and its first BU Admin (Entity Admin only)
  *     description: >
  *       Transactional — a company is never created without an owner. If
  *       admin-user creation fails, the company insert rolls back too.
+ *       entity_id must be one of the calling Entity Admin's own owned
+ *       Entities (403 otherwise).
  *     tags: [Companies]
  *     security:
  *       - bearerAuth: []
@@ -85,8 +91,9 @@ router.get(
  *         application/json:
  *           schema:
  *             type: object
- *             required: [company_code, company_name, admin_email, admin_password]
+ *             required: [entity_id, company_code, company_name, admin_email, admin_password]
  *             properties:
+ *               entity_id: { type: integer }
  *               company_code: { type: string, example: "ACME" }
  *               company_name: { type: string, example: "Acme Corporation" }
  *               admin_email: { type: string, example: "admin@acme.com" }
@@ -94,6 +101,8 @@ router.get(
  *     responses:
  *       201:
  *         description: Company and BU Admin created
+ *       403:
+ *         description: entity_id does not belong to the caller
  *       409:
  *         description: Company code or admin email already exists
  *       422:
@@ -102,7 +111,7 @@ router.get(
 router.post(
   '/',
   authenticate,
-  requirePlatformAdmin,
+  requireEntityAdminOrAdmin,
   validate(createCompanySchema),
   companyController.create
 );
@@ -111,7 +120,7 @@ router.post(
  * @swagger
  * /companies/{id}:
  *   patch:
- *     summary: Update a company's name/status (Platform Admin only)
+ *     summary: Update a company's name/status (must be under the caller's owned Entities)
  *     tags: [Companies]
  *     security:
  *       - bearerAuth: []
@@ -131,7 +140,7 @@ router.post(
 router.patch(
   '/:id',
   authenticate,
-  requirePlatformAdmin,
+  requireEntityAdminOrAdmin,
   validate(updateCompanySchema),
   companyController.update
 );

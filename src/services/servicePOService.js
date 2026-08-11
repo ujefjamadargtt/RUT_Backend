@@ -2,6 +2,8 @@
 
 const servicePORepository = require('../repositories/servicePORepository');
 const clientRepository = require('../repositories/clientRepository');
+const projectRepository = require('../repositories/projectRepository');
+const employeeRepository = require('../repositories/employeeRepository');
 const servicePOHierarchyRepository = require('../repositories/servicePOHierarchyRepository');
 const timesheetRepository = require('../repositories/timesheetRepository');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
@@ -19,6 +21,56 @@ const aiInsightService = require('./aiInsight.service');
 
 // Valid status transitions when closing or updating
 const ALLOWED_CLOSE_FROM = ['active'];
+
+/**
+ * Confirm a Project belongs to the given Client — the cross-check the
+ * Client -> Project -> Service PO flow needs on top of each FK's own
+ * existence/active/same-company validation (both of which are already
+ * enforced by clientRepository.findById()/projectRepository.findById()
+ * being company-scoped). Shared by create() and update() so the rule is
+ * never duplicated.
+ *
+ * @param {Project} project - already resolved via projectRepository.findById()
+ * @param {number} clientId
+ */
+function assertProjectBelongsToClient(project, clientId) {
+  if (project.client_id !== clientId) {
+    const err = new Error('The selected Project does not belong to the selected Client.');
+    err.statusCode = 400;
+    throw err;
+  }
+}
+
+/**
+ * Confirm a candidate Delivery Head: exists, belongs to the same Company
+ * as the Service PO, is active, and is not soft-deleted. Always an
+ * Employee Master id — never a User Master id (see ServicePO.js's model
+ * doc comment on the `deliveryHead` association).
+ *
+ * employeeRepository.findById() already scopes by company_id AND
+ * is_deleted = false, so an employee from another company or a deleted
+ * employee both simply resolve as "not found" here — the same branch as a
+ * genuinely missing id, which is deliberate (never leak cross-company
+ * existence).
+ *
+ * @param {number} employeeId
+ * @param {number} companyId
+ * @returns {Promise<Employee>}
+ */
+async function assertValidDeliveryHead(employeeId, companyId) {
+  const employee = await employeeRepository.findById(employeeId, companyId);
+  if (!employee) {
+    const err = new Error('Delivery Head employee not found.');
+    err.statusCode = 404;
+    throw err;
+  }
+  if (employee.status !== 'active') {
+    const err = new Error('Cannot assign an inactive employee as Delivery Head.');
+    err.statusCode = 400;
+    throw err;
+  }
+  return employee;
+}
 
 /**
  * Return a paginated list of Service POs.
@@ -99,6 +151,26 @@ const create = async (data, userId, req) => {
     throw err;
   }
 
+  // Validate project exists, is active, AND belongs to the same company —
+  // same pattern as the client_id check above (independent grouping).
+  const project = await projectRepository.findById(data.project_id, companyId);
+  if (!project) {
+    const err = new Error('Project not found.');
+    err.statusCode = 404;
+    throw err;
+  }
+  if (project.status !== 'active') {
+    const err = new Error('Cannot create a Service PO for an inactive project.');
+    err.statusCode = 400;
+    throw err;
+  }
+  // Client -> Project -> Service PO: the selected Project must actually
+  // belong to the selected Client.
+  assertProjectBelongsToClient(project, data.client_id);
+
+  // Delivery Head — mandatory on create (see createServicePOSchema).
+  await assertValidDeliveryHead(data.delivery_head_employee_id, companyId);
+
   // Date ordering guard (Joi already checks, but we also enforce in service)
   if (data.start_date && data.end_date && data.end_date < data.start_date) {
     const err = new Error('End date must be on or after the start date.');
@@ -147,7 +219,7 @@ const create = async (data, userId, req) => {
     'service_pos',
     po.id,
     null,
-    { service_po_code: po.service_po_code, service_po_name: po.service_po_name, client_id: po.client_id },
+    { service_po_code: po.service_po_code, service_po_name: po.service_po_name, client_id: po.client_id, project_id: po.project_id, delivery_head_employee_id: po.delivery_head_employee_id },
     getIpAddress(req)
   );
 
@@ -202,7 +274,8 @@ const update = async (id, data, userId, req) => {
 
   // If client_id is being changed, validate the new client — findById is
   // company-scoped, so a client belonging to another company simply 404s.
-  if (data.client_id && data.client_id !== existing.client_id) {
+  const clientChanged = data.client_id && data.client_id !== existing.client_id;
+  if (clientChanged) {
     const client = await clientRepository.findById(data.client_id, companyId);
     if (!client) {
       const err = new Error('Client not found.');
@@ -214,6 +287,45 @@ const update = async (id, data, userId, req) => {
       err.statusCode = 400;
       throw err;
     }
+  }
+
+  // If project_id is being changed, validate the new project — same
+  // conditional-on-change pattern as client_id above.
+  const projectChanged = data.project_id && data.project_id !== existing.project_id;
+  let projectForCrossCheck = null;
+  if (projectChanged) {
+    const project = await projectRepository.findById(data.project_id, companyId);
+    if (!project) {
+      const err = new Error('Project not found.');
+      err.statusCode = 404;
+      throw err;
+    }
+    if (project.status !== 'active') {
+      const err = new Error('Cannot reassign a Service PO to an inactive project.');
+      err.statusCode = 400;
+      throw err;
+    }
+    projectForCrossCheck = project;
+  } else if (clientChanged) {
+    // Client is changing but project_id isn't — the EXISTING project must
+    // still belong to the NEW client, otherwise a project_id must also be
+    // supplied. Re-fetches the existing project rather than trusting the
+    // (possibly stale) `existing` include.
+    projectForCrossCheck = await projectRepository.findById(existing.project_id, companyId);
+  }
+
+  // Client -> Project -> Service PO: whichever end changed, the resulting
+  // pairing must still be consistent.
+  if (projectForCrossCheck) {
+    assertProjectBelongsToClient(projectForCrossCheck, data.client_id || existing.client_id);
+  }
+
+  // Delivery Head — optional on update (a pre-existing Service PO without
+  // one must not be broken; see database/migrations/
+  // 20260849_add_service_pos_delivery_head.sql), but validated the same
+  // way as create() whenever it IS being set/changed.
+  if (data.delivery_head_employee_id) {
+    await assertValidDeliveryHead(data.delivery_head_employee_id, companyId);
   }
 
   // Cross-field date validation when one or both dates are being changed
@@ -228,6 +340,8 @@ const update = async (id, data, userId, req) => {
   const oldValues = {
     service_po_name:     existing.service_po_name,
     client_id:           existing.client_id,
+    project_id:          existing.project_id,
+    delivery_head_employee_id: existing.delivery_head_employee_id,
     service_type_id:     existing.service_type_id,
     po_value:            existing.po_value,
     start_date:          existing.start_date,

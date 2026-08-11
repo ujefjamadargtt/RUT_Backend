@@ -1,53 +1,34 @@
 'use strict';
 
-const { sequelize } = require('../models');
+const { sequelize, DefaultCategory, DefaultType } = require('../models');
 const companyRepository = require('../repositories/companyRepository');
 const userRepository = require('../repositories/userRepository');
 const roleRepository = require('../repositories/roleRepository');
 const serviceCategoryRepository = require('../repositories/serviceCategoryRepository');
 const serviceTypeRepository = require('../repositories/serviceTypeRepository');
+const companyCategoryRepository = require('../repositories/companyCategoryRepository');
+const companyTypeRepository = require('../repositories/companyTypeRepository');
 const { createAuditLog } = require('../middlewares/auditLog');
 
 /**
- * Every new company starts with these 3 categories, matching the default
- * GTT company's existing set exactly (name + report_bucket_key) — the
- * Dashboard/Analytics report-bucket logic reads report_bucket_key, not the
- * name string, so this is what makes those tiles/charts work for a new
- * company on day one instead of everything falling into "Uncategorized".
+ * report_bucket_key isn't part of the default_categories master table (see
+ * database/migrations/20260815_create_default_categories.sql) — it's a
+ * service_categories-only concern the Dashboard/Analytics report-bucket
+ * logic reads (not the name string), so it stays a small hardcoded lookup
+ * here, keyed by the same category_name that now comes from the DB.
  */
-const DEFAULT_SERVICE_CATEGORIES = [
-  { name: 'Billable', report_bucket_key: 'billable' },
-  { name: 'Non-Billable', report_bucket_key: 'non_billable' },
-  { name: 'Customer Non-Billable', report_bucket_key: 'customer_non_billable' },
-];
-
-/**
- * Every new company also starts with these default service types, each
- * linked to one of the categories above by NAME — never by ID. Category IDs
- * are per-company (auto-generated on insert below), so the same "Billable"
- * category has a different ID for every company; hardcoding an ID here
- * would silently link a new company's service types to some other
- * company's category row.
- */
-const DEFAULT_SERVICE_TYPES = [
-  { name: 'Project', category: 'Billable' },
-  { name: 'Service Pack', category: 'Billable' },
-  { name: 'Staff Augmentation', category: 'Billable' },
-  { name: 'AMC', category: 'Billable' },
-  { name: 'Internal Support', category: 'Non-Billable' },
-  { name: 'Team Management', category: 'Non-Billable' },
-  { name: 'Leaves', category: 'Non-Billable' },
-  { name: 'L&D', category: 'Non-Billable' },
-  { name: 'Others', category: 'Non-Billable' },
-  { name: 'Customer Work', category: 'Customer Non-Billable' },
-  { name: 'Complimentary Hours', category: 'Customer Non-Billable' },
-  { name: 'Product/Solution/Framework Development', category: 'Customer Non-Billable' },
-];
+const REPORT_BUCKET_KEY_BY_CATEGORY_NAME = {
+  'Billable': 'billable',
+  'Non-Billable': 'non_billable',
+  'Customer Non-Billable': 'customer_non_billable',
+};
 
 /**
  * Company Service
- * Platform-level provisioning: create/list/update companies, and the
- * transactional "company + its first BU Admin" creation flow. A
+ * Entity Admin-scoped provisioning (repurposed from Platform-Admin-scoped
+ * when Entity Admin was introduced): create/list/update companies, and the
+ * transactional "company + its first BU Admin" creation flow, always
+ * scoped to the calling Entity Admin's own owned Entities (entityIds). A
  * company is never created without an owner — if admin creation fails, the
  * company insert rolls back too.
  */
@@ -58,25 +39,33 @@ const fail = (message, statusCode) => {
   throw err;
 };
 
-const getAll = async (query = {}) => {
-  return companyRepository.findAll({ search: query.search, status: query.status });
+const getAll = async (query = {}, entityIds) => {
+  return companyRepository.findAllForEntities(entityIds, { search: query.search, status: query.status });
 };
 
-const getById = async (id) => {
-  const company = await companyRepository.findById(id);
+const getById = async (id, entityIds) => {
+  const company = await companyRepository.findByIdForEntities(id, entityIds);
   if (!company) fail(`Company with ID ${id} not found.`, 404);
   return company;
 };
 
 /**
- * Create a company and its first BU Admin user in one transaction.
- * @param {object} data - { company_code, company_name, admin_email, admin_password, admin_full_name }
- * @param {number} actorId - the platform admin creating this company
+ * Create a company and its first BU Admin user in one transaction, under
+ * one of the calling Entity Admin's own owned Entities.
+ * @param {object} data - { entity_id, company_code, company_name, admin_email, admin_password }
+ * @param {number} actorId - the Entity Admin creating this company
  * @param {string} ipAddress
+ * @param {number[]} entityIds - the calling Entity Admin's own owned Entities (req.entityIds)
  * @returns {Promise<{ company: Company, admin: User }>}
  */
-const createWithAdmin = async (data, actorId, ipAddress = null) => {
-  const { company_code, company_name, admin_email, admin_password, is_original_data_visible } = data;
+const createWithAdmin = async (data, actorId, ipAddress = null, entityIds = []) => {
+  const { entity_id, company_code, company_name, admin_email, admin_password, is_original_data_visible } = data;
+
+  // "Entity Admin cannot access Entities belonging to another Entity
+  // Admin" — enforced here before anything else runs.
+  if (!entityIds.includes(entity_id)) {
+    fail(`Entity #${entity_id} is not one of your own entities.`, 403);
+  }
 
   const existingCompany = await companyRepository.findByCode(company_code);
   if (existingCompany) {
@@ -96,7 +85,7 @@ const createWithAdmin = async (data, actorId, ipAddress = null) => {
   let company, admin;
   await sequelize.transaction(async (transaction) => {
     company = await companyRepository.create(
-      { company_code, company_name, is_original_data_visible, created_by: actorId, updated_by: actorId },
+      { entity_id, company_code, company_name, is_original_data_visible, created_by: actorId, updated_by: actorId },
       { transaction }
     );
 
@@ -113,13 +102,26 @@ const createWithAdmin = async (data, actorId, ipAddress = null) => {
       { transaction }
     );
 
-    // Insert categories first and capture their freshly generated IDs —
-    // never assume/hardcode an ID, each company gets its own.
-    const categoryMap = {};
-    for (const category of DEFAULT_SERVICE_CATEGORIES) {
+    // Single master copy of the default category/type list now lives in
+    // default_categories/default_types (see database/migrations/
+    // 20260815_create_default_categories.sql onward) instead of a
+    // hardcoded array here. service_categories/service_types are still
+    // seeded exactly as before — same columns, same shape, so every
+    // existing report/dashboard/timesheet/import query keeps working
+    // unchanged — plus a company_categories/company_types mapping row is
+    // now additionally written to record which default each row came from.
+    const defaultCategories = await DefaultCategory.findAll({
+      where: { status: 'active' },
+      order: [['display_order', 'ASC']],
+      transaction,
+    });
+
+    const categoryMap = {}; // default_category name -> { serviceCategoryId, companyCategoryId }
+    for (const defaultCategory of defaultCategories) {
       const created = await serviceCategoryRepository.create(
         {
-          ...category,
+          name: defaultCategory.category_name,
+          report_bucket_key: REPORT_BUCKET_KEY_BY_CATEGORY_NAME[defaultCategory.category_name] || null,
           company_id: company.id,
           status: 'active',
           created_by: actorId,
@@ -127,19 +129,48 @@ const createWithAdmin = async (data, actorId, ipAddress = null) => {
         },
         { transaction }
       );
-      categoryMap[category.name] = created.id;
+
+      const companyCategory = await companyCategoryRepository.create(
+        {
+          company_id: company.id,
+          default_category_id: defaultCategory.id,
+          status: 'active',
+        },
+        { transaction }
+      );
+
+      categoryMap[defaultCategory.category_name] = {
+        serviceCategoryId: created.id,
+        companyCategoryId: companyCategory.id,
+      };
     }
 
-    // Then link each default service type to this company's own category ID
-    // via the map above, resolved by name.
-    for (const serviceType of DEFAULT_SERVICE_TYPES) {
+    const defaultTypes = await DefaultType.findAll({
+      where: { status: 'active' },
+      include: [{ model: DefaultCategory, as: 'defaultCategory', attributes: ['category_name'] }],
+      order: [['display_order', 'ASC']],
+      transaction,
+    });
+
+    for (const defaultType of defaultTypes) {
+      const mapping = categoryMap[defaultType.defaultCategory.category_name];
+
       await serviceTypeRepository.create(
         {
-          service_type_name: serviceType.name,
-          service_category_id: categoryMap[serviceType.category],
+          service_type_name: defaultType.type_name,
+          service_category_id: mapping.serviceCategoryId,
           company_id: company.id,
           created_by: actorId,
           updated_by: actorId,
+        },
+        { transaction }
+      );
+
+      await companyTypeRepository.create(
+        {
+          company_category_id: mapping.companyCategoryId,
+          default_type_id: defaultType.id,
+          status: 'active',
         },
         { transaction }
       );
@@ -154,8 +185,8 @@ const createWithAdmin = async (data, actorId, ipAddress = null) => {
   return { company, admin: adminSummary };
 };
 
-const update = async (id, data, actorId, ipAddress = null) => {
-  const existing = await getById(id);
+const update = async (id, data, actorId, ipAddress = null, entityIds = []) => {
+  const existing = await getById(id, entityIds);
   const oldValues = existing.toJSON();
 
   const updated = await companyRepository.update(id, data);

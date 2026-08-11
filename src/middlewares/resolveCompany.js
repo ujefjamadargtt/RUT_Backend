@@ -21,8 +21,21 @@ const logger = require('../utils/logger');
  * flip, no code change).
  */
 const resolveCompany = (req, res, next) => {
-  if (req.user.is_platform_admin) {
-    // Super/Platform Admin has no company and never touches business routes.
+  if (req.hierarchyRank === 1) {
+    // Platform Admin has no company and never touches business routes.
+    return next();
+  }
+
+  // Admin (rank 2) is also platform-wide, like Platform Admin — it manages
+  // Entity Admins and BU Admins across every Entity/Company, never scoped
+  // to one. Entity Admin (rank 3) is scoped to a SET of Entities
+  // (req.entityIds, populated by requireEntityAdmin.js /
+  // requireEntityAdminOrAdmin.js), not a single company —
+  // users.company_id is NULL for both roles by design. Skip single-company
+  // resolution for both, the same way Platform Admin does, rather than
+  // falsely flagging a "company header mismatch" for a role that
+  // legitimately has none.
+  if (req.hierarchyRank === 2 || req.hierarchyRank === 3) {
     return next();
   }
 

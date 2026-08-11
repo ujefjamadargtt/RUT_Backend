@@ -98,6 +98,12 @@ const update = async (id, data, userId, ipAddress = null) => {
   const existing = await getById(id); // throws 404
 
   if (data.role_name && data.role_name.toLowerCase() !== existing.role_name.toLowerCase()) {
+    if (existing.is_system) {
+      const err = new Error(`"${existing.role_name}" is a system role defined by the RBAC hierarchy and cannot be renamed.`);
+      err.statusCode = 403;
+      throw err;
+    }
+
     const taken = await roleRepository.findByName(data.role_name);
     if (taken && taken.id !== id) {
       const err = new Error(`Role name "${data.role_name}" is already in use.`);
@@ -140,6 +146,12 @@ const update = async (id, data, userId, ipAddress = null) => {
  */
 const deleteRole = async (id, userId, ipAddress = null) => {
   const existing = await getById(id); // throws 404 'Role with ID {id} not found.'
+
+  if (existing.is_system) {
+    const err = new Error(`"${existing.role_name}" is a system role defined by the RBAC hierarchy and cannot be deleted.`);
+    err.statusCode = 403;
+    throw err;
+  }
 
   const isAssigned = await roleRepository.hasAssignedUsers(id);
   if (isAssigned) {

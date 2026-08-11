@@ -2,6 +2,7 @@
 
 const { sequelize } = require('../models');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
+const employeeRepository = require('../repositories/employeeRepository');
 const timesheetService = require('./timesheetService');
 const employeeServicePOMappingRepository = require('../repositories/employeeServicePOMappingRepository');
 const servicePOHierarchyRepository = require('../repositories/servicePOHierarchyRepository');
@@ -238,6 +239,17 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
       transaction
     );
   });
+
+  // Approval happens BEFORE Sync (see managerSelfServiceService.
+  // getApprovalSummary/bulkApproveTimesheets): a Manager approves pending
+  // entries directly. When approval isn't required for this employee, they
+  // skip straight to 'approved' here — a separate, additive step AFTER
+  // creation, so the insert above (and its validation/hour-cap checks)
+  // stays exactly as it was.
+  const employee = await employeeRepository.findById(employeeId, companyId);
+  if (employee && !employee.is_timesheet_approval_required && insertedRows.length > 0) {
+    await employeeWorkLogRepository.markApprovedByIds(insertedRows.map((row) => row.id), companyId);
+  }
 
   logger.info('Employee daily timesheet replace-saved', {
     employeeId, companyId, date: dateStr, entryCount: insertedRows.length,

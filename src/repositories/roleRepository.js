@@ -1,7 +1,8 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { Role, User, UserRole } = require('../models');
+const { Role, User } = require('../models');
+const userAdditionalRoleRepository = require('./userAdditionalRoleRepository');
 
 /**
  * Role Repository
@@ -105,42 +106,30 @@ const update = async (id, data) => {
  * @returns {Promise<number>}
  */
 const countUsersByRole = async (roleId) => {
-  return User.count({
-    distinct: true,
-    where: {
-      status: 'active',
-      [Op.or]: [
-        { role_id: roleId },
-        { '$userRoles.role_id$': roleId },
-      ],
-    },
-    include: [
-      {
-        model: UserRole,
-        as: 'userRoles',
-        attributes: [],
-        required: false,
-      },
-    ],
-  });
+  return User.count({ where: { status: 'active', role_id: roleId } });
 };
 
 /**
- * Check whether a role currently has ANY user assigned to it — via either
- * the legacy direct users.role_id column or the user_roles junction table —
+ * Check whether a role currently has ANY user assigned to it — either as
+ * their PRIMARY role (users.role_id, the sole source of truth for
+ * hierarchy/scoping — see database/migrations/20260840_collapse_user_roles.sql)
+ * or as an ADDITIONAL operational role (user_additional_roles — see
+ * database/migrations/20260850_add_user_additional_roles.sql) —
  * regardless of the user's active/inactive status. Used as the hard-delete
  * guard in roleService.delete(): a role with even one inactive user still
- * pointing at it must not be deleted, since removing the row would either
- * orphan that reference or violate the user_roles FK.
+ * pointing at it (either way) must not be deleted. user_additional_roles.role_id
+ * has ON DELETE CASCADE, so without this check, deleting a role only ever
+ * held as someone's additional role would silently drop that grant with no
+ * guard and no audit trail.
  * @param {number} roleId
  * @returns {Promise<boolean>}
  */
 const hasAssignedUsers = async (roleId) => {
-  const directCount = await User.count({ where: { role_id: roleId } });
-  if (directCount > 0) return true;
-
-  const mappingCount = await UserRole.count({ where: { role_id: roleId } });
-  return mappingCount > 0;
+  const [directCount, additionalCount] = await Promise.all([
+    User.count({ where: { role_id: roleId } }),
+    userAdditionalRoleRepository.countByRoleId(roleId),
+  ]);
+  return directCount > 0 || additionalCount > 0;
 };
 
 /**

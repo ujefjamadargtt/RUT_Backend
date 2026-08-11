@@ -7,10 +7,14 @@ const logger = require('../utils/logger');
 
 /**
  * RBAC Controller
- * User <-> Role mappings, Role <-> Form mappings (including the dedicated
- * soft map/unmap endpoint), and the admin Forms-for-Role(s) lookup used to
- * power the Role-Form mapping screen. A regular user's own accessible forms
- * come back from the login response instead (see authService.js).
+ * Role <-> Form mappings (including the dedicated soft map/unmap endpoint),
+ * and the admin Forms-for-Role(s) lookup used to power the Role-Form
+ * mapping screen. A regular user's own accessible forms come back from the
+ * login response instead (see authService.js).
+ *
+ * The old User <-> Role mapping endpoints (user_roles table) were removed
+ * with the RBAC redesign — every user now holds exactly one role via
+ * `users.role_id` directly (see rbacService.js's header comment).
  */
 
 /**
@@ -22,104 +26,6 @@ function parsePositiveInt(value) {
   const parsed = Number.parseInt(value, 10);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
-
-// ── User <-> Role mappings ───────────────────────────────────────────────────
-
-/**
- * GET /api/v1/roles/user-mappings/:userId
- * Management only. Lists every role currently mapped to one user.
- */
-const userMappings = async (req, res, next) => {
-  try {
-    const userId = parsePositiveInt(req.params.userId);
-    if (!userId) {
-      return sendError(res, 'Invalid user ID.', 400);
-    }
-
-    const mappings = await rbacService.listUserMappings(userId);
-    return sendSuccess(res, mappings, 'User role mappings fetched successfully.');
-  } catch (err) {
-    if (err.statusCode === 404) {
-      return sendNotFound(res, 'User');
-    }
-    if (err.statusCode) {
-      return sendError(res, err.message, err.statusCode);
-    }
-    logger.error('rbacController.userMappings error', { error: err.message, stack: err.stack });
-    next(err);
-  }
-};
-
-/**
- * POST /api/v1/roles/user-mappings
- * Management only. Maps one additional role onto one user.
- * Body: { user_id, role_id }
- */
-const createUserMapping = async (req, res, next) => {
-  try {
-    const mapping = await rbacService.createUserMapping(req.body, req.userId, getIpAddress(req));
-    return sendCreated(res, mapping, 'User role mapping created successfully.');
-  } catch (err) {
-    if (err.statusCode) {
-      return sendError(res, err.message, err.statusCode);
-    }
-    logger.error('rbacController.createUserMapping error', { error: err.message, stack: err.stack });
-    next(err);
-  }
-};
-
-/**
- * PUT /api/v1/roles/user-mappings/:userId
- * Management only. Replaces ALL of a user's role mappings with the given
- * set in one transaction.
- * Body: { role_ids: number[] }
- */
-const replaceUserRoles = async (req, res, next) => {
-  try {
-    const userId = parsePositiveInt(req.params.userId);
-    if (!userId) {
-      return sendError(res, 'Invalid user ID.', 400);
-    }
-
-    const mappings = await rbacService.replaceUserRoles(userId, req.body.role_ids, req.userId, getIpAddress(req));
-    return sendSuccess(res, mappings, 'User role mappings updated successfully.');
-  } catch (err) {
-    if (err.statusCode === 404) {
-      return sendNotFound(res, 'User or role');
-    }
-    if (err.statusCode) {
-      return sendError(res, err.message, err.statusCode);
-    }
-    logger.error('rbacController.replaceUserRoles error', { error: err.message, stack: err.stack });
-    next(err);
-  }
-};
-
-/**
- * DELETE /api/v1/roles/user-mappings/:userId/:roleId
- * Management only. Removes one role mapping from one user.
- */
-const deleteUserMapping = async (req, res, next) => {
-  try {
-    const userId = parsePositiveInt(req.params.userId);
-    const roleId = parsePositiveInt(req.params.roleId);
-    if (!userId || !roleId) {
-      return sendError(res, 'Invalid user ID or role ID.', 400);
-    }
-
-    await rbacService.deleteUserMapping({ user_id: userId, role_id: roleId }, req.userId, getIpAddress(req));
-    return sendSuccess(res, null, 'User role mapping deleted successfully.');
-  } catch (err) {
-    if (err.statusCode === 404) {
-      return sendNotFound(res, 'User role mapping');
-    }
-    if (err.statusCode) {
-      return sendError(res, err.message, err.statusCode);
-    }
-    logger.error('rbacController.deleteUserMapping error', { error: err.message, stack: err.stack });
-    next(err);
-  }
-};
 
 // ── Role <-> Form mappings ───────────────────────────────────────────────────
 
@@ -298,10 +204,6 @@ const formsForRoles = async (req, res, next) => {
 };
 
 module.exports = {
-  userMappings,
-  createUserMapping,
-  replaceUserRoles,
-  deleteUserMapping,
   roleFormMappings,
   getRoleFormMappingById,
   createRoleFormMapping,

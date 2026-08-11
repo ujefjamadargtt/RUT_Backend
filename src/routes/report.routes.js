@@ -478,6 +478,11 @@ router.get(
  *       available_hours = expected_man_hours - hours_delivered_before_month;
  *       monthly_billable_amount = sum(hours_logged_this_month × employee_hourly_rate) for billable POs only.
  *       hourly_rate = total_cost / 160 from monthly_costs.
+ *       invoiced_amount and billed_amount are read from the Service PO Monthly
+ *       Budget master (service_po_monthly_budgets, matched on service_po_id +
+ *       month/year — see /service-po-monthly-budgets) instead of being
+ *       computed; missing budget data for a PO/month defaults both to 0.
+ *       unbilled_amount = invoiced_amount - billed_amount.
  *     tags: [Reports]
  *     security:
  *       - bearerAuth: []
@@ -560,7 +565,8 @@ router.get(
  *           service_po_id, service_po_code, service_po_name, service_description,
  *           start_date, end_date, status, is_billable, invoice_frequency, po_value,
  *           account_manager, expected_man_hours, client_id, client_name, service_type,
- *           hours_delivered_before_month, available_hours, monthly_billable_amount.
+ *           hours_delivered_before_month, available_hours, monthly_billable_amount,
+ *           invoiced_amount, billed_amount, unbilled_amount.
  *           Summary contains page-level totals for all numeric columns.
  *       401:
  *         description: Unauthorized

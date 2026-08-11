@@ -5,14 +5,26 @@ const { passwordComplexity } = require('./userValidation');
 
 /**
  * Company Validation Schemas
- * Platform-level only — every route using these is gated by
- * requirePlatformAdmin, not a business role.
+ * Entity Admin only — every route using these is gated by
+ * requireEntityAdmin (repurposed from requirePlatformAdmin when Entity
+ * Admin was introduced — see database/migrations/20260826_add_entity_admin_role.sql).
  */
 
 /**
- * POST /companies — create a company + its first BU Admin, one transaction
+ * POST /companies — create a company + its first BU Admin, one transaction,
+ * under one of the calling Entity Admin's own owned Entities.
  */
 const createCompanySchema = Joi.object({
+  entity_id: Joi.number()
+    .integer()
+    .positive()
+    .required()
+    .messages({
+      'number.base': 'Entity ID must be a number.',
+      'number.positive': 'Entity ID must be a positive integer.',
+      'any.required': 'Entity is required.',
+    }),
+
   company_code: Joi.string()
     .trim()
     .uppercase()

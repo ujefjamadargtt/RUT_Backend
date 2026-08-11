@@ -28,10 +28,6 @@ const HEADER_MAP = {
   'company exp': 'company_experience',
   'company_experience': 'company_experience',
   'company_exp': 'company_experience',
-  'email': 'email_id',
-  'email id': 'email_id',
-  'email_id': 'email_id',
-  'email address': 'email_id',
   'description': 'resource_description',
   'resource description': 'resource_description',
   'resource_description': 'resource_description',
@@ -46,20 +42,15 @@ const HEADER_MAP = {
   'status': 'status',
 };
 
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const CODE_RE = /^[A-Z0-9_/#-]{2,20}$/;
 
-// Assigned ONLY to brand-new Employee records created by this import (see
-// the "Insert valid rows" step below) so an imported employee can log in
-// immediately via /auth/login. Never hashed here — Employee.js's own
-// beforeCreate hook hashes `password` with the exact same bcrypt mechanism
-// Login/Auth already uses for every Employee/User password, so this file
-// never touches bcrypt directly. This import flow has no "update existing
-// employee" branch (a row whose employee_code/email already exists is
-// rejected in validateRow(), never reaches the create() call below), so
-// there is no path here that could ever overwrite an existing employee's
-// password.
-const DEFAULT_EMPLOYEE_PASSWORD = 'Gtt@1234';
+// Bulk-imported rows create Employee (business-data) records only — no
+// linked User/login account, and no Manager assignment. Employee is pure
+// business data now (see database/migrations/20260842_employees_drop_login_columns.sql);
+// giving each imported row a login and a mandatory Primary Manager would
+// need per-row email + manager columns this file's format doesn't have.
+// Use POST /employees (employeeService.create) for employees that need to
+// log in.
 
 function normaliseHeader(raw) {
   return String(raw || '').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -161,7 +152,7 @@ function parseEmployeeFile(filePath) {
  * Returns { errors: string[], data: object }.
  * data is only populated when errors is empty.
  */
-function validateRow(raw, existingCodes, existingEmails, seenCodes, seenEmails) {
+function validateRow(raw, existingCodes, seenCodes) {
   const errors = [];
   const data = {};
 
@@ -215,20 +206,6 @@ function validateRow(raw, existingCodes, existingEmails, seenCodes, seenEmails) 
       errors.push('Company experience cannot exceed total experience.');
     } else {
       data.company_experience = compExp;
-    }
-  }
-
-  // ── email_id (optional) ─────────────────────────────────────────────────────
-  if (!isBlank(raw.email_id)) {
-    const email = String(raw.email_id).trim().toLowerCase();
-    if (!EMAIL_RE.test(email)) {
-      errors.push('Email address is not valid.');
-    } else if (existingEmails.has(email)) {
-      errors.push(`Email "${email}" is already registered.`);
-    } else if (seenEmails.has(email)) {
-      errors.push(`Email "${email}" is duplicated within this file.`);
-    } else {
-      data.email_id = email;
     }
   }
 
@@ -295,29 +272,22 @@ async function importEmployees(filePath, userId, companyId) {
   }
 
   // 2. Batch-fetch existing codes (scoped to this company — per-company
-  // uniqueness) and existing emails (global — email stays globally unique)
-  // to avoid N+1 queries.
-  const [existingForCompany, allEmails] = await Promise.all([
-    employeeRepository.findAllForImport(companyId),
-    employeeRepository.findAllEmailsGlobal(),
-  ]);
+  // uniqueness) to avoid N+1 queries.
+  const existingForCompany = await employeeRepository.findAllForImport(companyId);
   const existingCodes = new Set(existingForCompany.map((e) => e.employee_code.toUpperCase()));
-  const existingEmails = new Set(allEmails.map((e) => e.email_id.toLowerCase()));
 
-  // 3. Validate all rows; track codes/emails seen within this file to catch duplicates
+  // 3. Validate all rows; track codes seen within this file to catch duplicates
   const seenCodes = new Set();
-  const seenEmails = new Set();
   const validRows = [];
   const errorRows = [];
 
   for (const raw of rawRows) {
-    const { errors, data } = validateRow(raw, existingCodes, existingEmails, seenCodes, seenEmails);
+    const { errors, data } = validateRow(raw, existingCodes, seenCodes);
     if (errors.length) {
       errorRows.push({ row: raw._rowNum, errors });
     } else {
       validRows.push(data);
       seenCodes.add(data.employee_code);
-      if (data.email_id) seenEmails.add(data.email_id);
     }
   }
 
@@ -332,8 +302,6 @@ async function importEmployees(filePath, userId, companyId) {
         company_id: companyId,
         created_by: userId,
         updated_by: userId,
-        // New Employee record -> default login password (see constant doc above).
-        password: DEFAULT_EMPLOYEE_PASSWORD,
       });
       importedCount++;
     } catch (dbErr) {

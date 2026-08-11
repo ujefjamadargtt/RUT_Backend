@@ -12,12 +12,6 @@ module.exports = (sequelize) => {
         foreignKey: 'role_id',
         as: 'role',
       });
-      User.belongsToMany(models.Role, {
-        through: models.UserRole,
-        foreignKey: 'user_id',
-        otherKey: 'role_id',
-        as: 'roles',
-      });
       User.belongsTo(models.Employee, {
         foreignKey: 'employee_id',
         as: 'employee',
@@ -53,7 +47,8 @@ module.exports = (sequelize) => {
         autoIncrement: true,
         primaryKey: true,
       },
-      // Nullable: the one Super Admin (is_platform_admin=true) row has no
+      // Nullable: Platform Admin (role.hierarchy_rank === 1) and Entity
+      // Admin (scoped to a set of Entities, not one company) have no
       // company_id; every other user belongs to exactly one company.
       company_id: {
         type: DataTypes.INTEGER,
@@ -62,11 +57,6 @@ module.exports = (sequelize) => {
           model: 'companies',
           key: 'id',
         },
-      },
-      is_platform_admin: {
-        type: DataTypes.BOOLEAN,
-        allowNull: false,
-        defaultValue: false,
       },
       employee_id: {
         type: DataTypes.INTEGER,

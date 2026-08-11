@@ -104,14 +104,15 @@ module.exports = (sequelize) => {
         },
       },
       // Initial value set at import-confirm time in timesheetService.js's
-      // confirmImport() via timesheetPublishPolicy.resolveInitialIsPublish()
-      // — the SAME value stamped onto every child `timesheets` row created
-      // in that same call, so the two tables can never disagree (see
-      // Timesheet.js's is_publish comment). The DB default (false) below is
-      // a fallback only. Afterward it's a one-way flag: only ever flipped
-      // true, in lockstep with its child rows, via PATCH
-      // /timesheets/:id/modified-hours or the Publish API — never reset to
-      // false anywhere.
+      // confirmImport() via timesheetPublishPolicy.js — true only if EVERY
+      // child `timesheets` row created in that same call ended up
+      // is_publish=true (a batch can now span employees with different
+      // is_timesheet_approval_required flags, so this is no longer always
+      // identical to any single child row — see Timesheet.js's is_publish
+      // comment). The DB default (false) below is a fallback only.
+      // Afterward it's a one-way flag: only ever flipped true, in lockstep
+      // with its child rows, via PATCH /timesheets/:id/modified-hours or
+      // the Publish API — never reset to false anywhere.
       is_publish: {
         type: DataTypes.BOOLEAN,
         allowNull: false,

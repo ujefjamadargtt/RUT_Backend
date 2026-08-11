@@ -3,7 +3,8 @@
 const express = require('express');
 const router = express.Router();
 
-const employeeAuth = require('../middlewares/employeeAuth');
+const authenticate = require('../middlewares/auth');
+const authorize = require('../middlewares/authorize');
 const { validate } = require('../middlewares/validateRequest');
 const {
   dailyReportQuerySchema,
@@ -47,7 +48,8 @@ const controller = require('../controllers/employeeReportController');
  */
 router.get(
   '/daily',
-  employeeAuth,
+  authenticate,
+  authorize('employee.view_reports'),
   validate(dailyReportQuerySchema, 'query'),
   controller.getDaily
 );
@@ -78,7 +80,8 @@ router.get(
  */
 router.get(
   '/monthly',
-  employeeAuth,
+  authenticate,
+  authorize('employee.view_reports'),
   validate(monthlyReportQuerySchema, 'query'),
   controller.getMonthly
 );
@@ -109,7 +112,8 @@ router.get(
  */
 router.get(
   '/range',
-  employeeAuth,
+  authenticate,
+  authorize('employee.view_reports'),
   validate(rangeReportQuerySchema, 'query'),
   controller.getRange
 );

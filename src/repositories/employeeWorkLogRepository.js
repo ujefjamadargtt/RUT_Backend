@@ -24,13 +24,13 @@ function buildIncludes() {
 
 /**
  * Fetch a paginated, filtered list of an employee's work log entries.
- * @param {object} filters - { employeeId, startDate, endDate, companyId, status }
+ * @param {object} filters - { employeeId, startDate, endDate, companyId, status, poId, subProjectId }
  * @param {object} pagination - { limit, offset }
  * @param {object} sort - { sortBy, sortOrder }
  * @returns {Promise<{ rows: EmployeeWorkLog[], count: number }>}
  */
 const findAll = async (filters = {}, pagination = {}, sort = {}) => {
-  const { employeeId, startDate, endDate, companyId, status } = filters;
+  const { employeeId, startDate, endDate, companyId, status, poId, subProjectId } = filters;
   const { limit = 20, offset = 0 } = pagination;
 
   let { sortBy = 'work_date', sortOrder = 'DESC' } = sort;
@@ -40,6 +40,8 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
   const where = { company_id: companyId };
   if (employeeId) where.employee_id = parseInt(employeeId, 10);
   if (status) where.status = status;
+  if (poId) where.service_po_id = parseInt(poId, 10);
+  if (subProjectId) where.sub_project_id = parseInt(subProjectId, 10);
   if (startDate) where.work_date = { ...where.work_date, [Op.gte]: startDate };
   if (endDate) where.work_date = { ...where.work_date, [Op.lte]: endDate };
 
@@ -302,14 +304,22 @@ const getMonthlyHierarchyBreakdown = async ({ employeeId, month, year, companyId
  * Admin "Sync Employee Work Logs" flow (see timesheetService.previewPmsImport
  * / confirmImport). Never reads from `timesheets`.
  *
- * Deliberately NOT filtered by status='pending': Employee Work Logs are the
- * source of truth and can keep changing after a sync (an employee may edit
- * or delete an already-synced entry — see employeeTimesheetService.js).
- * Sync is idempotent/overwrite (re-projects the ENTIRE current state of the
- * month into `timesheets` every time it runs), so it must read every row
- * for the month, not just the ones changed since the last sync — otherwise
- * an unmodified-but-previously-synced entry would be silently dropped from
- * the official Timesheet on a repeat sync.
+ * Deliberately NOT filtered by status='synced' vs 'approved': Employee Work
+ * Logs are the source of truth and can keep changing after a sync (an
+ * employee may edit or delete an already-synced entry — see
+ * employeeTimesheetService.js). Sync is idempotent/overwrite (re-projects
+ * the ENTIRE current state of the month into `timesheets` every time it
+ * runs), so it must read every non-pending row for the month, not just the
+ * ones changed since the last sync — otherwise an unmodified-but-previously-
+ * synced entry would be silently dropped from the official Timesheet on a
+ * repeat sync.
+ *
+ * IS filtered to exclude status='pending': approval now happens BEFORE
+ * Sync (a Manager approves an Employee's pending Work Log entries directly,
+ * or they're auto-approved when is_timesheet_approval_required is false —
+ * see managerSelfServiceService.bulkApproveTimesheets and
+ * employeeTimesheetService.replaceDailyEntries), so an entry a Manager
+ * hasn't approved yet must be structurally impossible for Sync to pick up.
  *
  * @param {number} companyId
  * @param {number} month
@@ -327,6 +337,7 @@ const findForSync = async (companyId, month, year) => {
         literal(`EXTRACT(YEAR  FROM work_date) = ${yearNum}`),
       ],
       company_id: companyId,
+      status: { [Op.ne]: 'pending' },
     },
     include: buildIncludes(),
     order: [['id', 'ASC']],
@@ -423,6 +434,104 @@ const getReportRows = async ({ employeeId, companyId, startDate, endDate }) => {
     ],
     order: [['work_date', 'ASC']],
   });
+};
+
+/**
+ * ALL work log rows for one employee/date-range, with full row detail —
+ * the source data for the Manager Daily/Monthly approval-summary view
+ * (managerSelfServiceService.getApprovalSummary). This is NOT filtered by
+ * status: a bucket must be able to show 'approved'/'synced' rows too (so an already-
+ * approved day still displays its full detail), and bucket-level
+ * approval_status is derived by the caller from whether ANY row in that
+ * bucket is still 'pending'.
+ * @param {object} params - { employeeId, companyId, startDate, endDate }
+ * @returns {Promise<EmployeeWorkLog[]>}
+ */
+const findForApprovalSummary = async ({ employeeId, companyId, startDate, endDate }) => {
+  const where = { employee_id: employeeId, company_id: companyId };
+  if (startDate) where.work_date = { ...where.work_date, [Op.gte]: startDate };
+  if (endDate) where.work_date = { ...where.work_date, [Op.lte]: endDate };
+
+  return EmployeeWorkLog.findAll({
+    where,
+    include: buildIncludes(),
+    order: [['work_date', 'DESC'], ['id', 'ASC']],
+  });
+};
+
+/**
+ * Manager bulk-approve, daily grain — flips every currently-'pending' row
+ * for one employee on one of the given dates to 'approved'. A date with
+ * nothing pending is a harmless no-op (0 rows), not an error — mirrors the
+ * bulk-approve convention already used elsewhere in this codebase.
+ * @param {number} employeeId
+ * @param {string[]} dates - "YYYY-MM-DD"
+ * @param {number} companyId
+ * @param {object} [transaction]
+ * @returns {Promise<number>} rows updated
+ */
+const approveByEmployeeAndDates = async (employeeId, dates, companyId, transaction = null) => {
+  const [count] = await EmployeeWorkLog.update(
+    { status: 'approved' },
+    {
+      where: { employee_id: employeeId, company_id: companyId, work_date: { [Op.in]: dates }, status: 'pending' },
+      ...(transaction ? { transaction } : {}),
+    }
+  );
+  return count;
+};
+
+/**
+ * Manager bulk-approve, monthly grain — flips every currently-'pending' row
+ * for one employee within the given month/year pairs to 'approved'.
+ * @param {number} employeeId
+ * @param {Array<{ month: number, year: number }>} months
+ * @param {number} companyId
+ * @param {object} [transaction]
+ * @returns {Promise<number>} rows updated
+ */
+const approveByEmployeeAndMonths = async (employeeId, months, companyId, transaction = null) => {
+  const monthYearConditions = months.map(({ month, year }) => {
+    const monthNum = parseInt(month, 10);
+    const yearNum = parseInt(year, 10);
+    if (!Number.isInteger(monthNum) || !Number.isInteger(yearNum)) {
+      throw new Error(`approveByEmployeeAndMonths: month/year must be numbers (got month=${month}, year=${year}).`);
+    }
+    return literal(`(EXTRACT(MONTH FROM work_date) = ${monthNum} AND EXTRACT(YEAR FROM work_date) = ${yearNum})`);
+  });
+
+  const [count] = await EmployeeWorkLog.update(
+    { status: 'approved' },
+    {
+      where: { employee_id: employeeId, company_id: companyId, status: 'pending', [Op.or]: monthYearConditions },
+      ...(transaction ? { transaction } : {}),
+    }
+  );
+  return count;
+};
+
+/**
+ * Flip specific rows straight to 'approved' by id — used right after
+ * Draft creation (replaceDailyEntries / submitMonthlyWorkLog) for an
+ * employee whose is_timesheet_approval_required is false, so their entries
+ * never sit waiting for a Manager action they don't need. Deliberately a
+ * separate, additive call made AFTER the creation transaction commits —
+ * Draft creation itself always inserts status='pending' unchanged.
+ * @param {number[]} ids
+ * @param {number} companyId
+ * @param {object} [transaction]
+ * @returns {Promise<number>} rows updated
+ */
+const markApprovedByIds = async (ids, companyId, transaction = null) => {
+  if (!ids || ids.length === 0) return 0;
+  const [count] = await EmployeeWorkLog.update(
+    { status: 'approved' },
+    {
+      where: { id: { [Op.in]: ids }, company_id: companyId },
+      ...(transaction ? { transaction } : {}),
+    }
+  );
+  return count;
 };
 
 /**
@@ -595,6 +704,10 @@ module.exports = {
   markSyncedByTuples,
   revertSyncStatusByImportIds,
   getReportRows,
+  findForApprovalSummary,
+  approveByEmployeeAndDates,
+  approveByEmployeeAndMonths,
+  markApprovedByIds,
   existsForServicePOOrHierarchy,
   existsForHierarchyNodes,
 };

@@ -1051,6 +1051,13 @@ async function getEmployeeUtilizationSummary(filters) {
  * before the selected month, available hours, and monthly billable amount
  * (hours logged this month × employee hourly rate) for billable POs.
  *
+ * invoiced_amount and billed_amount are read from the Service PO Monthly
+ * Budget master (service_po_monthly_budgets, matched on service_po_id +
+ * the report's month/year) rather than computed from sp.invoice_amount or
+ * timesheets/monthly_costs — see database/migrations/
+ * 20260853_create_service_po_monthly_budgets.sql. Missing budget data for a
+ * PO/month defaults both to 0. unbilled_amount = invoiced_amount - billed_amount.
+ *
  * @param {object} filters
  * @param {number} filters.month           - required
  * @param {number} filters.year            - required
@@ -1186,22 +1193,35 @@ async function getServicePOSummary(filters) {
           THEN ROUND(COALESCE(curr.billable_amount, 0)::numeric, 2)
         ELSE NULL
       END                                                                AS monthly_billable_amount,
+      -- Invoice Amount / Billed Amount now come from the Service PO Monthly
+      -- Budget master (spmb) for the report's selected month/year, per
+      -- database/migrations/20260853_create_service_po_monthly_budgets.sql —
+      -- no longer sp.invoice_amount or a timesheet/monthly_costs
+      -- calculation. Missing budget data for a PO/month defaults to 0.
       CASE
         WHEN sp.is_billable = true
-          THEN ROUND(COALESCE(sp.invoice_amount, 0)::numeric, 2)
+          THEN ROUND(COALESCE(spmb.invoice_amount, 0)::numeric, 2)
         ELSE NULL
       END                                                                AS invoiced_amount,
       CASE
         WHEN sp.is_billable = true
+          THEN ROUND(COALESCE(spmb.billed_amount, 0)::numeric, 2)
+        ELSE NULL
+      END                                                                AS billed_amount,
+      CASE
+        WHEN sp.is_billable = true
           THEN ROUND(
-            (COALESCE(prev_bill.prev_billable_amount, 0) + COALESCE(curr.billable_amount, 0)
-            - COALESCE(sp.invoice_amount, 0))::numeric, 2)
+            (COALESCE(spmb.invoice_amount, 0) - COALESCE(spmb.billed_amount, 0))::numeric, 2)
         ELSE NULL
       END                                                                AS unbilled_amount
     FROM service_pos sp
     INNER JOIN clients c        ON c.id  = sp.client_id
     INNER JOIN service_types st ON st.id = sp.service_type_id
     INNER JOIN service_categories sc ON sc.id = st.service_category_id
+    LEFT JOIN service_po_monthly_budgets spmb
+           ON spmb.service_po_id = sp.id
+          AND spmb.month = :monthNum
+          AND spmb.year  = :yearNum
     LEFT JOIN (
       SELECT service_po_id, SUM(${hoursCol}) AS hours_delivered
       FROM timesheets t
@@ -1209,18 +1229,6 @@ async function getServicePOSummary(filters) {
         ${publishGuard}
       GROUP BY service_po_id
     ) prev ON prev.service_po_id = sp.id
-    LEFT JOIN (
-      SELECT
-        t.service_po_id,
-        SUM(${hoursCol} * COALESCE(mc.total_cost, 0)) AS prev_billable_amount
-      FROM timesheets t
-      LEFT JOIN monthly_costs mc
-             ON mc.employee_id = t.employee_id
-            AND mc.month_year  = TO_CHAR(t.timesheet_date, 'YYYY-MM')
-      WHERE t.timesheet_date < MAKE_DATE(:yearNum, :monthNum, 1)
-        ${publishGuard}
-      GROUP BY t.service_po_id
-    ) prev_bill ON prev_bill.service_po_id = sp.id
     INNER JOIN (
       SELECT
         t.service_po_id,
