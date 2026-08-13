@@ -290,6 +290,18 @@ const findByRole = async (roleId, filters = {}, pagination = {}, sort = {}) => {
   });
 };
 
+/**
+ * Lightweight fetch of every non-deleted user's email (lowercased), for
+ * bulk-import uniqueness validation — email is unique across the whole
+ * `users` table (not per-company, see users_email_key), so this
+ * intentionally isn't companyId-scoped.
+ * @returns {Promise<string[]>}
+ */
+const findAllEmails = async () => {
+  const users = await User.findAll({ where: { is_deleted: false }, attributes: ['email'], raw: true });
+  return users.map((u) => u.email.toLowerCase());
+};
+
 module.exports = {
   findAll,
   findById,
@@ -297,6 +309,7 @@ module.exports = {
   findByEmailWithPassword,
   findByEmployeeId,
   findByIds,
+  findAllEmails,
   create,
   update,
   softDelete,

@@ -88,6 +88,21 @@ const { importLimiter } = require('../middlewares/rateLimiters');
  *                         type: array
  *                         items:
  *                           type: string
+ *                 credentials:
+ *                   type: array
+ *                   description: >
+ *                     One entry per imported row that had an Email ID —
+ *                     a linked login account was created for it. The
+ *                     temporary password is only ever returned here, once.
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       employee_code:
+ *                         type: string
+ *                       email:
+ *                         type: string
+ *                       temporaryPassword:
+ *                         type: string
  *       400:
  *         description: No file attached
  *       422:

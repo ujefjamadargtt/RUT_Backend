@@ -1,8 +1,16 @@
 'use strict';
 
 const xlsx = require('xlsx');
+const { sequelize, Role } = require('../models');
 const employeeRepository = require('../repositories/employeeRepository');
+const userRepository = require('../repositories/userRepository');
 const logger = require('../utils/logger');
+
+// Bulk-imported logins all get this same default password rather than a
+// per-row random one (HR request — random passwords aren't practical to
+// hand out across a whole spreadsheet of new hires at once). Employees can
+// change it via the existing forgot-password flow after first login.
+const DEFAULT_IMPORT_PASSWORD = 'Gtt@1234';
 
 // Flexible column-header → field mapping (matched after normalising to lowercase + collapsed spaces)
 const HEADER_MAP = {
@@ -40,17 +48,22 @@ const HEADER_MAP = {
   'dol': 'date_of_leaving',
   'date_of_leaving': 'date_of_leaving',
   'status': 'status',
+  'email': 'email',
+  'email id': 'email',
+  'emailid': 'email',
+  'email address': 'email',
 };
 
 const CODE_RE = /^[A-Z0-9_/#-]{2,20}$/;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-// Bulk-imported rows create Employee (business-data) records only — no
-// linked User/login account, and no Manager assignment. Employee is pure
-// business data now (see database/migrations/20260842_employees_drop_login_columns.sql);
-// giving each imported row a login and a mandatory Primary Manager would
-// need per-row email + manager columns this file's format doesn't have.
-// Use POST /employees (employeeService.create) for employees that need to
-// log in.
+// Employee is pure business data (see database/migrations/
+// 20260842_employees_drop_login_columns.sql); a row only gets a linked
+// User/login account when an "Email ID" column is present and populated —
+// same convention as employeeService.create(), minus Manager assignment,
+// which this file's format doesn't have columns for. HR can assign a
+// Manager afterwards via PUT /employees/:id. Rows with no email import as
+// business-data-only, same as before.
 
 function normaliseHeader(raw) {
   return String(raw || '').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -152,7 +165,7 @@ function parseEmployeeFile(filePath) {
  * Returns { errors: string[], data: object }.
  * data is only populated when errors is empty.
  */
-function validateRow(raw, existingCodes, seenCodes) {
+function validateRow(raw, existingCodes, seenCodes, existingEmails, seenEmails) {
   const errors = [];
   const data = {};
 
@@ -178,6 +191,20 @@ function validateRow(raw, existingCodes, seenCodes) {
     errors.push('Full name must be 2–100 characters.');
   } else {
     data.full_name = name;
+  }
+
+  // ── email (optional — populating it creates a linked login account) ────────
+  if (!isBlank(raw.email)) {
+    const email = String(raw.email).trim().toLowerCase();
+    if (!EMAIL_RE.test(email) || email.length > 100) {
+      errors.push('Email must be a valid email address (max 100 characters).');
+    } else if (existingEmails.has(email)) {
+      errors.push(`Email "${email}" is already registered.`);
+    } else if (seenEmails.has(email)) {
+      errors.push(`Email "${email}" is duplicated within this file.`);
+    } else {
+      data.email = email;
+    }
   }
 
   // ── designation (optional) ──────────────────────────────────────────────────
@@ -259,7 +286,7 @@ function validateRow(raw, existingCodes, seenCodes) {
  * @param {string} filePath - Absolute path to the saved upload file
  * @param {number} userId   - ID of the authenticated user performing the import
  * @param {number} companyId
- * @returns {Promise<{ total, imported, skipped, error_rows }>}
+ * @returns {Promise<{ total, imported, skipped, error_rows, credentials }>}
  */
 async function importEmployees(filePath, userId, companyId) {
   // 1. Parse Excel / CSV
@@ -272,36 +299,73 @@ async function importEmployees(filePath, userId, companyId) {
   }
 
   // 2. Batch-fetch existing codes (scoped to this company — per-company
-  // uniqueness) to avoid N+1 queries.
+  // uniqueness) and existing emails (global — see users_email_key) to avoid
+  // N+1 queries.
   const existingForCompany = await employeeRepository.findAllForImport(companyId);
   const existingCodes = new Set(existingForCompany.map((e) => e.employee_code.toUpperCase()));
+  const existingEmails = new Set(await userRepository.findAllEmails());
 
-  // 3. Validate all rows; track codes seen within this file to catch duplicates
+  // 3. Validate all rows; track codes/emails seen within this file to catch duplicates
   const seenCodes = new Set();
+  const seenEmails = new Set();
   const validRows = [];
   const errorRows = [];
 
   for (const raw of rawRows) {
-    const { errors, data } = validateRow(raw, existingCodes, seenCodes);
+    const { errors, data } = validateRow(raw, existingCodes, seenCodes, existingEmails, seenEmails);
     if (errors.length) {
       errorRows.push({ row: raw._rowNum, errors });
     } else {
       validRows.push(data);
       seenCodes.add(data.employee_code);
+      if (data.email) seenEmails.add(data.email);
     }
   }
 
-  // 4. Insert valid rows
+  // 4. Look up the "Employee" role once, only if at least one row needs a
+  // linked login account (same role every auto-created User gets — see
+  // employeeService.create()).
+  let employeeRole = null;
+  if (validRows.some((row) => row.email)) {
+    employeeRole = await Role.findOne({ where: { role_name: 'Employee' } });
+    if (!employeeRole) {
+      const err = new Error('The "Employee" role is not seeded.');
+      err.statusCode = 500;
+      throw err;
+    }
+  }
+
+  // 5. Insert valid rows — Employee always; a linked User too (role =
+  // Employee, temporary password) when the row carried an email, both in
+  // one transaction so a failed User insert doesn't leave an orphan Employee.
   let importedCount = 0;
   const dbErrors = [];
+  const credentials = [];
 
   for (const row of validRows) {
+    const { email, ...employeeFields } = row;
     try {
-      await employeeRepository.create({
-        ...row,
-        company_id: companyId,
-        created_by: userId,
-        updated_by: userId,
+      await sequelize.transaction(async (transaction) => {
+        const employee = await employeeRepository.create({
+          ...employeeFields,
+          company_id: companyId,
+          created_by: userId,
+          updated_by: userId,
+        }, { transaction });
+
+        if (email) {
+          await userRepository.create({
+            email,
+            password: DEFAULT_IMPORT_PASSWORD,
+            role_id: employeeRole.id,
+            employee_id: employee.id,
+            company_id: companyId,
+            status: 'active',
+            created_by: userId,
+            updated_by: userId,
+          }, { transaction });
+          credentials.push({ employee_code: employee.employee_code, email, temporaryPassword: DEFAULT_IMPORT_PASSWORD });
+        }
       });
       importedCount++;
     } catch (dbErr) {
@@ -316,6 +380,7 @@ async function importEmployees(filePath, userId, companyId) {
     imported: importedCount,
     skipped: errorRows.length,
     db_errors: dbErrors.length,
+    logins_created: credentials.length,
   });
 
   return {
@@ -323,6 +388,7 @@ async function importEmployees(filePath, userId, companyId) {
     imported: importedCount,
     skipped: errorRows.length + dbErrors.length,
     error_rows: [...errorRows, ...dbErrors],
+    credentials,
   };
 }
 

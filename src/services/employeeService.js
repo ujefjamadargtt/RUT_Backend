@@ -1,6 +1,5 @@
 'use strict';
 
-const crypto = require('crypto');
 const { sequelize, Role } = require('../models');
 const employeeRepository = require('../repositories/employeeRepository');
 const userRepository = require('../repositories/userRepository');
@@ -8,6 +7,7 @@ const managerEmployeeMappingRepository = require('../repositories/managerEmploye
 const roleHierarchyService = require('./roleHierarchyService');
 const { createAuditLog } = require('../middlewares/auditLog');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
+const { generateTemporaryPassword } = require('../utils/password');
 const logger = require('../utils/logger');
 
 /**
@@ -41,27 +41,6 @@ function badRequestError(message) {
   const err = new Error(message);
   err.statusCode = 400;
   return err;
-}
-
-/**
- * Generate a random password satisfying the app's complexity policy
- * (upper+lower+digit+special, 16 chars) — used when HR omits `password` at
- * Employee creation. Returned in the create response exactly once; never
- * persisted in plaintext (the User model's beforeCreate hook hashes it).
- * @returns {string}
- */
-function generateTemporaryPassword() {
-  const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
-  const lower = 'abcdefghijkmnopqrstuvwxyz';
-  const digits = '23456789';
-  const special = '!@#$%^&*';
-  const all = upper + lower + digits + special;
-
-  const pick = (chars) => chars[crypto.randomInt(chars.length)];
-  const required = [pick(upper), pick(lower), pick(digits), pick(special)];
-  const rest = Array.from({ length: 12 }, () => pick(all));
-
-  return [...required, ...rest].sort(() => crypto.randomInt(3) - 1).join('');
 }
 
 /**
