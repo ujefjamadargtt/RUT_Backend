@@ -608,6 +608,106 @@ async function getServicePOSummary(query, companyId) {
       acc.total_available_hours         += round2(row.available_hours);
       acc.total_monthly_billable_amount += round2(row.monthly_billable_amount);
       acc.total_invoiced_amount         += round2(row.invoiced_amount);
+      acc.total_unbilled_amount         += round2(row.unbilled_amount);
+      return acc;
+    },
+    {
+      total_po_value: 0,
+      total_expected_man_hours: 0,
+      total_hours_delivered: 0,
+      total_available_hours: 0,
+      total_monthly_billable_amount: 0,
+      total_invoiced_amount: 0,
+      total_unbilled_amount: 0,
+    }
+  );
+
+  return {
+    data: rows,
+    meta,
+    summary: {
+      total_po_value:                     round2(pageTotals.total_po_value),
+      total_expected_man_hours:           round2(pageTotals.total_expected_man_hours),
+      total_hours_delivered_before_month: round2(pageTotals.total_hours_delivered),
+      total_available_hours:              round2(pageTotals.total_available_hours),
+      total_monthly_billable_amount:      round2(pageTotals.total_monthly_billable_amount),
+      total_invoiced_amount:              round2(pageTotals.total_invoiced_amount),
+      total_unbilled_amount:              round2(pageTotals.total_unbilled_amount),
+    },
+  };
+}
+
+/**
+ * Invoice PO Summary Report
+ * Requires month and year. Same shape as getServicePOSummary, but
+ * invoiced_amount/billed_amount/unbilled_amount are sourced from the
+ * Service PO Monthly Budget master (service_po_monthly_budgets) instead of
+ * being computed from timesheets/monthly_costs. This is a separate report
+ * from Service PO Summary — its billing logic does not affect or share
+ * state with getServicePOSummary.
+ *
+ * @param {object} query - req.query
+ * @returns {Promise<{ data: object[], meta: object, summary: object }>}
+ */
+async function getInvoicePOSummary(query, companyId) {
+  const { page, limit, offset } = getPaginationParams(query);
+  const filters = parseCommonFilters(query);
+
+  if (!filters.month || !filters.year) {
+    const err = new Error('month and year query parameters are required for this report.');
+    err.statusCode = 422;
+    throw err;
+  }
+  if (filters.month < 1 || filters.month > 12) {
+    const err = new Error('month must be between 1 and 12.');
+    err.statusCode = 422;
+    throw err;
+  }
+
+  const isBillable = query.is_billable !== undefined
+    ? query.is_billable === 'true' || query.is_billable === true
+    : undefined;
+
+  const clientId = query.clientId ? parseInt(query.clientId, 10) : undefined;
+  const serviceCategoryId = query.serviceCategoryId ? parseInt(query.serviceCategoryId, 10) : undefined;
+  const serviceTypeId = query.serviceTypeId ? parseInt(query.serviceTypeId, 10) : undefined;
+  const poId = query.poId ? parseInt(query.poId, 10) : undefined;
+
+  logger.info('Report: getInvoicePOSummary', { filters, page, limit });
+
+  const { rows, count } = await reportRepo.getInvoicePOSummary({
+    month:      filters.month,
+    year:       filters.year,
+    status:     filters.status,
+    clientId,
+    isBillable,
+    serviceCategoryId,
+    serviceTypeId,
+    poId,
+    startDate:  filters.startDate,
+    endDate:    filters.endDate,
+    search:     filters.search,
+    sortBy:     query.sortBy,
+    sortOrder:  filters.sortOrder,
+    limit,
+    offset,
+    hoursSource: filters.hoursSource,
+    roleId: filters.roleId,
+    companyId,
+  });
+
+  const meta = getPaginationMeta(count, page, limit);
+
+  const round2 = (n) => Math.round(parseFloat(n || 0) * 100) / 100;
+
+  const pageTotals = rows.reduce(
+    (acc, row) => {
+      acc.total_po_value                += round2(row.po_value);
+      acc.total_expected_man_hours      += round2(row.expected_man_hours);
+      acc.total_hours_delivered         += round2(row.hours_delivered_before_month);
+      acc.total_available_hours         += round2(row.available_hours);
+      acc.total_monthly_billable_amount += round2(row.monthly_billable_amount);
+      acc.total_invoiced_amount         += round2(row.invoiced_amount);
       acc.total_billed_amount           += round2(row.billed_amount);
       acc.total_unbilled_amount         += round2(row.unbilled_amount);
       return acc;
@@ -954,6 +1054,7 @@ module.exports = {
   getOperationalCostBreakdown,
   getEmployeeUtilizationSummary,
   getServicePOSummary,
+  getInvoicePOSummary,
   getResourceUtilization,
   getMonthlyResourceUtilization,
   getResourseProjectUtilizationReport,

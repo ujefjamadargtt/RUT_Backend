@@ -31,53 +31,63 @@ GRANT ALL PRIVILEGES ON DATABASE rut_portal TO rut_user;
 
 ---
 
-### 2. Apply the schema
+### 2. Configure `.env` and start the server
+
+No manual `psql -f ...` step is required. Copy `.env.example` (or write a new
+`.env`, see [Environment Variables](#environment-variables) below) pointing
+at the database you just created, then run:
 
 ```bash
-psql -U rut_user -d rut_portal -f database/schema.sql
+npm start
 ```
 
-This creates all 15 tables, indexes, foreign keys, and `updated_at` triggers.
+On a completely empty database, the automatic migration runner
+(`src/database/migrationRunner.js`, wired into `server.js`) detects there is
+no `roles` table yet, applies `database/schema.sql` (the full baseline
+schema — tables, indexes, foreign keys, `updated_at` triggers) itself, then
+applies every dated file in `database/migrations/*.sql` in order. All
+required master/config data (roles, forms, role-form mappings, RBAC
+capabilities) is created by those migrations — no separate seed step is
+needed for the app to function. See
+[Automatic Migrations](#automatic-migrations) below for the full behavior
+contract.
 
 ---
 
-### 3. Regenerate the admin password hash
+### 3. Create your first login
 
-Before seeding, generate a fresh bcrypt hash for `Admin@123`
-(or your chosen admin password) inside the project:
-
-```js
-// scripts/hash-password.js
-const bcrypt = require('bcrypt');
-bcrypt.hash('Admin@123', 12).then(hash => console.log(hash));
-```
+A fresh database has zero users. Provision the initial platform admin with
+the dedicated script (safe to re-run — it's a no-op if a platform admin
+already exists):
 
 ```bash
-node scripts/hash-password.js
-# copy the printed hash
+node scripts/seedPlatformAdmin.js <email> <password>
 ```
 
-Open `database/seeds.sql` and replace the placeholder hash on the line:
-
-```sql
-'$2b$12$K8HJZ3xQ2vL9mN4pR7tWOeYsF1dCgBiA0uE6jM5nP3qV8wX2yZ4aK',
-```
-
-with the hash you just generated.
+This is the only step that still requires running a command by hand — and
+it's an application-provided script, not raw SQL. Log in with that email to
+start creating companies, roles, and everything else through the API.
 
 ---
 
-### 4. Apply the seed data
+### 4. (Optional) Load demo/dummy data
+
+`database/seeds.sql` and `database/rbac_seed.sql` insert sample clients,
+employees, timesheets, and legacy-role RBAC rows purely for local
+development/demo purposes — they are **not** required and are **not** run
+automatically. Apply them by hand only if you want that sample data:
 
 ```bash
 psql -U rut_user -d rut_portal -f database/seeds.sql
+psql -U rut_user -d rut_portal -f database/rbac_seed.sql
 ```
 
-This inserts:
-- 5 roles: HR, Finance, Division Head, Project Manager, Management
-- 4 service types: Project, Service Pack, Resource Outsourcing, Managed Services
-- 1 admin employee (`EMP-001 / System Administrator`)
-- 1 admin user (`admin@rutportal.com` / `Admin@123`, role: Management)
+`seeds.sql`'s admin user (`admin@rutportal.com`) ships with a placeholder
+bcrypt hash — regenerate it before relying on that login:
+
+```bash
+node -e "require('bcrypt').hash('Admin@123', 12).then(console.log)"
+```
 
 ---
 
@@ -176,20 +186,48 @@ or, when there's nothing to do:
 [migrations] No pending migrations found.
 ```
 
-### First run on an existing (pre-migration-runner) database
+### First run: three possible starting points
 
-The very first time this runs against a database that already has all of
-today's schema (i.e. every migration file currently in the repo was already
-applied by hand, as was the case throughout this project's early
-development), it **baselines** instead of re-executing: every migration
-file present at that moment is recorded as already-applied without running
-its SQL, since the schema already reflects them. You'll see:
-```
-[migrations] First run detected — baselining 16 existing migration(s) as already applied.
-```
-Only migration files added **after** that point are ever actually executed.
-This avoids re-running old, non-idempotent `ALTER TABLE`/`INSERT` statements
-against a database that already has that change.
+The very first time the runner sees a database (its `schema_migrations`
+tracking table doesn't exist yet), it distinguishes three cases before
+deciding what to do:
+
+1. **A completely empty database** — no `roles` table, meaning
+   `database/schema.sql` has never been applied either. The runner applies
+   `database/schema.sql` itself first (see `applySchemaBaseline()` in
+   `src/database/migrationRunner.js`), then falls through to case 2 and runs
+   every dated migration file for real. You'll see:
+   ```
+   [migrations] Empty database detected — applying database/schema.sql baseline.
+   [migrations] Brand-new database detected — applying all NN migration(s) for real.
+   ```
+   This is the expected path for any new environment — no manual SQL of any
+   kind is required first.
+2. **A brand-new database that already has `database/schema.sql`'s tables**
+   (applied by hand under the old flow, or just bootstrapped by case 1
+   above) **but no `companies` table** — every dated migration file runs for
+   real, in order, since schema.sql only ever defined the original baseline
+   tables and everything since (companies, service categories, projects,
+   entities, the RBAC redesign, etc.) lives exclusively in
+   `database/migrations/*.sql`.
+3. **An existing database that already has all of today's schema** (i.e.
+   every migration file currently in the repo was already applied by hand,
+   as was the case throughout this project's early development, discriminated
+   by the `companies` table already existing) — it **baselines** instead of
+   re-executing: every migration file present at that moment is recorded as
+   already-applied without running its SQL, since the schema already
+   reflects them. You'll see:
+   ```
+   [migrations] First run detected — baselining 16 existing migration(s) as already applied.
+   ```
+   Only migration files added **after** that point are ever actually
+   executed. This avoids re-running old, non-idempotent `ALTER TABLE`/
+   `INSERT` statements against a database that already has that change.
+
+Case 3 is what keeps this change safe for every already-deployed
+environment: nothing about their startup behavior changes, since their
+`schema_migrations` table already exists (or their `companies` table already
+does) by the time they upgrade to this runner.
 
 ### Adding a new migration
 
@@ -229,15 +267,30 @@ psql -U rut_user -d rut_portal -c "
   CREATE SCHEMA public;
   GRANT ALL ON SCHEMA public TO rut_user;
 "
-psql -U rut_user -d rut_portal -f database/schema.sql
-psql -U rut_user -d rut_portal -f database/seeds.sql
 ```
+
+Then just start the server again (`npm start` / `node server.js`) — the
+migration runner detects the now-empty database and rebuilds the full
+schema automatically (see [Automatic Migrations](#automatic-migrations)
+above); no `psql -f database/schema.sql` step is needed. Follow with
+`node scripts/seedPlatformAdmin.js <email> <password>` for a login, and
+optionally `psql -f database/seeds.sql` / `psql -f database/rbac_seed.sql`
+for demo data.
 
 > Never run this against a production database.
 
 ---
 
 ## Table Overview
+
+This lists the original baseline tables defined directly in
+`database/schema.sql`. Every table added since (multi-tenancy: `companies`,
+`entities`; RBAC redesign: `role_capabilities`, `role_migration_log`;
+`projects`, `service_categories`, `employee_work_logs`,
+`service_po_hierarchy`, `service_po_monthly_budgets`, and others) is defined
+in `database/migrations/*.sql` instead — see that directory for the
+authoritative, up-to-date full schema, or query `schema_migrations` /
+`information_schema.tables` on a running database.
 
 | Table | Description |
 |-------|-------------|
@@ -256,6 +309,10 @@ psql -U rut_user -d rut_portal -f database/seeds.sql
 | `timesheet_import_history` | Bulk import job records |
 | `timesheet_import_errors` | Row-level errors from bulk imports |
 | `notifications` | In-app notifications per user |
+| `user_roles` | Legacy many-to-many user↔role table (dropped by `20260840_collapse_user_roles.sql` — `users.role_id` is now the sole source of truth) |
+| `form_master` | Sidebar/screen registry, keyed by (module, form) |
+| `role_form_mapping` | Per-role form visibility (soft on/off via `status`) |
+| `ai_insight_jobs` / `ai_insights` | AI Insights module configuration and generated insights |
 
 ---
 

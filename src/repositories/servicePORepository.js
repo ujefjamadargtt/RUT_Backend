@@ -185,10 +185,13 @@ const findByCode = async (code, companyId) => {
  * Insert a new Service PO record.
  *
  * @param {object} data
+ * @param {object} [options] - Sequelize options, e.g. { transaction } — passed
+ *   straight through so a caller (servicePOImportService.js) can run this
+ *   inside its own managed transaction.
  * @returns {Promise<ServicePO>}
  */
-const create = async (data) => {
-  return ServicePO.create(data);
+const create = async (data, options) => {
+  return ServicePO.create(data, options);
 };
 
 /**

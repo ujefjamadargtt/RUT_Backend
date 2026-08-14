@@ -478,11 +478,6 @@ router.get(
  *       available_hours = expected_man_hours - hours_delivered_before_month;
  *       monthly_billable_amount = sum(hours_logged_this_month × employee_hourly_rate) for billable POs only.
  *       hourly_rate = total_cost / 160 from monthly_costs.
- *       invoiced_amount and billed_amount are read from the Service PO Monthly
- *       Budget master (service_po_monthly_budgets, matched on service_po_id +
- *       month/year — see /service-po-monthly-budgets) instead of being
- *       computed; missing budget data for a PO/month defaults both to 0.
- *       unbilled_amount = invoiced_amount - billed_amount.
  *     tags: [Reports]
  *     security:
  *       - bearerAuth: []
@@ -565,8 +560,7 @@ router.get(
  *           service_po_id, service_po_code, service_po_name, service_description,
  *           start_date, end_date, status, is_billable, invoice_frequency, po_value,
  *           account_manager, expected_man_hours, client_id, client_name, service_type,
- *           hours_delivered_before_month, available_hours, monthly_billable_amount,
- *           invoiced_amount, billed_amount, unbilled_amount.
+ *           hours_delivered_before_month, available_hours, monthly_billable_amount.
  *           Summary contains page-level totals for all numeric columns.
  *       401:
  *         description: Unauthorized
@@ -579,6 +573,125 @@ router.get(
   '/service-po-summary',
   authenticate,
   reportController.getServicePOSummary
+);
+
+/**
+ * @swagger
+ * /reports/invoice-po-summary:
+ *   get:
+ *     summary: Invoice PO summary with hours delivered, monthly billable amount, and monthly-budget billing
+ *     description: >
+ *       Replica of /reports/service-po-summary (same filters, pagination, sorting, and
+ *       PO/client/project structure). One row per Service PO. For the selected month/year:
+ *       hours_delivered_before_month = sum of timesheet hours logged before the 1st of the month;
+ *       available_hours = expected_man_hours - hours_delivered_before_month;
+ *       monthly_billable_amount = sum(hours_logged_this_month × employee_hourly_rate) for billable POs only.
+ *       hourly_rate = total_cost / 160 from monthly_costs.
+ *       invoiced_amount and billed_amount are read from the Service PO Monthly
+ *       Budget master (service_po_monthly_budgets, matched on service_po_id +
+ *       month/year — see /service-po-monthly-budgets) instead of being
+ *       computed from sp.invoice_amount or timesheets/monthly_costs; missing
+ *       budget data for a PO/month defaults both to 0.
+ *       unbilled_amount = invoiced_amount - billed_amount.
+ *       This is a separate report from Service PO Summary — it does not modify
+ *       or affect that report's behavior.
+ *     tags: [Reports]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: true
+ *         schema: { type: integer, minimum: 1, maximum: 12 }
+ *         description: Month number (1-12)
+ *       - in: query
+ *         name: year
+ *         required: true
+ *         schema: { type: integer }
+ *         description: Four-digit year
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, enum: [in-progress, completed, on-hold, pending, cancelled, closed, all] }
+ *         description: Filter by PO status
+ *       - in: query
+ *         name: clientId
+ *         schema: { type: integer }
+ *         description: Filter by client
+ *       - in: query
+ *         name: is_billable
+ *         schema: { type: boolean }
+ *         description: Filter by billable flag
+ *       - in: query
+ *         name: serviceCategoryId
+ *         schema: { type: integer }
+ *         description: Filter by service category
+ *       - in: query
+ *         name: serviceTypeId
+ *         schema: { type: integer }
+ *         description: Filter by service type
+ *       - in: query
+ *         name: poId
+ *         schema: { type: integer }
+ *         description: Filter by a specific Service PO (project)
+ *       - in: query
+ *         name: startDate
+ *         schema: { type: string, format: date }
+ *         description: Only include POs whose start_date is on or after this date (YYYY-MM-DD)
+ *       - in: query
+ *         name: endDate
+ *         schema: { type: string, format: date }
+ *         description: Only include POs whose end_date is on or before this date (YYYY-MM-DD)
+ *       - in: query
+ *         name: search
+ *         schema: { type: string }
+ *         description: Search by client name, PO name or PO code
+ *       - in: query
+ *         name: sortBy
+ *         schema:
+ *           type: string
+ *           enum:
+ *             - c.client_name
+ *             - sp.service_po_name
+ *             - sp.start_date
+ *             - sp.end_date
+ *             - sp.po_value
+ *             - sp.expected_man_hours
+ *             - hours_delivered_before_month
+ *             - available_hours
+ *             - monthly_billable_amount
+ *             - sp.status
+ *             - sc.name
+ *       - in: query
+ *         name: sortOrder
+ *         schema: { type: string, enum: [ASC, DESC] }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, minimum: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, minimum: 1, maximum: 200 }
+ *     responses:
+ *       200:
+ *         description: >
+ *           Paginated Invoice PO summary. Each record includes:
+ *           service_po_id, service_po_code, service_po_name, service_description,
+ *           start_date, end_date, status, is_billable, invoice_frequency, po_value,
+ *           account_manager, expected_man_hours, client_id, client_name, service_type,
+ *           hours_delivered_before_month, available_hours, monthly_billable_amount,
+ *           invoiced_amount, billed_amount, unbilled_amount.
+ *           Summary contains page-level totals for all numeric columns, including
+ *           total_invoiced_amount, total_billed_amount, total_unbilled_amount.
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ *       422:
+ *         description: Validation error – month and year are required
+ */
+router.get(
+  '/invoice-po-summary',
+  authenticate,
+  reportController.getInvoicePOSummary
 );
 
 /**

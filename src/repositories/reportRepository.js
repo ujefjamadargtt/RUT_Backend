@@ -1051,13 +1051,6 @@ async function getEmployeeUtilizationSummary(filters) {
  * before the selected month, available hours, and monthly billable amount
  * (hours logged this month × employee hourly rate) for billable POs.
  *
- * invoiced_amount and billed_amount are read from the Service PO Monthly
- * Budget master (service_po_monthly_budgets, matched on service_po_id +
- * the report's month/year) rather than computed from sp.invoice_amount or
- * timesheets/monthly_costs — see database/migrations/
- * 20260853_create_service_po_monthly_budgets.sql. Missing budget data for a
- * PO/month defaults both to 0. unbilled_amount = invoiced_amount - billed_amount.
- *
  * @param {object} filters
  * @param {number} filters.month           - required
  * @param {number} filters.year            - required
@@ -1193,11 +1186,237 @@ async function getServicePOSummary(filters) {
           THEN ROUND(COALESCE(curr.billable_amount, 0)::numeric, 2)
         ELSE NULL
       END                                                                AS monthly_billable_amount,
-      -- Invoice Amount / Billed Amount now come from the Service PO Monthly
-      -- Budget master (spmb) for the report's selected month/year, per
-      -- database/migrations/20260853_create_service_po_monthly_budgets.sql —
-      -- no longer sp.invoice_amount or a timesheet/monthly_costs
-      -- calculation. Missing budget data for a PO/month defaults to 0.
+      CASE
+        WHEN sp.is_billable = true
+          THEN ROUND(COALESCE(sp.invoice_amount, 0)::numeric, 2)
+        ELSE NULL
+      END                                                                AS invoiced_amount,
+      CASE
+        WHEN sp.is_billable = true
+          THEN ROUND(
+            (COALESCE(prev_bill.prev_billable_amount, 0) + COALESCE(curr.billable_amount, 0)
+            - COALESCE(sp.invoice_amount, 0))::numeric, 2)
+        ELSE NULL
+      END                                                                AS unbilled_amount
+    FROM service_pos sp
+    INNER JOIN clients c        ON c.id  = sp.client_id
+    INNER JOIN service_types st ON st.id = sp.service_type_id
+    INNER JOIN service_categories sc ON sc.id = st.service_category_id
+    LEFT JOIN (
+      SELECT service_po_id, SUM(${hoursCol}) AS hours_delivered
+      FROM timesheets t
+      WHERE timesheet_date < MAKE_DATE(:yearNum, :monthNum, 1)
+        ${publishGuard}
+      GROUP BY service_po_id
+    ) prev ON prev.service_po_id = sp.id
+    LEFT JOIN (
+      SELECT
+        t.service_po_id,
+        SUM(${hoursCol} * COALESCE(mc.total_cost, 0)) AS prev_billable_amount
+      FROM timesheets t
+      LEFT JOIN monthly_costs mc
+             ON mc.employee_id = t.employee_id
+            AND mc.month_year  = TO_CHAR(t.timesheet_date, 'YYYY-MM')
+      WHERE t.timesheet_date < MAKE_DATE(:yearNum, :monthNum, 1)
+        ${publishGuard}
+      GROUP BY t.service_po_id
+    ) prev_bill ON prev_bill.service_po_id = sp.id
+    INNER JOIN (
+      SELECT
+        t.service_po_id,
+        SUM(${hoursCol} * COALESCE(mc.total_cost, 0)) AS billable_amount
+      FROM timesheets t
+      LEFT JOIN monthly_costs mc
+             ON mc.employee_id = t.employee_id
+            AND mc.month_year  = :monthYear
+      WHERE EXTRACT(MONTH FROM t.timesheet_date) = :monthNum
+        AND EXTRACT(YEAR  FROM t.timesheet_date) = :yearNum
+        ${publishGuard}
+      GROUP BY t.service_po_id
+    ) curr ON curr.service_po_id = sp.id
+    ${whereClause}
+    ORDER BY ${safeSort} ${safeOrder}, sp.service_po_name ASC
+    LIMIT :limit OFFSET :offset
+  `;
+
+  const countQuery = `
+    SELECT COUNT(*) AS total
+    FROM service_pos sp
+    INNER JOIN clients c        ON c.id  = sp.client_id
+    INNER JOIN service_types st ON st.id = sp.service_type_id
+    INNER JOIN service_categories sc ON sc.id = st.service_category_id
+    INNER JOIN (
+      SELECT DISTINCT service_po_id
+      FROM timesheets t
+      WHERE EXTRACT(MONTH FROM timesheet_date) = :monthNum
+        AND EXTRACT(YEAR  FROM timesheet_date) = :yearNum
+        ${publishGuard}
+    ) curr ON curr.service_po_id = sp.id
+    ${whereClause}
+  `;
+
+  const [rows, countResult] = await Promise.all([
+    sequelize.query(dataQuery, { replacements, type: QueryTypes.SELECT }),
+    sequelize.query(countQuery, { replacements, type: QueryTypes.SELECT }),
+  ]);
+
+  return { rows, count: parseInt(countResult[0].total, 10) };
+}
+
+/**
+ * Invoice PO Summary Report
+ *
+ * Same shape as getServicePOSummary (client info, PO details, hours
+ * delivered before the selected month, available hours, monthly billable
+ * amount), but invoiced_amount, billed_amount and unbilled_amount are read
+ * from the Service PO Monthly Budget master (service_po_monthly_budgets,
+ * matched on service_po_id + the report's month/year) instead of being
+ * computed from sp.invoice_amount / timesheets / monthly_costs — see
+ * database/migrations/20260853_create_service_po_monthly_budgets.sql.
+ * Missing budget data for a PO/month defaults invoiced_amount and
+ * billed_amount to 0. unbilled_amount = invoiced_amount - billed_amount.
+ *
+ * This report does not modify or share query logic with
+ * getServicePOSummary's billing calculation — it is a separate, isolated
+ * implementation.
+ *
+ * @param {object} filters
+ * @param {number} filters.month           - required
+ * @param {number} filters.year            - required
+ * @param {string} [filters.status]        - PO status filter (active|closed|all)
+ * @param {number} [filters.clientId]
+ * @param {boolean} [filters.isBillable]
+ * @param {number} [filters.serviceCategoryId] - Service category filter
+ * @param {number} [filters.serviceTypeId]
+ * @param {number} [filters.poId]          - Filter to a specific Service PO
+ * @param {string} [filters.search]        - client_name or service_po_name
+ * @param {string} [filters.sortBy]
+ * @param {string} [filters.sortOrder]
+ * @param {number} filters.limit
+ * @param {number} filters.offset
+ * @returns {{ rows: object[], count: number }}
+ */
+async function getInvoicePOSummary(filters) {
+  const {
+    month,
+    year,
+    status,
+    clientId,
+    isBillable,
+    serviceCategoryId,
+    serviceTypeId,
+    poId,
+    startDate,
+    endDate,
+    search,
+    sortBy = 'c.client_name',
+    sortOrder = 'ASC',
+    limit,
+    offset,
+    hoursSource,
+    roleId,
+  } = filters;
+  // hoursSource = 'O' -> original hours_logged. Anything else/default
+  // (including no roleId, or roleId != 5) -> modified_hours. roleId plays no
+  // part in this selection — only hoursSource does.
+  const hoursCol = (hoursSource === 'O')
+    ? 't.hours_logged'
+    : 'COALESCE(t.modified_hours, t.hours_logged)';
+
+  const allowedSortColumns = [
+    'c.client_name', 'sp.service_po_name', 'sp.start_date', 'sp.end_date',
+    'sp.po_value', 'sp.expected_man_hours', 'hours_delivered_before_month',
+    'available_hours', 'monthly_billable_amount', 'sp.status', 'sc.name',
+  ];
+  const safeSort = allowedSortColumns.includes(sortBy) ? sortBy : 'c.client_name';
+  const safeOrder = sortOrder.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+
+  const monthNum = parseInt(month, 10);
+  const yearNum = parseInt(year, 10);
+  const monthYear = formatMonthYear(month, year);
+
+  const replacements = { monthNum, yearNum, monthYear, limit, offset, companyId: filters.companyId };
+  const conditions = ['sp.company_id = :companyId'];
+
+  if (status && status !== 'all') {
+    conditions.push('sp.status = :status');
+    replacements.status = status;
+  }
+  if (clientId) {
+    conditions.push('sp.client_id = :clientId');
+    replacements.clientId = clientId;
+  }
+  if (isBillable !== undefined) {
+    conditions.push('sp.is_billable = :isBillable');
+    replacements.isBillable = isBillable;
+  }
+  if (serviceTypeId) {
+    conditions.push('st.id = :serviceTypeId');
+    replacements.serviceTypeId = serviceTypeId;
+  }
+  if (serviceCategoryId) {
+    conditions.push('sc.id = :serviceCategoryId');
+    replacements.serviceCategoryId = serviceCategoryId;
+  }
+  if (poId) {
+    conditions.push('sp.id = :poId');
+    replacements.poId = poId;
+  }
+  if (startDate) {
+    conditions.push('sp.start_date >= :startDate');
+    replacements.startDate = startDate;
+  }
+  if (endDate) {
+    conditions.push('sp.end_date <= :endDate');
+    replacements.endDate = endDate;
+  }
+  if (search) {
+    conditions.push('(c.client_name ILIKE :search OR sp.service_po_name ILIKE :search OR sp.service_po_code ILIKE :search)');
+    replacements.search = `%${search}%`;
+  }
+
+  const whereClause = `WHERE ${conditions.join(' AND ')}`;
+  // Role ID 5 only: exclude unpublished timesheet rows from every subquery
+  // below that reads timesheets, so a window spanning several months still
+  // reflects whichever of those months ARE published.
+  const publishGuard = Number(roleId) === 5
+    ? `AND EXISTS (
+         SELECT 1 FROM timesheet_import_history h
+         WHERE h.id = t.timesheet_import_id AND h.is_publish = true
+       )`
+    : '';
+
+  const dataQuery = `
+    SELECT
+      sp.id                                                              AS service_po_id,
+      sp.service_po_code,
+      sp.service_po_name,
+      sp.service_description,
+      sp.start_date,
+      sp.end_date,
+      sp.status,
+      sp.is_billable,
+      sp.invoice_frequency,
+      sp.po_value,
+      sp.account_manager,
+      sp.expected_man_hours,
+      c.id                                                               AS client_id,
+      c.client_name,
+      sc.id                                                              AS service_category_id,
+      sc.name                                                            AS service_category_name,
+      st.id                                                              AS service_type_id,
+      st.service_type_name                                               AS service_type,
+      COALESCE(prev.hours_delivered, 0)                                  AS hours_delivered_before_month,
+      COALESCE(sp.expected_man_hours, 0) - COALESCE(prev.hours_delivered, 0) AS available_hours,
+      CASE
+        WHEN sp.is_billable = true
+          THEN ROUND(COALESCE(curr.billable_amount, 0)::numeric, 2)
+        ELSE NULL
+      END                                                                AS monthly_billable_amount,
+      -- Invoice/Billed Amount come from the Service PO Monthly Budget
+      -- master (spmb) for the report's selected month/year, per
+      -- database/migrations/20260853_create_service_po_monthly_budgets.sql.
+      -- Missing budget data for a PO/month defaults to 0.
       CASE
         WHEN sp.is_billable = true
           THEN ROUND(COALESCE(spmb.invoice_amount, 0)::numeric, 2)
@@ -1918,6 +2137,7 @@ module.exports = {
   getOperationalCostBreakdown,
   getEmployeeUtilizationSummary,
   getServicePOSummary,
+  getInvoicePOSummary,
   getResourceUtilization,
   getMonthlyResourceUtilization,
   getResourseProjectUtilizationReport,

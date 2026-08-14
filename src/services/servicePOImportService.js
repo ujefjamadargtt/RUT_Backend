@@ -1,11 +1,18 @@
 'use strict';
 
 const xlsx = require('xlsx');
-const { Client, ServiceType, ServiceCategory, ServicePO } = require('../models');
+const { sequelize, Client, ServiceType, ServiceCategory, ServicePO, Project, Employee } = require('../models');
 const servicePORepository = require('../repositories/servicePORepository');
+const servicePOHierarchyRepository = require('../repositories/servicePOHierarchyRepository');
 const { generatePOCode } = require('../helpers/codeGenerator');
 const { createServicePOSchema } = require('../validations/servicePOValidation');
 const logger = require('../utils/logger');
+
+// Sentinel stored in ctx.employeeByName when two employees in the same
+// company share the exact same full_name — resolution must reject the name
+// as ambiguous rather than silently picking whichever one happened to be
+// read last, per "do not silently map to a different employee".
+const AMBIGUOUS_EMPLOYEE = Symbol('AMBIGUOUS_EMPLOYEE');
 
 // Flexible column-header → field mapping (matched after normalising to lowercase + collapsed spaces)
 // NOTE: Service PO Code is intentionally NOT mapped here — it is always auto-generated
@@ -25,6 +32,13 @@ const HEADER_MAP = {
   'client': 'client_name',
   'customer': 'client_name',
   'client_name': 'client_name',
+
+  'project code': 'project_code',
+  'project_code': 'project_code',
+
+  'project name': 'project_name',
+  'project': 'project_name',
+  'project_name': 'project_name',
 
   'service type': 'service_type_name',
   'service type name': 'service_type_name',
@@ -48,11 +62,12 @@ const HEADER_MAP = {
   'expected_man_hours': 'expected_man_hours',
 
   // NOTE: Is Billable is intentionally NOT mapped here — it is always derived
-  // from the selected Service Type's category (see validateRow()), never read
+  // from the selected Service Type's category (see resolveRowFields()), never read
   // from the sheet, so any such column is ignored.
 
-  'account manager': 'account_manager',
-  'account_manager': 'account_manager',
+  'delivery head manager': 'delivery_head_manager_name',
+  'delivery_head_manager': 'delivery_head_manager_name',
+  'delivery head': 'delivery_head_manager_name',
 
   'service description': 'service_description',
   'description': 'service_description',
@@ -65,15 +80,34 @@ const HEADER_MAP = {
   'invoice_amount': 'invoice_amount',
 
   'status': 'status',
+
+  'hierarchy parent': 'hierarchy_parent',
+  'hierarchy_parent': 'hierarchy_parent',
+  'parent': 'hierarchy_parent',
+
+  'hierarchy child': 'hierarchy_child',
+  'hierarchy_child': 'hierarchy_child',
+  'child': 'hierarchy_child',
 };
 
-// client_id / service_type_id are resolved by DB lookup (with their own not-found/inactive
-// messages) before this schema runs, so they are relaxed to optional here — Joi is only
-// responsible for format/range/enum/required rules on the remaining fields, reusing the
-// exact same rules the single-record create API enforces.
-const rowSchema = createServicePOSchema.fork(['client_id', 'service_type_id'], (s) => s.optional());
+// client_id / service_type_id / project_id / delivery_head_employee_id are all resolved by
+// DB lookup (each with its own required/not-found/inactive/relationship messages, mirroring
+// assertValidDeliveryHead()'s own checks for the last one — see resolveDeliveryHead()) before
+// this schema runs, so they're relaxed to optional here — Joi is only responsible for
+// format/range/enum/required rules on the remaining fields, reusing the exact same rules the
+// single-record create API enforces.
+const rowSchema = createServicePOSchema.fork(
+  ['client_id', 'service_type_id', 'project_id', 'delivery_head_employee_id'],
+  (s) => s.optional()
+);
 
 function normaliseHeader(raw) {
+  return String(raw || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+// Same normalisation, for grouping/matching cell VALUES (Service PO Name, hierarchy
+// node names, etc.) rather than headers.
+function normaliseKey(raw) {
   return String(raw || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
@@ -169,7 +203,7 @@ function parseServicePOFile(filePath) {
   if (headerRowIdx === -1) {
     const err = new Error(
       'Could not detect a valid header row. ' +
-      'Expected columns like "Service PO Name", "Client Code"/"Client Name", "Service Type", "Start Date", "End Date", etc.'
+      'Expected columns like "Service PO Name", "Client Code"/"Client Name", "Project Name", "Service Type", "Start Date", "End Date", etc.'
     );
     err.statusCode = 422;
     throw err;
@@ -204,63 +238,172 @@ function buildRowData(raw) {
   return fields;
 }
 
-/**
- * Validate a single raw row.
- * - Resolves Client (by code or name) and Service Type (by name) against the DB.
- * - Derives is_billable from the resolved Service Type's category via
- *   service_categories.report_bucket_key (= 'billable' → true, anything else
- *   → false) — never from the sheet, never from a hardcoded category name,
- *   and never from the schema default.
- * - Normalises messy Excel cell values (currency-formatted numbers, Excel serial
- *   dates, DD/MM/YYYY dates) into clean typed values.
- * - Delegates all required/length/range/enum/pattern rules to the same Joi
- *   schema the single-record create API uses, so import and manual-create can
- *   never silently drift apart.
- *
- * @returns {{ errors: string[], data: object }} data is only populated when errors is empty.
- */
-function validateRow(raw, ctx) {
-  const errors = [];
-  const candidate = {};
-  // Fields our own parsing already flagged as invalid — Joi's messages for these
-  // (e.g. "X is required" for a field we deliberately left unset, or a ref-based
-  // cross-field error caused by an already-reported bad date) would just be
-  // confusing duplicates, so they're filtered out below.
-  const invalidFields = new Set();
+// Columns that identify/define the Service PO itself (as opposed to columns
+// that only ever carry hierarchy data). A row that has ANY of these filled in
+// is attempting to (re)state the Service PO's own definition — used both to
+// find "the" defining row of a group and to detect a later row trying to
+// redefine it differently (see resolveRowFields() + processGroup()).
+const RELATIONSHIP_FIELDS = ['client_code', 'client_name', 'project_code', 'project_name', 'service_type_name', 'delivery_head_manager_name'];
 
-  // ── client (required) — resolved by Client Code or Client Name ─────────────
+function hasAnyValue(raw, fields) {
+  return fields.some((f) => !isBlank(raw[f]));
+}
+
+/**
+ * Resolve Client (by code or name) for one row against pre-fetched company
+ * reference data. Pushes a message onto `errors` and returns null on failure
+ * — never throws, so the caller can keep collecting every error in the row.
+ */
+function resolveClient(raw, ctx, errors) {
   const clientCodeRaw = String(raw.client_code || '').trim();
   const clientNameRaw = String(raw.client_name || '').trim();
   if (!clientCodeRaw && !clientNameRaw) {
     errors.push('Client Code or Client Name is required.');
-  } else {
-    const client = clientCodeRaw
-      ? ctx.clientByCode.get(clientCodeRaw.toLowerCase())
-      : ctx.clientByName.get(clientNameRaw.toLowerCase());
-    if (!client) {
-      errors.push(`Client "${clientCodeRaw || clientNameRaw}" not found.`);
-    } else if (client.status !== 'active') {
-      errors.push(`Client "${client.client_name}" is inactive.`);
-    } else {
-      candidate.client_id = client.id;
-    }
+    return null;
+  }
+  const client = clientCodeRaw
+    ? ctx.clientByCode.get(clientCodeRaw.toLowerCase())
+    : ctx.clientByName.get(clientNameRaw.toLowerCase());
+  if (!client) {
+    errors.push(`Client "${clientCodeRaw || clientNameRaw}" not found.`);
+    return null;
+  }
+  if (client.status !== 'active') {
+    errors.push(`Client "${client.client_name}" is inactive.`);
+    return null;
+  }
+  return client;
+}
+
+/**
+ * Resolve Project (by code or name) for one row — MUST belong to the row's
+ * already-resolved Client (Client -> Project -> Service PO is the critical
+ * relationship this whole feature enforces). Distinguishes "doesn't exist at
+ * all" from "exists, but under a different client" for a clearer error.
+ */
+function resolveProject(raw, ctx, client, errors) {
+  const projectCodeRaw = String(raw.project_code || '').trim();
+  const projectNameRaw = String(raw.project_name || '').trim();
+  if (!projectCodeRaw && !projectNameRaw) {
+    errors.push('Project Code or Project Name is required.');
+    return null;
+  }
+  if (!client) {
+    // Client itself already failed to resolve — its own error is already
+    // pushed by resolveClient(); avoid a second, confusing message here.
+    return null;
   }
 
-  // ── service_type_name (required) ────────────────────────────────────────────
-  const serviceTypeName = String(raw.service_type_name || '').trim();
-  if (!serviceTypeName) {
-    errors.push('Service Type is required.');
-  } else {
-    const serviceType = ctx.serviceTypeByName.get(serviceTypeName.toLowerCase());
-    if (!serviceType) {
-      errors.push(`Service Type "${serviceTypeName}" not found.`);
+  const byCodeKey = projectCodeRaw ? `${client.id}::${projectCodeRaw.toLowerCase()}` : null;
+  const byNameKey = projectNameRaw ? `${client.id}::${projectNameRaw.toLowerCase()}` : null;
+  const project = (byCodeKey && ctx.projectByClientAndCode.get(byCodeKey))
+    || (byNameKey && ctx.projectByClientAndName.get(byNameKey));
+
+  if (!project) {
+    const label = projectCodeRaw || projectNameRaw;
+    const existsElsewhere = (projectCodeRaw && ctx.projectCodeExistsAnywhere.has(projectCodeRaw.toLowerCase()))
+      || (projectNameRaw && ctx.projectNameExistsAnywhere.has(projectNameRaw.toLowerCase()));
+    if (existsElsewhere) {
+      errors.push(`Project "${label}" does not belong to Client "${client.client_name}".`);
     } else {
-      candidate.service_type_id = serviceType.id;
-      // is_billable is always derived from the Service Type's category —
-      // never taken from the sheet and never left to the schema's default.
-      candidate.is_billable = serviceType.is_billable;
+      errors.push(`Project "${label}" not found.`);
     }
+    return null;
   }
+  if (project.status !== 'active' || project.is_deleted) {
+    errors.push(`Project "${project.project_name}" is inactive.`);
+    return null;
+  }
+  return project;
+}
+
+/**
+ * Resolve Service Type by name. Never auto-creates one — an unrecognised
+ * Service Type is always a hard validation failure.
+ */
+function resolveServiceType(raw, ctx, errors) {
+  const name = String(raw.service_type_name || '').trim();
+  if (!name) {
+    errors.push('Service Type is required.');
+    return null;
+  }
+  const serviceType = ctx.serviceTypeByName.get(name.toLowerCase());
+  if (!serviceType) {
+    errors.push(`Service Type "${name}" does not exist.`);
+    return null;
+  }
+  return serviceType;
+}
+
+/**
+ * Resolve Delivery Head Manager (Excel employee-name column) to an Employee
+ * — always by full_name, exact match after trim + case-fold, never a fuzzy
+ * or partial match (never silently maps to a different, similarly-named
+ * employee). Applies the EXACT same checks assertValidDeliveryHead() already
+ * applies for the single-record create/update API — active, not soft-deleted,
+ * same company — and nothing more: the existing business logic for who may
+ * be a Delivery Head has no role requirement at all (delivery_head_employee_id
+ * is a plain Employee Master attribute, unrelated to the Users/Role login
+ * system a role check would need — see ServicePO.js's model doc comment on
+ * the `deliveryHead` association). Required — mirrors createServicePOSchema's
+ * own `.required()` rule for delivery_head_employee_id on create.
+ */
+function resolveDeliveryHead(raw, ctx, errors) {
+  const name = String(raw.delivery_head_manager_name || '').trim();
+  if (!name) {
+    errors.push('Delivery Head Manager is required.');
+    return null;
+  }
+
+  const entry = ctx.employeeByName.get(name.toLowerCase());
+  if (!entry || entry === AMBIGUOUS_EMPLOYEE) {
+    if (entry === AMBIGUOUS_EMPLOYEE) {
+      errors.push(`Delivery Head Manager "${name}" matches more than one employee — cannot determine which one.`);
+    } else {
+      errors.push(`Delivery Head Manager "${name}" does not exist.`);
+    }
+    return null;
+  }
+  if (!entry.employeeActive) {
+    errors.push(`Delivery Head Manager "${name}" is inactive.`);
+    return null;
+  }
+  return entry;
+}
+
+/**
+ * Full field resolution + shared Joi rules for a row that is attempting to
+ * define (or confirm) a Service PO's own data — i.e. the first row of a
+ * group, or any later row in the group that also supplies relationship
+ * fields (see RELATIONSHIP_FIELDS). Mirrors the pre-hierarchy validateRow()
+ * exactly for every field it already handled, plus resolves Project and
+ * Delivery Head Manager (both new).
+ *
+ * @returns {{ errors: string[], data: object, resolved: { clientId, projectId, serviceTypeId, deliveryHeadEmployeeId } }}
+ */
+function resolveRowFields(raw, ctx) {
+  const errors = [];
+  const candidate = {};
+  const invalidFields = new Set();
+
+  const client = resolveClient(raw, ctx, errors);
+  if (client) candidate.client_id = client.id;
+
+  const project = resolveProject(raw, ctx, client, errors);
+  if (project) candidate.project_id = project.id;
+
+  const serviceType = resolveServiceType(raw, ctx, errors);
+  if (serviceType) {
+    candidate.service_type_id = serviceType.id;
+    // is_billable is always derived from the Service Type's category — never
+    // taken from the sheet and never left to the schema's default.
+    candidate.is_billable = serviceType.is_billable;
+  }
+
+  const deliveryHead = resolveDeliveryHead(raw, ctx, errors);
+  // Store the resolved Employee's id — never the raw sheet text — per
+  // "do not store the employee name directly in the Service PO table".
+  if (deliveryHead) candidate.delivery_head_employee_id = deliveryHead.id;
 
   // ── service_po_name ──────────────────────────────────────────────────────────
   if (!isBlank(raw.service_po_name)) {
@@ -316,7 +459,6 @@ function validateRow(raw, ctx) {
   }
 
   // ── free-text / enum fields (Joi validates length, enum membership) ─────────
-  if (!isBlank(raw.account_manager)) candidate.account_manager = String(raw.account_manager).trim();
   if (!isBlank(raw.service_description)) candidate.service_description = String(raw.service_description).trim();
   if (!isBlank(raw.invoice_frequency)) candidate.invoice_frequency = String(raw.invoice_frequency).trim().toLowerCase();
   if (!isBlank(raw.invoice_amount)) {
@@ -336,23 +478,307 @@ function validateRow(raw, ctx) {
     errors.push(...error.details.filter((d) => !invalidFields.has(d.path[0])).map((d) => d.message));
   }
 
-  return { errors, data: error ? {} : value };
+  return {
+    errors,
+    data: error ? {} : value,
+    resolved: {
+      clientId: client ? client.id : null,
+      projectId: project ? project.id : null,
+      serviceTypeId: serviceType ? serviceType.id : null,
+      deliveryHeadEmployeeId: deliveryHead ? deliveryHead.id : null,
+    },
+  };
 }
 
 /**
- * Parse, validate, and import Service POs from the uploaded file.
+ * A later row in a group that only PARTIALLY restates relationship fields
+ * (e.g. just repeats Client Name) — checked field-by-field against the
+ * group's already-established defining values, per section 13's "Conflicting
+ * Client/Project/Service Type/Delivery Head Manager" requirement. Only the
+ * fields actually present on this row are checked; a field this row leaves
+ * blank is never treated as a conflict.
  *
- * Validation-first, all-or-nothing: every row is validated before anything is
- * written to the database. If even one row fails validation, the import is
- * aborted immediately and NOTHING is inserted — only once every row passes
- * does the insert step run, mirroring employeeImportService.js /
- * clientImportService.js's parse → validate → insert structure and response
- * shape ({ total, imported, skipped, error_rows }).
+ * @returns {string[]} conflict error messages (empty = no conflict)
+ */
+function detectPartialConflicts(raw, ctx, defining) {
+  const errors = [];
+
+  if (hasAnyValue(raw, ['client_code', 'client_name'])) {
+    const client = resolveClient(raw, ctx, errors);
+    if (client && client.id !== defining.resolved.clientId) {
+      errors.push(`Conflicting Client for Service PO "${defining.data.service_po_name}" — a different Client was already given earlier in this file.`);
+    }
+  }
+  if (hasAnyValue(raw, ['project_code', 'project_name'])) {
+    // Resolve against THIS row's own client if it gave one, else the group's defining client.
+    const rowClient = hasAnyValue(raw, ['client_code', 'client_name'])
+      ? resolveClient(raw, ctx, [])
+      : { id: defining.resolved.clientId };
+    const project = resolveProject(raw, ctx, rowClient, errors);
+    if (project && project.id !== defining.resolved.projectId) {
+      errors.push(`Conflicting Project for Service PO "${defining.data.service_po_name}" — a different Project was already given earlier in this file.`);
+    }
+  }
+  if (hasAnyValue(raw, ['service_type_name'])) {
+    const serviceType = resolveServiceType(raw, ctx, errors);
+    if (serviceType && serviceType.id !== defining.resolved.serviceTypeId) {
+      errors.push(`Conflicting Service Type for Service PO "${defining.data.service_po_name}" — a different Service Type was already given earlier in this file.`);
+    }
+  }
+  if (hasAnyValue(raw, ['delivery_head_manager_name'])) {
+    const deliveryHead = resolveDeliveryHead(raw, ctx, errors);
+    if (deliveryHead && deliveryHead.id !== defining.resolved.deliveryHeadEmployeeId) {
+      errors.push(`Conflicting Delivery Head Manager for Service PO "${defining.data.service_po_name}" — a different Delivery Head Manager was already given earlier in this file.`);
+    }
+  }
+
+  return errors;
+}
+
+/**
+ * Parse the Hierarchy Parent / Hierarchy Child columns of one row into a
+ * group's accumulating hierarchy state. Detects: Child without Parent on the
+ * same row, exact duplicate (Parent, Child) pairs within the file, and names
+ * longer than the DB's node_name limit (255, same as manual creation).
+ *
+ * @returns {string[]} error messages for this row (empty = fine, or no hierarchy present)
+ */
+function parseHierarchyRow(raw, group) {
+  const parentRaw = String(raw.hierarchy_parent || '').trim();
+  const childRaw = String(raw.hierarchy_child || '').trim();
+  if (!parentRaw && !childRaw) return [];
+
+  const errors = [];
+
+  if (!parentRaw && childRaw) {
+    errors.push(`Hierarchy Child "${childRaw}" requires Hierarchy Parent to also be filled in on the same row.`);
+    return errors;
+  }
+  if (parentRaw.length > 255) {
+    errors.push(`Hierarchy Parent "${parentRaw}" exceeds 255 characters.`);
+    return errors;
+  }
+  if (childRaw.length > 255) {
+    errors.push(`Hierarchy Child "${childRaw}" exceeds 255 characters.`);
+    return errors;
+  }
+
+  const parentKey = normaliseKey(parentRaw);
+  if (!group.parentNames.has(parentKey)) {
+    group.parentNames.set(parentKey, parentRaw);
+  }
+
+  if (childRaw) {
+    const childKey = normaliseKey(childRaw);
+    const pairSignature = `${parentKey} ${childKey}`;
+    if (group.seenPairSignatures.has(pairSignature)) {
+      errors.push(`Duplicate hierarchy mapping: "${parentRaw}" → "${childRaw}" is already defined for this Service PO in this file.`);
+      return errors;
+    }
+    group.seenPairSignatures.add(pairSignature);
+    group.pairs.push({ parentKey, parentName: parentRaw, childKey, childName: childRaw });
+  }
+
+  return errors;
+}
+
+/**
+ * Group raw rows by Service PO Name, case-insensitively (trimmed, collapsed
+ * whitespace) — every row sharing the same normalised name belongs to one
+ * Service PO. Order within a group is preserved.
+ *
+ * @returns {Map<string, object[]>} normalised name -> raw rows, in file order
+ */
+function groupRowsByServicePOName(rawRows) {
+  const groups = new Map();
+  for (const raw of rawRows) {
+    const key = normaliseKey(raw.service_po_name);
+    if (!key) continue; // handled as a per-row error separately (name is required)
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(raw);
+  }
+  return groups;
+}
+
+/**
+ * Process one Service-PO-name group end-to-end through validation (no DB
+ * writes here): resolve/validate the defining row, detect conflicting
+ * redefinitions, parse hierarchy rows, detect duplicate/circular hierarchy
+ * both within the file and against any already-existing Service PO's
+ * hierarchy.
+ *
+ * @returns {{ ok: true, group: object } | { ok: false, errorRows: object[] }}
+ */
+function processGroup(key, rows, ctx) {
+  const errorRows = [];
+  const group = {
+    key,
+    rows,
+    isNew: null,       // set once the defining row resolves or an existing PO match is found
+    existingPO: null,  // set when this group matches an already-existing Service PO
+    candidate: null,   // resolved fields to create() with, when isNew
+    code: null,         // freshly generated service_po_code, assigned later, when isNew
+    definingRowNum: null,
+    definingRowData: null,
+    parentNames: new Map(),   // parentKeyLower -> original-cased name
+    pairs: [],                 // { parentKey, parentName, childKey, childName }
+    seenPairSignatures: new Set(),
+  };
+
+  // Rows with no service_po_name at all never reach groupRowsByServicePOName,
+  // so every row here does carry a name — but a row missing it entirely is
+  // still reported per-row via resolveRowFields()'s own required-field rule
+  // whenever it's also treated as a defining candidate. A completely blank
+  // service_po_name row is filtered out upstream and simply doesn't count.
+
+  let defining = null;
+  let definingRawRow = null;
+
+  for (const raw of rows) {
+    // Only relationship fields (Client/Project/Service Type/Delivery Head Manager)
+    // trigger full-row (re)definition handling — a stray PO Value or date on
+    // an otherwise hierarchy-only continuation row is intentionally ignored,
+    // never validated/compared, per the "only these four fields can conflict"
+    // rule (see detectPartialConflicts()).
+    const isDefiningCandidate = hasAnyValue(raw, RELATIONSHIP_FIELDS);
+
+    if (isDefiningCandidate) {
+      if (!defining) {
+        const result = resolveRowFields(raw, ctx);
+        if (result.errors.length > 0) {
+          errorRows.push({ row_number: raw._rowNum, row_data: buildRowData(raw), errors: result.errors });
+          // The whole group can't proceed without a valid defining row —
+          // every other row in this group is reported as skipped-due-to-group-failure below.
+          return { ok: false, errorRows: errorRows.concat(reportRemainingRowsAsSkipped(rows, raw, ctx)) };
+        }
+        defining = result;
+        definingRawRow = raw;
+        group.definingRowNum = raw._rowNum;
+        group.definingRowData = buildRowData(raw);
+        group.candidate = result.data;
+      } else {
+        const conflicts = detectPartialConflicts(raw, ctx, defining);
+        if (conflicts.length > 0) {
+          errorRows.push({ row_number: raw._rowNum, row_data: buildRowData(raw), errors: conflicts });
+          return { ok: false, errorRows: errorRows.concat(reportRemainingRowsAsSkipped(rows, raw, ctx, [raw._rowNum])) };
+        }
+      }
+    }
+
+    const hierarchyErrors = parseHierarchyRow(raw, group);
+    if (hierarchyErrors.length > 0) {
+      errorRows.push({ row_number: raw._rowNum, row_data: buildRowData(raw), errors: hierarchyErrors });
+    }
+  }
+
+  if (errorRows.length > 0) {
+    return { ok: false, errorRows };
+  }
+
+  if (!defining) {
+    // Pure hierarchy-only group — every row only referenced hierarchy columns.
+    // Must match exactly one already-existing Service PO by name alone.
+    const matches = ctx.existingPOByNameOnly.get(key) || [];
+    if (matches.length === 0) {
+      return {
+        ok: false,
+        errorRows: rows.map((raw) => ({
+          row_number: raw._rowNum,
+          row_data: buildRowData(raw),
+          errors: [`Service PO "${rows[0].service_po_name}" was not found, and no Client/Project/Service Type was provided in this file to create it.`],
+        })),
+      };
+    }
+    if (matches.length > 1) {
+      return {
+        ok: false,
+        errorRows: rows.map((raw) => ({
+          row_number: raw._rowNum,
+          row_data: buildRowData(raw),
+          errors: [`Service PO name "${rows[0].service_po_name}" matches more than one existing Service PO — specify Client/Project/Service Type to disambiguate.`],
+        })),
+      };
+    }
+    group.existingPO = matches[0];
+    group.isNew = false;
+  } else {
+    const key2 = `${key}::${defining.resolved.clientId}::${defining.resolved.projectId}`;
+    const existing = ctx.existingPOByKey.get(key2);
+    if (existing) {
+      group.existingPO = existing;
+      group.isNew = false;
+    } else {
+      group.isNew = true;
+    }
+  }
+
+  // ── Circular / invalid-depth check: a name cannot be both a Parent and a Child ──
+  const childKeys = new Set(group.pairs.map((p) => p.childKey));
+  for (const parentKey of group.parentNames.keys()) {
+    if (childKeys.has(parentKey)) {
+      const name = group.parentNames.get(parentKey);
+      errorRows.push({
+        row_number: group.definingRowNum || rows[0]._rowNum,
+        row_data: group.definingRowData || buildRowData(rows[0]),
+        errors: [`Hierarchy node "${name}" cannot be both a Parent and a Child under the same Service PO — maximum depth is Service PO → Parent → Child.`],
+      });
+    }
+  }
+
+  // NOTE: the cross-check against an existing PO's already-saved hierarchy
+  // shape can't run here — ctx.existingHierarchyByPOId isn't populated until
+  // after this first pass over every group finishes (see importServicePOs()'s
+  // step 6, which re-runs this exact check once the existing hierarchy for
+  // every matched PO has been batch-fetched in one query).
+
+  if (errorRows.length > 0) {
+    return { ok: false, errorRows };
+  }
+
+  return { ok: true, group };
+}
+
+/**
+ * When a group fails because its defining row (or a later conflicting row)
+ * is invalid, every OTHER row in the group is still accounted for in the
+ * response as skipped — never silently dropped — without repeating the
+ * actual failure reason on each one.
+ */
+function reportRemainingRowsAsSkipped(rows, failedRaw, ctx, alsoExclude = []) {
+  const excludeRowNums = new Set([failedRaw._rowNum, ...alsoExclude]);
+  return rows
+    .filter((raw) => !excludeRowNums.has(raw._rowNum))
+    .map((raw) => ({
+      row_number: raw._rowNum,
+      row_data: buildRowData(raw),
+      errors: [`Skipped — Service PO "${raw.service_po_name}" failed validation (see row ${failedRaw._rowNum}).`],
+    }));
+}
+
+/**
+ * Parse, validate, and import Service POs (and their hierarchy) from the
+ * uploaded file.
+ *
+ * Validation-first, all-or-nothing: every row/group is fully validated
+ * before anything is written to the database. If even one row/group fails,
+ * the import is aborted immediately and NOTHING is inserted — only once
+ * every group passes does the insert phase run. This mirrors
+ * employeeImportService.js / clientImportService.js's parse → validate →
+ * insert structure and response shape, extended with `existing_po_reused`
+ * and `hierarchy_created`.
+ *
+ * Rows sharing the same Service PO Name (case-insensitive) are grouped into
+ * one Service PO. Within the insert phase, each group's Service PO
+ * create-or-reuse + all of its hierarchy node creates run inside a single
+ * DB transaction — a failure partway through a group rolls back that whole
+ * group (never "PO created but hierarchy partially created"), while other
+ * groups in the same file continue independently, exactly like the existing
+ * per-row insert loop's failure semantics.
  *
  * @param {string} filePath - Absolute path to the saved upload file
  * @param {number} userId   - ID of the authenticated user performing the import
  * @param {number} companyId
- * @returns {Promise<{ total, imported, skipped, error_rows }>}
+ * @returns {Promise<{ total, imported, existing_po_reused, hierarchy_created, skipped, error_rows }>}
  */
 async function importServicePOs(filePath, userId, companyId) {
   // 1. Parse Excel / CSV
@@ -367,22 +793,40 @@ async function importServicePOs(filePath, userId, companyId) {
   // 2. Batch-fetch reference data to avoid N+1 queries — scoped to this
   // company, so a code/name that only exists in another company never
   // resolves here (matches uq_service_pos_company_code's per-company scope).
-  const [existingPOs, clients, serviceTypes] = await Promise.all([
-    ServicePO.findAll({ where: { company_id: companyId }, attributes: ['service_po_code'], raw: true }),
+  const [existingPOs, clients, projects, serviceTypes, employees] = await Promise.all([
+    ServicePO.findAll({ where: { company_id: companyId }, attributes: ['id', 'service_po_code', 'service_po_name', 'client_id', 'project_id'], raw: true }),
     Client.findAll({ where: { company_id: companyId }, attributes: ['id', 'client_code', 'client_name', 'status'], raw: true }),
+    Project.findAll({ where: { company_id: companyId, is_deleted: false }, attributes: ['id', 'project_code', 'project_name', 'client_id', 'status', 'is_deleted'], raw: true }),
     ServiceType.findAll({
       where: { is_deleted: false, company_id: companyId },
       attributes: ['id', 'service_type_name'],
       include: [{ model: ServiceCategory, as: 'serviceCategory', attributes: ['id', 'name', 'report_bucket_key'] }],
+    }),
+    Employee.findAll({
+      where: { company_id: companyId, is_deleted: false },
+      attributes: ['id', 'full_name', 'status'],
+      raw: true,
     }),
   ]);
 
   const existingCodes = new Set(existingPOs.map((p) => p.service_po_code.toUpperCase()));
   const clientByCode = new Map(clients.map((c) => [c.client_code.toLowerCase(), c]));
   const clientByName = new Map(clients.map((c) => [c.client_name.toLowerCase(), c]));
+
+  const projectByClientAndCode = new Map();
+  const projectByClientAndName = new Map();
+  const projectCodeExistsAnywhere = new Set();
+  const projectNameExistsAnywhere = new Set();
+  for (const p of projects) {
+    projectByClientAndCode.set(`${p.client_id}::${p.project_code.toLowerCase()}`, p);
+    projectByClientAndName.set(`${p.client_id}::${p.project_name.toLowerCase()}`, p);
+    projectCodeExistsAnywhere.add(p.project_code.toLowerCase());
+    projectNameExistsAnywhere.add(p.project_name.toLowerCase());
+  }
+
   // is_billable is derived here (the resolved Service Type's category has
   // report_bucket_key = 'billable' → true, anything else → false) so
-  // validateRow() never has to touch the DB or fall back to the schema default.
+  // resolveRowFields() never has to touch the DB or fall back to the schema default.
   const serviceTypeByName = new Map(
     serviceTypes.map((s) => [
       s.service_type_name.toLowerCase(),
@@ -394,22 +838,118 @@ async function importServicePOs(filePath, userId, companyId) {
     ])
   );
 
-  // 3. Validate every row up front. No database write happens until this loop
-  //    finishes and every single row has passed.
-  const seenCodes = new Set();
-  const validRows = [];
-  const errorRows = [];
-
-  for (const raw of rawRows) {
-    const { errors, data } = validateRow(raw, { clientByCode, clientByName, serviceTypeByName });
-    if (errors.length) {
-      errorRows.push({ row_number: raw._rowNum, row_data: buildRowData(raw), errors });
+  // Keyed by full_name (trimmed, case-folded) for Delivery Head Manager
+  // resolution. Two employees sharing the exact same full_name mark the key
+  // AMBIGUOUS rather than letting whichever one was read last silently win —
+  // resolveDeliveryHead() rejects that case explicitly.
+  const employeeByName = new Map();
+  for (const emp of employees) {
+    const key = emp.full_name.toLowerCase();
+    if (employeeByName.has(key)) {
+      employeeByName.set(key, AMBIGUOUS_EMPLOYEE);
       continue;
     }
-    validRows.push({ ...data, _rowNum: raw._rowNum, _rowData: buildRowData(raw) });
+    employeeByName.set(key, {
+      id: emp.id,
+      fullName: emp.full_name,
+      employeeActive: emp.status === 'active',
+    });
   }
 
-  // 3a. Validation gate — if any row failed, stop here. Insert never runs.
+  const existingPOByKey = new Map();
+  const existingPOByNameOnly = new Map();
+  for (const po of existingPOs) {
+    const nameKey = normaliseKey(po.service_po_name);
+    existingPOByKey.set(`${nameKey}::${po.client_id}::${po.project_id}`, po);
+    if (!existingPOByNameOnly.has(nameKey)) existingPOByNameOnly.set(nameKey, []);
+    existingPOByNameOnly.get(nameKey).push(po);
+  }
+
+  const ctx = {
+    clientByCode,
+    clientByName,
+    projectByClientAndCode,
+    projectByClientAndName,
+    projectCodeExistsAnywhere,
+    projectNameExistsAnywhere,
+    serviceTypeByName,
+    employeeByName,
+    existingPOByKey,
+    existingPOByNameOnly,
+    existingHierarchyByPOId: new Map(), // filled in below, after we know which existing POs are actually referenced
+  };
+
+  // 3. Detect a completely unnamed row up front (never reaches a group).
+  const errorRows = [];
+  for (const raw of rawRows) {
+    if (isBlank(raw.service_po_name)) {
+      errorRows.push({ row_number: raw._rowNum, row_data: buildRowData(raw), errors: ['Service PO Name is required.'] });
+    }
+  }
+
+  // 4. Group remaining rows by Service PO Name (case-insensitive).
+  const groups = groupRowsByServicePOName(rawRows.filter((r) => !isBlank(r.service_po_name)));
+
+  // 5. First pass over groups WITHOUT the existing-hierarchy cross-check
+  // (that needs to know which existing POs are referenced first) — this pass
+  // resolves defining rows, detects conflicts, and parses hierarchy shape.
+  const pendingGroups = [];
+  for (const [key, rows] of groups) {
+    const result = processGroup(key, rows, ctx);
+    if (!result.ok) {
+      errorRows.push(...result.errorRows);
+    } else {
+      pendingGroups.push(result.group);
+    }
+  }
+
+  // 6. Batch-fetch existing hierarchy for every matched existing PO in one
+  // query, then re-run ONLY the existing-hierarchy cross-check per group
+  // (cheap, in-memory) — this is why processGroup() is structured to accept
+  // a pre-populated ctx.existingHierarchyByPOId and re-validate is safe/idempotent.
+  const existingPOIds = pendingGroups.filter((g) => g.existingPO).map((g) => g.existingPO.id);
+  if (existingPOIds.length > 0) {
+    const existingNodes = await servicePOHierarchyRepository.findByServicePOIds(existingPOIds);
+    for (const node of existingNodes) {
+      // service_po_id is a BIGINT column — pg/Sequelize return it as a string,
+      // not a number, so every map key derived from it must be coerced with
+      // Number() to match the plain-integer ServicePO.id values used elsewhere,
+      // or the lookup below silently misses and re-creates duplicate nodes.
+      const poIdKey = Number(node.service_po_id);
+      if (!ctx.existingHierarchyByPOId.has(poIdKey)) ctx.existingHierarchyByPOId.set(poIdKey, []);
+      ctx.existingHierarchyByPOId.get(poIdKey).push(node);
+    }
+
+    for (const group of pendingGroups) {
+      if (!group.existingPO) continue;
+      const existingNodesForPO = ctx.existingHierarchyByPOId.get(group.existingPO.id) || [];
+      const existingParentKeys = new Set(existingNodesForPO.filter((n) => n.node_type === 'PARENT').map((n) => normaliseKey(n.node_name)));
+      const existingChildKeys = new Set(existingNodesForPO.filter((n) => n.node_type === 'CHILD').map((n) => normaliseKey(n.node_name)));
+      const childKeys = new Set(group.pairs.map((p) => p.childKey));
+
+      for (const parentKey of group.parentNames.keys()) {
+        if (existingChildKeys.has(parentKey)) {
+          errorRows.push({
+            row_number: group.definingRowNum || group.rows[0]._rowNum,
+            row_data: group.definingRowData || buildRowData(group.rows[0]),
+            errors: [`Hierarchy node "${group.parentNames.get(parentKey)}" already exists as a Child under this Service PO — cannot also use it as a Parent.`],
+          });
+        }
+      }
+      for (const childKey of childKeys) {
+        if (existingParentKeys.has(childKey)) {
+          const pair = group.pairs.find((p) => p.childKey === childKey);
+          errorRows.push({
+            row_number: group.definingRowNum || group.rows[0]._rowNum,
+            row_data: group.definingRowData || buildRowData(group.rows[0]),
+            errors: [`Hierarchy node "${pair.childName}" already exists as a Parent under this Service PO — cannot also use it as a Child.`],
+          });
+        }
+      }
+    }
+  }
+
+  // 6a. Validation gate — if anything failed anywhere, stop here. Nothing is inserted.
   if (errorRows.length > 0) {
     logger.info('Service PO import aborted — validation errors found, nothing inserted', {
       userId,
@@ -420,14 +960,18 @@ async function importServicePOs(filePath, userId, companyId) {
     return {
       total: rawRows.length,
       imported: 0,
+      existing_po_reused: 0,
+      hierarchy_created: 0,
       skipped: errorRows.length,
       error_rows: errorRows,
     };
   }
 
-  // 4. Every row passed validation — auto-generate a unique PO code for each
-  //    (never taken from the sheet) before inserting.
-  for (const row of validRows) {
+  // 7. Every group passed validation — auto-generate a unique PO code for
+  // each NEW Service PO (never taken from the sheet) before inserting.
+  const seenCodes = new Set();
+  for (const group of pendingGroups) {
+    if (!group.isNew) continue;
     let code = generatePOCode();
     let attempts = 0;
     while (existingCodes.has(code) || seenCodes.has(code)) {
@@ -440,34 +984,114 @@ async function importServicePOs(filePath, userId, companyId) {
     }
 
     if (!code) {
-      row._skip = true;
+      group.codeGenerationFailed = true;
+      continue;
+    }
+    group.code = code;
+    seenCodes.add(code);
+  }
+
+  // 8. Insert phase — one transaction per Service PO group (create-or-reuse
+  // the PO, then create every genuinely-missing hierarchy node under it).
+  // A failure partway through a group rolls back that whole group only;
+  // other groups continue independently — same failure granularity the
+  // existing per-row insert loop already had, now scoped to "one PO + its
+  // hierarchy" as the atomic unit instead of "one row".
+  let importedCount = 0;
+  let existingReusedCount = 0;
+  let hierarchyCreatedCount = 0;
+
+  for (const group of pendingGroups) {
+    if (group.codeGenerationFailed) {
       errorRows.push({
-        row_number: row._rowNum,
-        row_data: row._rowData,
-        errors: [`Failed to generate a unique Service PO code for "${row.service_po_name}".`],
+        row_number: group.definingRowNum,
+        row_data: group.definingRowData,
+        errors: [`Failed to generate a unique Service PO code for "${group.candidate.service_po_name}".`],
       });
       continue;
     }
 
-    row.service_po_code = code;
-    seenCodes.add(code);
-  }
-
-  // 5. Insert valid rows
-  let importedCount = 0;
-
-  for (const row of validRows) {
-    if (row._skip) continue;
-    const { _rowNum, _rowData, _skip, ...payload } = row;
     try {
-      await servicePORepository.create({ ...payload, company_id: companyId, created_by: userId, updated_by: userId });
-      importedCount++;
+      let hierarchyCreatedThisGroup = 0;
+
+      await sequelize.transaction(async (transaction) => {
+        let servicePOId;
+        if (group.existingPO) {
+          servicePOId = group.existingPO.id;
+        } else {
+          const created = await servicePORepository.create(
+            { ...group.candidate, service_po_code: group.code, company_id: companyId, created_by: userId, updated_by: userId },
+            { transaction }
+          );
+          servicePOId = created.id;
+        }
+
+        const existingNodesForPO = group.existingPO ? (ctx.existingHierarchyByPOId.get(servicePOId) || []) : [];
+        const existingParentByName = new Map(existingNodesForPO.filter((n) => n.node_type === 'PARENT').map((n) => [normaliseKey(n.node_name), n]));
+        // id / parent_hierarchy_id are BIGINT columns — pg/Sequelize return
+        // them as strings, not numbers. Every composite map key below is
+        // built with Number(...) so a freshly-created node's id compares
+        // equal to the same id read back from a query, and vice versa.
+        const existingChildByParentAndName = new Map(
+          existingNodesForPO.filter((n) => n.node_type === 'CHILD').map((n) => [`${Number(n.parent_hierarchy_id)}::${normaliseKey(n.node_name)}`, n])
+        );
+
+        const parentIdByKey = new Map();
+        for (const [parentKey, parentName] of group.parentNames) {
+          const existingParent = existingParentByName.get(parentKey);
+          if (existingParent) {
+            parentIdByKey.set(parentKey, Number(existingParent.id));
+            continue;
+          }
+          const node = await servicePOHierarchyRepository.create(
+            {
+              service_po_id: servicePOId,
+              parent_hierarchy_id: null,
+              node_name: parentName,
+              node_type: 'PARENT',
+              display_order: 0,
+              created_by: userId,
+              updated_by: userId,
+            },
+            { transaction }
+          );
+          parentIdByKey.set(parentKey, Number(node.id));
+          hierarchyCreatedThisGroup++;
+        }
+
+        for (const pair of group.pairs) {
+          const parentId = parentIdByKey.get(pair.parentKey);
+          const existingChild = existingChildByParentAndName.get(`${parentId}::${pair.childKey}`);
+          if (existingChild) continue; // already present under this PO — never overwritten, just skipped
+
+          await servicePOHierarchyRepository.create(
+            {
+              service_po_id: servicePOId,
+              parent_hierarchy_id: parentId,
+              node_name: pair.childName,
+              node_type: 'CHILD',
+              display_order: 0,
+              created_by: userId,
+              updated_by: userId,
+            },
+            { transaction }
+          );
+          hierarchyCreatedThisGroup++;
+        }
+      });
+
+      if (group.existingPO) {
+        existingReusedCount++;
+      } else {
+        importedCount++;
+      }
+      hierarchyCreatedCount += hierarchyCreatedThisGroup;
     } catch (dbErr) {
-      logger.error('Service PO import DB error', { code: row.service_po_code, error: dbErr.message });
+      logger.error('Service PO import DB error', { servicePOName: group.candidate?.service_po_name || group.key, error: dbErr.message });
       errorRows.push({
-        row_number: _rowNum,
-        row_data: _rowData,
-        errors: [`Database error while saving this row: ${dbErr.message}`],
+        row_number: group.definingRowNum || group.rows[0]._rowNum,
+        row_data: group.definingRowData || buildRowData(group.rows[0]),
+        errors: [`Database error while saving this Service PO/hierarchy: ${dbErr.message}`],
       });
     }
   }
@@ -476,12 +1100,16 @@ async function importServicePOs(filePath, userId, companyId) {
     userId,
     total: rawRows.length,
     imported: importedCount,
+    existing_po_reused: existingReusedCount,
+    hierarchy_created: hierarchyCreatedCount,
     skipped: errorRows.length,
   });
 
   return {
     total: rawRows.length,
     imported: importedCount,
+    existing_po_reused: existingReusedCount,
+    hierarchy_created: hierarchyCreatedCount,
     skipped: errorRows.length,
     error_rows: errorRows,
   };

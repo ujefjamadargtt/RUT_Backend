@@ -220,16 +220,18 @@ const deleteServicePO = async (req, res) => {
 
 /**
  * POST /api/v1/service-pos/import
- * Upload an Excel/CSV file and bulk-import Service POs.
- * Validation-first: every row is validated before any insert happens. If any
- * row fails, nothing is inserted and the row-wise reasons are returned; only
- * when every row passes does the insert step run.
+ * Upload an Excel/CSV file and bulk-import Service POs, plus their
+ * Hierarchy (Parent/Child) nodes.
+ * Validation-first: every row/Service-PO-group is validated before any
+ * insert happens. If any row/group fails, nothing is inserted and the
+ * row-wise reasons are returned; only when every group passes does the
+ * insert step run.
  */
 const importServicePOs = async (req, res) => {
   try {
     const result = await servicePOImportService.importServicePOs(req.file.path, req.userId, req.companyId);
-    const message = result.imported > 0
-      ? `Import complete. ${result.imported} Service PO(s) imported.`
+    const message = (result.imported > 0 || result.existing_po_reused > 0)
+      ? `Import complete. ${result.imported} Service PO(s) created, ${result.existing_po_reused} existing Service PO(s) reused, ${result.hierarchy_created} hierarchy node(s) created.`
       : `Import aborted. ${result.skipped} row(s) failed validation — no rows were inserted.`;
     return sendSuccess(res, result, message);
   } catch (error) {

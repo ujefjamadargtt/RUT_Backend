@@ -215,6 +215,36 @@ async function getServicePOSummary(req, res, next) {
 }
 
 /**
+ * GET /api/v1/reports/invoice-po-summary
+ * Roles: Finance, Management, Division Head
+ *
+ * Replica of /service-po-summary with the same filters/structure, but
+ * invoiced_amount/billed_amount/unbilled_amount come from the Service PO
+ * Monthly Budget master (service_po_monthly_budgets) instead of being
+ * computed from timesheets/monthly_costs. Separate from and does not
+ * affect getServicePOSummary.
+ *
+ * Query params:
+ *   month (required), year (required), status, clientId, is_billable,
+ *   serviceCategoryId, serviceTypeId, poId,
+ *   search, sortBy, sortOrder, page, limit
+ */
+async function getInvoicePOSummary(req, res, next) {
+  try {
+    const filters = { ...req.body, ...req.query };
+    const { data, meta, summary } = await reportService.getInvoicePOSummary(filters, req.companyId);
+    const response = { records: data, summary };
+    return sendPaginated(res, response, meta, 'Invoice PO summary report fetched successfully.');
+  } catch (err) {
+    if (err.statusCode) {
+      return sendError(res, err.message, err.statusCode);
+    }
+    logger.error('getInvoicePOSummary error', { error: err.message, stack: err.stack });
+    next(err);
+  }
+}
+
+/**
  * GET /api/v1/reports/resource-utilization
  * Roles: HR, Management, Division Head
  *
@@ -309,6 +339,7 @@ module.exports = {
   getOperationalCostBreakdown,
   getEmployeeUtilizationSummary,
   getServicePOSummary,
+  getInvoicePOSummary,
   getResourceUtilization,
   getMonthlyResourceUtilization,
   getResourseProjectUtilizationReport,

@@ -122,10 +122,13 @@ const findChildren = async (parentHierarchyId) => {
  * Insert a new hierarchy node (PARENT or CHILD).
  *
  * @param {object} data
+ * @param {object} [options] - Sequelize options, e.g. { transaction } — passed
+ *   straight through so a caller (servicePOImportService.js) can run this
+ *   inside its own managed transaction.
  * @returns {Promise<ServicePOHierarchy>}
  */
-const create = async (data) => {
-  return ServicePOHierarchy.create(data);
+const create = async (data, options) => {
+  return ServicePOHierarchy.create(data, options);
 };
 
 /**

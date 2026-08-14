@@ -15,6 +15,12 @@ const logger = require('../utils/logger');
  * accepting requests — see runMigrations()'s doc comment below for the
  * full behavior contract.
  *
+ * On a completely empty database (no tables at all — not even
+ * database/schema.sql's baseline), this also applies schema.sql itself
+ * first, automatically, before running the dated migrations — see
+ * applySchemaBaseline() below. No manual `psql -f database/schema.sql` step
+ * is required for a brand-new environment; running the server is enough.
+ *
  * File naming convention (unchanged from how migrations were already being
  * written in this repo): `YYYYMMDD_description.sql`, so a plain
  * lexicographic sort of filenames is already chronological order.
@@ -24,6 +30,15 @@ const logger = require('../utils/logger');
  */
 
 const MIGRATIONS_DIR = path.resolve(__dirname, '../../database/migrations');
+const SCHEMA_BASELINE_PATH = path.resolve(__dirname, '../../database/schema.sql');
+
+// Synthetic schema_migrations name for the schema.sql bootstrap step (see
+// applySchemaBaseline below). Deliberately dated before every real migration
+// file so it always sorts first in any audit query against the table, and
+// deliberately NOT a filename listMigrationFiles() can ever produce (it only
+// reads database/migrations/, and this lives in database/schema.sql), so it
+// can never collide with, or be mistaken for, a real migration file.
+const SCHEMA_BASELINE_NAME = '00000000_schema_sql_baseline';
 
 // Arbitrary but fixed 64-bit key for pg_advisory_lock, namespacing this
 // app's migration lock so it can never collide with an unrelated advisory
@@ -114,6 +129,72 @@ async function hasPreRunnerMigrationHistory(sequelize) {
     "SELECT to_regclass('public.companies') IS NOT NULL AS exists"
   );
   return exists;
+}
+
+/**
+ * Distinguishes a genuinely blank database (no tables at all yet — not even
+ * database/schema.sql's baseline) from one where schema.sql has already
+ * been applied (by hand, per the previously-documented setup flow) but no
+ * dated migration has run yet.
+ *
+ * `roles` is the discriminator: it is the very first table schema.sql
+ * creates, nothing else in this schema can exist without it (employees,
+ * users, clients, service_pos, timesheets, etc. all directly or indirectly
+ * reference it), and no file in database/migrations/ ever creates it — only
+ * schema.sql does. If it's missing, schema.sql itself has never touched
+ * this database.
+ *
+ * @param {import('sequelize').Sequelize} sequelize
+ * @returns {Promise<boolean>}
+ */
+async function isCompletelyEmptyDatabase(sequelize) {
+  const [[{ exists }]] = await sequelize.query(
+    "SELECT to_regclass('public.roles') IS NOT NULL AS exists"
+  );
+  return !exists;
+}
+
+/**
+ * Applies database/schema.sql's DDL — the 20-table pre-migration-runner
+ * baseline (roles, employees, users, clients, service_types, service_pos,
+ * sub_projects, timesheets, audit_logs, ai_insights, etc.) — directly
+ * against the database, then records a synthetic schema_migrations row for
+ * it. Called exactly once, only when isCompletelyEmptyDatabase() finds no
+ * `roles` table: a truly blank database that has never had schema.sql run
+ * against it by hand (previously a required manual first step — see
+ * database/README.md).
+ *
+ * This is intentionally NOT turned into a new file under
+ * database/migrations/ — schema.sql already fully defines every table those
+ * dated migrations build on (Employees, Timesheet, Client Master, Service
+ * PO Master, etc.), so adding a migration file with the same CREATE TABLE
+ * statements would just be a duplicate. schema.sql's own DDL is already
+ * written with IF NOT EXISTS throughout, so applying it here is always
+ * safe, including on a database where it (or some of it) already exists by
+ * some other path. The synthetic name recorded below exists purely so this
+ * step is visible in schema_migrations' audit trail — listMigrationFiles()
+ * can never produce that name, so it can never be re-applied as if it were
+ * a real migration file.
+ *
+ * @param {import('sequelize').Sequelize} sequelize
+ */
+async function applySchemaBaseline(sequelize) {
+  logger.info(
+    'Migrations: completely empty database detected (no "roles" table) — applying database/schema.sql baseline first.'
+  );
+  console.log('[migrations] Empty database detected — applying database/schema.sql baseline.');
+
+  const sql = fs.readFileSync(SCHEMA_BASELINE_PATH, 'utf8');
+
+  try {
+    await sequelize.query(sql);
+  } catch (err) {
+    throw new Error(`Schema baseline failed: database/schema.sql — ${err.message}`);
+  }
+
+  await sequelize.query('INSERT INTO schema_migrations (name) VALUES (:name)', {
+    replacements: { name: SCHEMA_BASELINE_NAME },
+  });
 }
 
 /**
@@ -246,6 +327,10 @@ async function runMigrations(sequelize) {
         return;
       }
 
+      if (await isCompletelyEmptyDatabase(sequelize)) {
+        await applySchemaBaseline(sequelize);
+      }
+
       logger.info(
         `Migrations: first run on a brand-new database detected (no "companies" table yet) — ` +
         `applying all ${allFiles.length} migration(s) for real instead of baselining.`
@@ -290,4 +375,6 @@ module.exports = {
   listMigrationFiles,
   ensureMigrationsTable,
   getAppliedMigrations,
+  isCompletelyEmptyDatabase,
+  applySchemaBaseline,
 };

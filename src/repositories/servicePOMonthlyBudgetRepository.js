@@ -90,6 +90,65 @@ const findActiveServicePOsWithBudget = async (month, year, companyId) => {
 };
 
 /**
+ * Every monthly budget record actually saved for a company in a given year
+ * — optionally narrowed to one month — the general "GET ?month&year"
+ * listing, as opposed to findActiveServicePOsWithBudget's zero-defaulted
+ * placeholder grid (that one feeds /current specifically). Also optionally
+ * narrowed to a specific set of service_po_ids (the caller's role scope) —
+ * null means no PO-level filter beyond company_id.
+ *
+ * @param {number|undefined|null} month - omit to return every month in the year
+ * @param {number} year
+ * @param {number} companyId
+ * @param {number[]|null} servicePOIds
+ * @returns {Promise<ServicePOMonthlyBudget[]>}
+ */
+const findBudgetsForMonth = async (month, year, companyId, servicePOIds) => {
+  const where = { year, company_id: companyId };
+  if (month !== undefined && month !== null) {
+    where.month = month;
+  }
+  if (servicePOIds !== null) {
+    where.service_po_id = { [Op.in]: servicePOIds };
+  }
+
+  return ServicePOMonthlyBudget.findAll({
+    where,
+    include: [servicePOInclude],
+    order: [['month', 'ASC'], ['updated_at', 'DESC']],
+  });
+};
+
+/**
+ * Active Service POs in a company for the "select a Service PO" dropdown —
+ * no budget data. Optionally narrowed to a specific set of service_po_ids
+ * (the caller's role scope) — null means every active PO in the company.
+ *
+ * @param {number} companyId
+ * @param {number[]|null} servicePOIds
+ * @returns {Promise<ServicePO[]>}
+ */
+const findActiveServicePOsForDropdown = async (companyId, servicePOIds) => {
+  const where = { status: { [Op.in]: ACTIVE_PO_STATUSES }, is_deleted: false, company_id: companyId };
+  if (servicePOIds !== null) {
+    where.id = { [Op.in]: servicePOIds };
+  }
+
+  return ServicePO.findAll({
+    where,
+    include: [
+      {
+        model: Client,
+        as: 'client',
+        attributes: ['id', 'client_code', 'client_name'],
+      },
+    ],
+    attributes: ['id', 'service_po_code', 'service_po_name', 'is_billable', 'status'],
+    order: [['service_po_name', 'ASC']],
+  });
+};
+
+/**
  * Insert a new monthly budget record.
  *
  * @param {object} data
@@ -120,6 +179,8 @@ module.exports = {
   findOne,
   findById,
   findActiveServicePOsWithBudget,
+  findBudgetsForMonth,
+  findActiveServicePOsForDropdown,
   create,
   update,
 };

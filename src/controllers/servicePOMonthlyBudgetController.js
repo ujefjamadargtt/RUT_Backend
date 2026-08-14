@@ -11,11 +11,21 @@ const logger = require('../utils/logger');
 
 /**
  * GET /api/v1/service-po-monthly-budgets
+ *
+ * With service_po_id: the single record for that Service PO (404 if it
+ * doesn't exist, belongs to another company, or is outside the caller's
+ * role scope). Without it: every monthly budget record saved for month/year
+ * across every Service PO the caller's role is allowed to see.
  */
 const getOne = async (req, res) => {
   try {
-    const record = await servicePOMonthlyBudgetService.getOne(req.query, req.companyId);
-    return sendSuccess(res, record, 'Service PO monthly budget fetched successfully.');
+    if (req.query.service_po_id !== undefined) {
+      const record = await servicePOMonthlyBudgetService.getOne(req.query, req.companyId, req.userId, req.userRoleName, req.employeeId);
+      return sendSuccess(res, record, 'Service PO monthly budget fetched successfully.');
+    }
+
+    const data = await servicePOMonthlyBudgetService.listMonthlyBudgets(req.query, req.companyId, req.userId, req.userRoleName, req.employeeId);
+    return sendSuccess(res, data, 'Service PO monthly budgets fetched successfully.');
   } catch (error) {
     if (error.statusCode === 404) {
       return sendError(res, error.message, 404);
@@ -26,11 +36,26 @@ const getOne = async (req, res) => {
 };
 
 /**
+ * GET /api/v1/service-po-monthly-budgets/service-pos
+ * The Service PO dropdown — active Service POs the caller's role is
+ * allowed to see, no budget data.
+ */
+const listServicePOs = async (req, res) => {
+  try {
+    const data = await servicePOMonthlyBudgetService.listServicePOsForDropdown(req.companyId, req.userId, req.userRoleName, req.employeeId);
+    return sendSuccess(res, data, 'Service PO list fetched successfully.');
+  } catch (error) {
+    logger.error('listServicePOs (ServicePOMonthlyBudget) error', { error: error.message });
+    return sendError(res, error.message, error.statusCode || 500);
+  }
+};
+
+/**
  * GET /api/v1/service-po-monthly-budgets/current
  */
 const getCurrentMonth = async (req, res) => {
   try {
-    const data = await servicePOMonthlyBudgetService.getCurrentMonth(req.companyId);
+    const data = await servicePOMonthlyBudgetService.getCurrentMonth(req.companyId, req.userId, req.userRoleName, req.employeeId);
     return sendSuccess(res, data, 'Current month Service PO budget data fetched successfully.');
   } catch (error) {
     logger.error('getCurrentMonth (ServicePOMonthlyBudget) error', { error: error.message });
@@ -56,6 +81,7 @@ const upsert = async (req, res) => {
 
 module.exports = {
   getOne,
+  listServicePOs,
   getCurrentMonth,
   upsert,
 };

@@ -59,7 +59,14 @@ async function startServer() {
     // exits the process if any migration fails — the app must never start
     // serving requests against a partially migrated schema. See
     // src/database/migrationRunner.js for the full behavior contract.
+    // Set SKIP_MIGRATIONS=true to opt out (e.g. a read replica, or a
+    // deploy stage that runs migrations as a separate, explicit step).
+    if (String(process.env.SKIP_MIGRATIONS).toLowerCase() === 'true') {
+      logger.warn('SKIP_MIGRATIONS=true — skipping automatic migrations on startup.');
+      console.log('[startup] SKIP_MIGRATIONS=true — skipping automatic migrations.');
+    } else {
     await runMigrations(sequelize);
+    }
 
     if (NODE_ENV === 'development') {
       await sequelize.sync({ alter: false });
@@ -67,7 +74,7 @@ async function startServer() {
     }
 
     try {
-      // await aiInsightScheduler.start();
+      await aiInsightScheduler.start();
     } catch (schedulerErr) {
       // Scheduler failures (e.g. a bad cron expression) must never take
       // down the whole API — log and keep starting.
