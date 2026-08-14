@@ -1,7 +1,7 @@
 'use strict';
 
 const xlsx = require('xlsx');
-const { sequelize, Client, ServiceType, ServiceCategory, ServicePO, Project, Employee } = require('../models');
+const { sequelize, Client, ServiceType, ServiceCategory, ServicePO, Project, Employee, User, Role } = require('../models');
 const servicePORepository = require('../repositories/servicePORepository');
 const servicePOHierarchyRepository = require('../repositories/servicePOHierarchyRepository');
 const { generatePOCode } = require('../helpers/codeGenerator');
@@ -13,6 +13,14 @@ const logger = require('../utils/logger');
 // as ambiguous rather than silently picking whichever one happened to be
 // read last, per "do not silently map to a different employee".
 const AMBIGUOUS_EMPLOYEE = Symbol('AMBIGUOUS_EMPLOYEE');
+
+// Roles allowed to be assigned as a Service PO's Delivery Head Manager.
+// NOTE: this is business logic ADDED specifically for import, deliberately
+// stricter than assertValidDeliveryHead() (the single-record create/update
+// API's check in servicePOService.js), which has no role requirement at all
+// — a manually-created/edited Service PO may set ANY active employee as
+// Delivery Head. Import enforces this extra role gate on top.
+const DELIVERY_HEAD_ALLOWED_ROLES = ['Manager', 'Service PO Admin', 'Project Admin', 'BU Admin'];
 
 // Flexible column-header → field mapping (matched after normalising to lowercase + collapsed spaces)
 // NOTE: Service PO Code is intentionally NOT mapped here — it is always auto-generated
@@ -339,14 +347,14 @@ function resolveServiceType(raw, ctx, errors) {
  * Resolve Delivery Head Manager (Excel employee-name column) to an Employee
  * — always by full_name, exact match after trim + case-fold, never a fuzzy
  * or partial match (never silently maps to a different, similarly-named
- * employee). Applies the EXACT same checks assertValidDeliveryHead() already
- * applies for the single-record create/update API — active, not soft-deleted,
- * same company — and nothing more: the existing business logic for who may
- * be a Delivery Head has no role requirement at all (delivery_head_employee_id
- * is a plain Employee Master attribute, unrelated to the Users/Role login
- * system a role check would need — see ServicePO.js's model doc comment on
- * the `deliveryHead` association). Required — mirrors createServicePOSchema's
- * own `.required()` rule for delivery_head_employee_id on create.
+ * employee). Applies the same active/not-soft-deleted/same-company checks
+ * assertValidDeliveryHead() applies for the single-record create/update API,
+ * PLUS an import-specific role gate: the employee must have an active login
+ * (Users row) holding one of DELIVERY_HEAD_ALLOWED_ROLES. This role check is
+ * NEW business logic scoped to import only — the manual create/update API
+ * has no such requirement (see DELIVERY_HEAD_ALLOWED_ROLES's doc comment).
+ * Required — mirrors createServicePOSchema's own `.required()` rule for
+ * delivery_head_employee_id on create.
  */
 function resolveDeliveryHead(raw, ctx, errors) {
   const name = String(raw.delivery_head_manager_name || '').trim();
@@ -366,6 +374,16 @@ function resolveDeliveryHead(raw, ctx, errors) {
   }
   if (!entry.employeeActive) {
     errors.push(`Delivery Head Manager "${name}" is inactive.`);
+    return null;
+  }
+  if (!entry.roleName) {
+    errors.push(`Delivery Head Manager "${name}" has no active user account/role and cannot be assigned as Delivery Head Manager.`);
+    return null;
+  }
+  if (!DELIVERY_HEAD_ALLOWED_ROLES.includes(entry.roleName)) {
+    errors.push(
+      `Delivery Head Manager "${name}" has role "${entry.roleName}" — only ${DELIVERY_HEAD_ALLOWED_ROLES.join('/')} may be assigned as Delivery Head Manager.`
+    );
     return null;
   }
   return entry;
@@ -805,7 +823,13 @@ async function importServicePOs(filePath, userId, companyId) {
     Employee.findAll({
       where: { company_id: companyId, is_deleted: false },
       attributes: ['id', 'full_name', 'status'],
-      raw: true,
+      include: [{
+        model: User,
+        as: 'users',
+        attributes: ['id', 'is_deleted'],
+        required: false,
+        include: [{ model: Role, as: 'role', attributes: ['id', 'role_name'] }],
+      }],
     }),
   ]);
 
@@ -849,10 +873,12 @@ async function importServicePOs(filePath, userId, companyId) {
       employeeByName.set(key, AMBIGUOUS_EMPLOYEE);
       continue;
     }
+    const activeUser = (emp.users || []).find((u) => !u.is_deleted);
     employeeByName.set(key, {
       id: emp.id,
       fullName: emp.full_name,
       employeeActive: emp.status === 'active',
+      roleName: activeUser && activeUser.role ? activeUser.role.role_name : null,
     });
   }
 
