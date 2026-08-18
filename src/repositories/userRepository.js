@@ -48,7 +48,7 @@ const DEFAULT_INCLUDE = [
  * @returns {Promise<{ rows: User[], count: number }>}
  */
 const findAll = async (filters = {}, pagination = {}, sort = {}) => {
-  const { search, status, role_id, companyId } = filters;
+  const { search, status, role_id, companyId, accessWhere } = filters;
   const { limit = 20, offset = 0 } = pagination;
   const { sortBy: requestedSortBy = 'created_at', sortOrder = 'DESC' } = sort;
   // Defense-in-depth allowlist matching userValidation.js's sort_by enum
@@ -61,7 +61,14 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
     ? sortOrder.toUpperCase()
     : 'DESC';
 
-  const where = { is_deleted: false, company_id: companyId };
+  // accessWhere (userAccessControlService.resolveUserAccessWhere) is the
+  // authoritative object-level scope when supplied, applied BEFORE
+  // pagination/search/role filters — a caller can never widen it via
+  // company_id/role_id/search/page/limit, since none of those keys can
+  // collide with or override it.
+  const where = accessWhere
+    ? { is_deleted: false, ...accessWhere }
+    : { is_deleted: false, company_id: companyId };
 
   if (status && status !== 'all') {
     where.status = status;
@@ -87,10 +94,22 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
 
 /**
  * Find a single user by primary key, including employee and role.
+ *
+ * `accessWhere` (userAccessControlService.resolveUserAccessWhere), when
+ * supplied, is the authoritative object-level scope and takes precedence
+ * over the plain companyId filter — merged into this SAME query so an
+ * out-of-scope User and a nonexistent one both simply fail to match a row,
+ * never distinguishable from the response (see userController.getById).
+ *
  * @param {number} id
+ * @param {number} [companyId]
+ * @param {object} [accessWhere]
  * @returns {Promise<User|null>}
  */
-const findById = async (id, companyId) => {
+const findById = async (id, companyId, accessWhere = null) => {
+  if (accessWhere) {
+    return User.findOne({ where: { id, is_deleted: false, ...accessWhere }, include: DEFAULT_INCLUDE });
+  }
   const where = { id, is_deleted: false };
   // companyId is optional here (unlike other repositories) — rbacService.js
   // calls this without one for a cross-cutting existence check that isn't

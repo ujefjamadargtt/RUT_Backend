@@ -17,6 +17,27 @@ const { getIpAddress } = require('../middlewares/auditLog');
  */
 
 /**
+ * The object-level authorization context every Employee-record read needs
+ * (see employeeAccessControlService.resolveEmployeeAccessWhere) — built
+ * once, here, from server-verified req fields ONLY (populated by
+ * authenticate/resolveCompany in auth.js). Never derived from the request
+ * body/query/params: employee_id, company_id, role_id supplied by a client
+ * must never influence what this caller is authorized to see.
+ *
+ * @param {import('express').Request} req
+ * @returns {{ userId: number, employeeId: number|null, companyId: number|null, hierarchyRank: number|null, roleNames: string[] }}
+ */
+function buildEmployeeAuthContext(req) {
+  return {
+    userId: req.userId,
+    employeeId: req.employeeId,
+    companyId: req.companyId,
+    hierarchyRank: req.hierarchyRank,
+    roleNames: req.userRoles || [],
+  };
+}
+
+/**
  * GET /api/v1/employees
  * @param {import('express').Request}  req
  * @param {import('express').Response} res
@@ -24,7 +45,7 @@ const { getIpAddress } = require('../middlewares/auditLog');
  */
 const getAll = async (req, res, next) => {
   try {
-    const { data, meta } = await employeeService.getAll(req.query, req.companyId);
+    const { data, meta } = await employeeService.getAll(req.query, buildEmployeeAuthContext(req));
     return sendPaginated(res, data, meta, 'Employees fetched successfully.');
   } catch (err) {
     next(err);
@@ -40,7 +61,7 @@ const getById = async (req, res, next) => {
     if (isNaN(id)) {
       return sendError(res, 'Invalid employee ID.', 400);
     }
-    const employee = await employeeService.getByIdWithEmail(id, req.companyId);
+    const employee = await employeeService.getByIdWithEmail(id, buildEmployeeAuthContext(req));
     return sendSuccess(res, employee, 'Employee fetched successfully.');
   } catch (err) {
     if (err.statusCode === 404) {

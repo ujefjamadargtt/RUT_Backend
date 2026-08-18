@@ -183,7 +183,7 @@ const listRoleFormMappings = async (roleId) => {
  */
 const findAccessibleForms = async (roleIds) => {
   return FormMaster.findAll({
-    attributes: ['id', 'module_name', 'form_name'],
+    attributes: ['id', 'module_name', 'form_name', 'seq'],
     where: { status: 'active' },
     include: [
       {
@@ -233,7 +233,7 @@ const findAllFormsWithMappingStatus = async (roleIds) => {
   }
 
   const forms = await FormMaster.findAll({
-    attributes: ['id', 'module_name', 'form_name'],
+    attributes: ['id', 'module_name', 'form_name', 'seq'],
     where: { id: { [Op.in]: [...statusByFormId.keys()] }, status: 'active' },
     order: [
       ['module_name', 'ASC'],
@@ -245,6 +245,7 @@ const findAllFormsWithMappingStatus = async (roleIds) => {
     id: form.id,
     module_name: form.module_name,
     form_name: form.form_name,
+    seq: form.seq,
     status: statusByFormId.get(form.id),
   }));
 };
@@ -260,8 +261,10 @@ const findAllFormsWithMappingStatus = async (roleIds) => {
  */
 const findAllActiveForms = async () => {
   return FormMaster.findAll({
-    attributes: ['id', 'module_name', 'form_name'],
-    where: { status: 'active' },
+    attributes: ['id', 'module_name', 'form_name', 'seq'],
+    // module_name IS NOT NULL excludes module definition rows themselves —
+    // "All Forms" means every actual screen, not the module headers.
+    where: { status: 'active', module_name: { [Op.not]: null } },
     order: [
       ['module_name', 'ASC'],
       ['form_name', 'ASC'],

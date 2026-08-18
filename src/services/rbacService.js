@@ -44,13 +44,19 @@ async function ensureRoleExists(roleId) {
 }
 
 /**
- * Confirm a form exists, or throw 404.
+ * Confirm a form exists, or throw 404. A module row (module_name IS NULL)
+ * is not a mappable form — modules never automatically become role
+ * permissions, only the individual forms registered under them do (see
+ * database/migrations/20260856_add_form_master_seq_and_modules.sql).
  * @param {number} formId
  */
 async function ensureFormExists(formId) {
   const form = await formRepository.findById(formId);
   if (!form) {
     fail(`Form with ID ${formId} not found.`, 404);
+  }
+  if (form.module_name === null) {
+    fail('A module cannot be mapped to a role directly — map its individual forms instead.', 400);
   }
 }
 
@@ -256,15 +262,50 @@ const replaceRoleFormMappings = async (roleId, formIds, actorId, ipAddress) => {
 // ── Get Accessible Forms (POST /roles/forms) ────────────────────────────────
 
 /**
+ * Group a flat form list by module_name and order it by each module's own
+ * seq, then by each form's seq within that module — never by id,
+ * created_at, or alphabetical order (see form_master's seq column, added by
+ * database/migrations/20260856_add_form_master_seq_and_modules.sql). A
+ * module with no forms among `forms` is simply absent from the result,
+ * matching the previous (pre-seq) behavior of only ever showing modules
+ * that actually have forms.
+ * @param {{id: number, module_name: string, form_name: string, seq: number, status?: boolean}[]} forms
+ * @param {{form_name: string, seq: number}[]} modules - active module rows, for ordering (and optionally filtering)
+ * @param {boolean} includeStatus - whether to carry each form's mapping status through
+ * @param {boolean} [dropOrphans=false] - when true, drop forms whose module isn't in `modules` at all (e.g. the module was deactivated) instead of just sorting them last
+ * @returns {object} { [moduleName]: {id, name, status?}[] }
+ */
+function groupFormsByModule(forms, modules, includeStatus, dropOrphans = false) {
+  const moduleSeqByName = new Map(modules.map((m) => [m.form_name, m.seq]));
+
+  const scoped = dropOrphans ? forms.filter((form) => moduleSeqByName.has(form.module_name)) : forms;
+
+  const sorted = [...scoped].sort((a, b) => {
+    const aModuleSeq = moduleSeqByName.get(a.module_name) ?? Number.MAX_SAFE_INTEGER;
+    const bModuleSeq = moduleSeqByName.get(b.module_name) ?? Number.MAX_SAFE_INTEGER;
+    if (aModuleSeq !== bModuleSeq) return aModuleSeq - bModuleSeq;
+    return (a.seq ?? 0) - (b.seq ?? 0);
+  });
+
+  return sorted.reduce((formsByModule, form) => {
+    if (!formsByModule[form.module_name]) {
+      formsByModule[form.module_name] = [];
+    }
+    const entry = { id: form.id, name: form.form_name };
+    if (includeStatus) entry.status = form.status;
+    formsByModule[form.module_name].push(entry);
+    return formsByModule;
+  }, {});
+}
+
+/**
  * Fetch every form that has AT LEAST ONE role_form_mapping row for the
  * given role IDs (POST /roles/forms), each annotated with whether it's
  * currently actively mapped (status true) or was mapped and has since been
  * unmapped (status false). A form never mapped to any of these roles is
  * excluded entirely — a role with zero mappings gets back an empty object,
- * not the full form catalog. Grouped by module, both modules and forms
- * sorted alphabetically (module order falls out of
- * findAllFormsWithMappingStatus()'s ORDER BY module_name — object key
- * insertion order follows the row order Postgres returns them in).
+ * not the full form catalog. Grouped by module, ordered by module seq then
+ * form seq (see groupFormsByModule()).
  *
  * This is the admin Role-Form mapping screen's data source (what's actually
  * configured for these roles, so an admin can review/toggle it), which is
@@ -278,15 +319,12 @@ const replaceRoleFormMappings = async (roleId, formIds, actorId, ipAddress) => {
 const getFormsWithMappingStatus = async (roleIds) => {
   const requestedRoleIds = [...new Set(roleIds)];
 
-  const forms = await rbacRepository.findAllFormsWithMappingStatus(requestedRoleIds);
+  const [forms, modules] = await Promise.all([
+    rbacRepository.findAllFormsWithMappingStatus(requestedRoleIds),
+    formRepository.findModules('active'),
+  ]);
 
-  return forms.reduce((formsByModule, form) => {
-    if (!formsByModule[form.module_name]) {
-      formsByModule[form.module_name] = [];
-    }
-    formsByModule[form.module_name].push({ id: form.id, name: form.form_name, status: form.status });
-    return formsByModule;
-  }, {});
+  return groupFormsByModule(forms, modules, true);
 };
 
 /**
@@ -294,7 +332,11 @@ const getFormsWithMappingStatus = async (roleIds) => {
  * grouped by module — no status field (presence in the response already
  * means "accessible"). Used only by the login/refresh-token flow
  * (authService.js) to build the forms a user should actually see;
- * unmapped/inactive forms are excluded entirely, never just flagged.
+ * unmapped/inactive forms are excluded entirely, never just flagged. A form
+ * whose own module has been deactivated is excluded too, even if the form
+ * itself is still active — only the active module/form structure is ever
+ * exposed to this menu response. Grouped by module, ordered by module seq
+ * then form seq (see groupFormsByModule()) — never alphabetically or by id.
  *
  * Platform Admin (hierarchyRank === 1) is a deliberate bypass of the
  * role_form_mapping table entirely — "All Forms" per the RBAC spec is
@@ -308,17 +350,14 @@ const getFormsWithMappingStatus = async (roleIds) => {
  * @returns {Promise<object>} forms grouped by module_name: { [module]: {id, name}[] }
  */
 const getActiveFormsForRoles = async (roleIds, hierarchyRank = null) => {
-  const forms = hierarchyRank === 1
-    ? await rbacRepository.findAllActiveForms()
-    : await rbacRepository.findAccessibleForms([...new Set(roleIds)]);
+  const [forms, modules] = await Promise.all([
+    hierarchyRank === 1
+      ? rbacRepository.findAllActiveForms()
+      : rbacRepository.findAccessibleForms([...new Set(roleIds)]),
+    formRepository.findModules('active'),
+  ]);
 
-  return forms.reduce((formsByModule, form) => {
-    if (!formsByModule[form.module_name]) {
-      formsByModule[form.module_name] = [];
-    }
-    formsByModule[form.module_name].push({ id: form.id, name: form.form_name });
-    return formsByModule;
-  }, {});
+  return groupFormsByModule(forms, modules, false, true);
 };
 
 module.exports = {

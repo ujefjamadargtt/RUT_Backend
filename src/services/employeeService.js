@@ -5,6 +5,7 @@ const employeeRepository = require('../repositories/employeeRepository');
 const userRepository = require('../repositories/userRepository');
 const managerEmployeeMappingRepository = require('../repositories/managerEmployeeMappingRepository');
 const roleHierarchyService = require('./roleHierarchyService');
+const employeeAccessControlService = require('./employeeAccessControlService');
 const { createAuditLog } = require('../middlewares/auditLog');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
 const { generateTemporaryPassword } = require('../utils/password');
@@ -176,19 +177,29 @@ async function attachManagers(employees) {
 }
 
 /**
- * Return a paginated, filtered, sorted employee list.
+ * Return a paginated, filtered, sorted employee list — scoped to whatever
+ * Employees `authContext`'s caller is authorized to see (see
+ * employeeAccessControlService.resolveEmployeeAccessWhere): an Employee
+ * gets only their own record, a Manager/Service PO Admin gets their own
+ * record plus whoever is actually mapped to them, everyone else is bounded
+ * by Company/Entity. Fixes the same object-level authorization gap as
+ * getByIdWithEmail() below — this list endpoint previously returned every
+ * Employee in the company to any authenticated caller regardless of role.
  *
  * @param {object} query - Express req.query (page, limit, search, status, designation, sort_by, sort_order)
+ * @param {object} authContext - { userId, employeeId, companyId, hierarchyRank, roleNames } — see controller
  * @returns {Promise<{ data: Employee[], meta: object }>}
  */
-const getAll = async (query = {}, companyId) => {
+const getAll = async (query = {}, authContext) => {
   const { page, limit, offset } = getPaginationParams(query);
+  const accessWhere = await employeeAccessControlService.resolveEmployeeAccessWhere(authContext);
 
   const filters = {
     search: query.search || '',
     status: query.status || 'active',
     designation: query.designation || '',
-    companyId,
+    companyId: authContext.companyId,
+    accessWhere,
   };
 
   const sort = {
@@ -227,12 +238,19 @@ const getById = async (id, companyId) => {
  * raw Sequelize instance that update()/deleteEmployee() below still call
  * .toJSON()/read Sequelize-instance properties on.
  *
+ * Object-level authorization (the GET /employees/:id IDOR/BOLA fix): the
+ * caller's authorized-scope filter is merged into the SAME lookup query via
+ * `accessWhere`, so an Employee outside `authContext`'s scope 404s exactly
+ * like a nonexistent one — see employeeAccessControlService.js and
+ * employeeRepository.findByIdWithEmail's doc comment.
+ *
  * @param {number} id
- * @param {number} companyId
+ * @param {object} authContext - { userId, employeeId, companyId, hierarchyRank, roleNames } — see controller
  * @returns {Promise<object>}
  */
-const getByIdWithEmail = async (id, companyId) => {
-  const employee = await employeeRepository.findByIdWithEmail(id, companyId);
+const getByIdWithEmail = async (id, authContext) => {
+  const accessWhere = await employeeAccessControlService.resolveEmployeeAccessWhere(authContext);
+  const employee = await employeeRepository.findByIdWithEmail(id, authContext.companyId, accessWhere);
   if (!employee) {
     throw notFoundError(`Employee with ID ${id} not found.`);
   }

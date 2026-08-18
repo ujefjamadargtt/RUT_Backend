@@ -2,6 +2,7 @@
 
 const userService = require('../services/userService');
 const roleHierarchyService = require('../services/roleHierarchyService');
+const userAccessControlService = require('../services/userAccessControlService');
 const {
   sendSuccess,
   sendCreated,
@@ -16,12 +17,25 @@ const { getIpAddress } = require('../middlewares/auditLog');
  * Thin layer: parse request -> call service -> send response.
  */
 
+const USER_MANAGEMENT_DENIED_MESSAGE = 'You are not authorized to access user management.';
+
 /**
  * GET /api/v1/users
+ *
+ * User Management is an administrative function (see
+ * userAccessControlService.js) — a caller with no User Management
+ * permission at all (Project Admin, Service PO Admin, Manager, Employee)
+ * gets a flat 403 for the WHOLE endpoint, never a filtered/empty list:
+ * this check runs, and denies, BEFORE any User row is loaded.
  */
 const getAll = async (req, res, next) => {
   try {
-    const { data, meta } = await userService.getAll(req.query, req.companyId);
+    if (!userAccessControlService.hasUserManagementPermission(req)) {
+      return sendError(res, USER_MANAGEMENT_DENIED_MESSAGE, 403);
+    }
+
+    const authContext = { userId: req.userId, companyId: req.companyId, hierarchyRank: req.hierarchyRank };
+    const { data, meta } = await userService.getAll(req.query, authContext);
     return sendPaginated(res, data, meta, 'Users fetched successfully.');
   } catch (err) {
     next(err);
@@ -30,6 +44,14 @@ const getAll = async (req, res, next) => {
 
 /**
  * GET /api/v1/users/:id
+ *
+ * Same function-level gate as getAll() above — denied with the identical
+ * generic 403 regardless of the requested ID, so an unauthorized caller
+ * can never distinguish "you can't see users" from "this ID doesn't
+ * exist." A caller WITH User Management permission but outside their
+ * object-level scope (wrong Company/Entity) instead 404s, indistinguishable
+ * from a genuinely nonexistent ID — see userAccessControlService.js and
+ * userRepository.findById's doc comment.
  */
 const getById = async (req, res, next) => {
   try {
@@ -37,7 +59,14 @@ const getById = async (req, res, next) => {
     if (isNaN(id)) {
       return sendError(res, 'Invalid user ID.', 400);
     }
-    const user = await userService.getById(id, req.companyId);
+    if (!userAccessControlService.hasUserManagementPermission(req)) {
+      return sendError(res, USER_MANAGEMENT_DENIED_MESSAGE, 403);
+    }
+
+    const accessWhere = await userAccessControlService.resolveUserAccessWhere({
+      userId: req.userId, companyId: req.companyId, hierarchyRank: req.hierarchyRank,
+    });
+    const user = await userService.getById(id, req.companyId, accessWhere);
     return sendSuccess(res, user, 'User fetched successfully.');
   } catch (err) {
     if (err.statusCode === 404) {

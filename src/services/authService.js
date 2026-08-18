@@ -1,5 +1,6 @@
 'use strict';
 
+const { sequelize } = require('../models');
 const authRepository = require('../repositories/authRepository');
 const userRepository = require('../repositories/userRepository');
 const rbacService = require('./rbacService');
@@ -100,6 +101,23 @@ function emailNotRegisteredError() {
   return err;
 }
 
+/**
+ * The one generic 401 every refresh-token failure mode returns — invalid
+ * signature, expired, unknown jti, already-consumed (replay), wrong user,
+ * inactive account. Deliberately identical in every case so a caller can
+ * never distinguish "this token doesn't exist" from "this token was
+ * already used" from any other rejection reason.
+ *
+ * @returns {Error}
+ */
+function invalidRefreshTokenError() {
+  const err = new Error('Invalid or expired refresh token.');
+  err.statusCode = 401;
+  err.code = 'INVALID_REFRESH_TOKEN';
+  err.isOperational = true;
+  return err;
+}
+
 // ─── Auth Service ─────────────────────────────────────────────────────────────
 
 /**
@@ -145,11 +163,15 @@ async function login(email, password, ipAddress, userAgent) {
     throw invalidCredentialsError();
   }
 
-  const { accessToken, refreshToken, expiresIn, refreshExpiresIn } = generateTokens(user);
+  // No familyId passed — login always starts a brand NEW session lineage,
+  // never reuses one (that only happens on rotation — see refreshToken()).
+  const { accessToken, refreshToken, expiresIn, refreshExpiresIn, jti, familyId } = generateTokens(user);
 
   await authRepository.createSession({
     user_id: user.id,
     refresh_token: refreshToken,
+    jti,
+    family_id: familyId,
     expires_at: expiryToDate(refreshExpiresIn || REFRESH_TOKEN_EXPIRY),
     ip_address: ipAddress || null,
     user_agent: userAgent || null,
@@ -192,7 +214,11 @@ async function login(email, password, ipAddress, userAgent) {
 }
 
 /**
- * Invalidate a user session by removing the refresh token from the store.
+ * Invalidate a user session by revoking it (same soft-revoke mechanism as
+ * rotation — see authRepository.revokeSessionByJti) so a subsequent replay
+ * of this same refresh token is recognized as reuse, not silently
+ * forgotten. Idempotent: an unparseable, unknown, or already-revoked token
+ * still returns success from the client's perspective.
  *
  * @param {string} refreshToken
  * @returns {Promise<void>}
@@ -206,21 +232,58 @@ async function logout(refreshToken) {
     throw err;
   }
 
-  await authRepository.deleteSession(refreshToken);
-  // Idempotent — an already-revoked/unknown refresh token still returns
-  // success from the client's perspective.
-  logger.info('Session deleted on logout');
+  let decoded;
+  try {
+    decoded = verifyRefreshToken(refreshToken);
+  } catch (jwtErr) {
+    logger.info('Logout with an already-invalid/expired refresh token — no-op');
+    return;
+  }
+
+  if (decoded.jti) {
+    await authRepository.revokeSessionByJti(decoded.jti);
+  }
+
+  logger.info('Session revoked on logout', { userId: decoded.id });
 }
 
 /**
- * Exchange a valid refresh token for a fresh access + refresh token pair.
+ * Exchange a valid refresh token for a fresh access + refresh token pair,
+ * with full ROTATION + REPLAY PREVENTION:
  *
- * Steps:
- *  1. Cryptographically verify the refresh token signature and expiry.
- *  2. Confirm the session record still exists in the database (not revoked).
- *  3. Confirm the owning user is still active.
- *  4. Delete the old session (token rotation — prevents replay).
- *  5. Issue new token pair and persist new session.
+ *  1. Cryptographically verify the refresh token (signature, expiry,
+ *     audience — verifyRefreshToken() already rejects an access token
+ *     presented here, since access/refresh tokens are signed with
+ *     different secrets under different audiences).
+ *  2. Require a `jti` claim — a refresh token issued before this fix has
+ *     none and can never be safely tracked/rotated; reject it (forces a
+ *     one-time re-login for any session started before this change shipped).
+ *  3. Look up the session by jti REGARDLESS of revoked state, to tell
+ *     apart three cases: unknown jti (invalid), an ALREADY-REVOKED jti
+ *     (replay — the same token being reused after it was already rotated
+ *     or logged out) vs. still-live. A replay revokes the ENTIRE token
+ *     family (every descendant of the same login), not just this one
+ *     token, since reuse of an old token is a signal it may have been
+ *     stolen and both the legitimate and illegitimate holder may now have
+ *     valid-looking tokens.
+ *  4. Confirm the owning user is still active.
+ *  5. Generate a new token pair, reusing the SAME family_id (rotation
+ *     stays within one session lineage; only login starts a new one).
+ *  6. ATOMICALLY consume (soft-revoke) the presented token by jti — see
+ *     authRepository.consumeSessionByJti()'s doc comment for exactly how
+ *     this makes concurrent replay of the SAME token safe: only one of two
+ *     simultaneous requests presenting the same refresh token can ever
+ *     affect a row, so only one can ever receive a new token pair. If this
+ *     call reports 0 rows affected, another request already won the race
+ *     between our step-3 read and here — the freshly generated tokens
+ *     below are discarded, never persisted or returned.
+ *  7. Persist the new session and return the new pair.
+ *
+ * Steps 6-7 run inside one transaction: a crash between consuming the old
+ * session and persisting the new one leaves the old token dead but issues
+ * no orphaned "new" token that was never actually stored — the caller
+ * simply has to log in again, which is a safe failure mode, never a
+ * security one.
  *
  * @param {string} refreshToken
  * @param {string} [ipAddress]
@@ -241,29 +304,50 @@ async function refreshToken(refreshToken, ipAddress, userAgent) {
   try {
     decoded = verifyRefreshToken(refreshToken);
   } catch (jwtErr) {
-    const err = new Error('Refresh token is invalid or has expired. Please log in again.');
-    err.statusCode = 401;
-    err.code = 'INVALID_REFRESH_TOKEN';
-    err.isOperational = true;
-    throw err;
+    throw invalidRefreshTokenError();
   }
 
-  const session = await authRepository.findSession(refreshToken);
-
-  if (!session) {
-    logger.warn('Refresh token not found in active sessions', { userId: decoded.id });
-    const err = new Error('Session not found or has expired. Please log in again.');
-    err.statusCode = 401;
-    err.code = 'SESSION_NOT_FOUND';
-    err.isOperational = true;
-    throw err;
+  if (!decoded.jti) {
+    logger.warn('Refresh token missing jti claim — issued before rotation fix, rejecting', { userId: decoded.id });
+    throw invalidRefreshTokenError();
   }
 
-  const { user } = session;
+  const existingSession = await authRepository.findSessionByJti(decoded.jti);
+
+  if (!existingSession) {
+    logger.warn('Refresh token jti not found in any session', { userId: decoded.id });
+    throw invalidRefreshTokenError();
+  }
+
+  if (existingSession.user_id !== decoded.id) {
+    logger.warn('Refresh token jti does not belong to the claimed user — rejecting', {
+      claimedUserId: decoded.id, sessionUserId: existingSession.user_id,
+    });
+    throw invalidRefreshTokenError();
+  }
+
+  if (existingSession.revoked_at) {
+    // REPLAY: this exact token was already consumed (rotated or logged
+    // out) at some point in the past. Kill the whole family — if it was
+    // stolen, this stops both the legitimate and illegitimate holder.
+    logger.warn('Refresh token reuse detected — revoking entire session family', {
+      userId: decoded.id, familyId: existingSession.family_id, jti: decoded.jti,
+    });
+    if (existingSession.family_id) {
+      await authRepository.revokeFamily(existingSession.family_id);
+    }
+    throw invalidRefreshTokenError();
+  }
+
+  if (existingSession.expires_at && new Date(existingSession.expires_at) <= new Date()) {
+    throw invalidRefreshTokenError();
+  }
+
+  const { user } = existingSession;
 
   if (!user || user.status !== 'active') {
-    logger.warn('Token refresh for inactive user account', { userId: decoded.id });
-    await authRepository.deleteSession(refreshToken);
+    logger.warn('Token refresh for inactive/missing user account', { userId: decoded.id });
+    await authRepository.revokeSessionByJti(decoded.jti);
     const err = new Error('Account is inactive. Please contact the administrator.');
     err.statusCode = 403;
     err.code = 'ACCOUNT_INACTIVE';
@@ -271,20 +355,34 @@ async function refreshToken(refreshToken, ipAddress, userAgent) {
     throw err;
   }
 
-  // Revoke old session (token rotation)
-  await authRepository.deleteSession(refreshToken);
+  // Reuse the existing family — rotation stays within one session lineage.
+  const tokens = generateTokens(user, { familyId: existingSession.family_id });
 
-  const tokens = generateTokens(user);
-
-  await authRepository.createSession({
-    user_id: user.id,
-    refresh_token: tokens.refreshToken,
-    expires_at: expiryToDate(tokens.refreshExpiresIn || REFRESH_TOKEN_EXPIRY),
-    ip_address: ipAddress || null,
-    user_agent: userAgent || null,
+  let consumed = 0;
+  await sequelize.transaction(async (transaction) => {
+    consumed = await authRepository.consumeSessionByJti(decoded.jti, tokens.jti, { transaction });
+    if (consumed === 1) {
+      await authRepository.createSession({
+        user_id: user.id,
+        refresh_token: tokens.refreshToken,
+        jti: tokens.jti,
+        family_id: tokens.familyId,
+        expires_at: expiryToDate(tokens.refreshExpiresIn || REFRESH_TOKEN_EXPIRY),
+        ip_address: ipAddress || null,
+        user_agent: userAgent || null,
+      }, { transaction });
+    }
   });
 
-  logger.info('Token refreshed successfully', { userId: user.id });
+  if (consumed === 0) {
+    // Lost a concurrent race against another request presenting the SAME
+    // token — the freshly generated tokens above were never persisted and
+    // are discarded here; only the winner's tokens are ever valid.
+    logger.warn('Refresh token was already consumed by a concurrent request', { userId: decoded.id, jti: decoded.jti });
+    throw invalidRefreshTokenError();
+  }
+
+  logger.info('Token refreshed successfully (rotated)', { userId: user.id, oldJti: decoded.jti, newJti: tokens.jti });
 
   const forms = user.role
     ? await rbacService.getActiveFormsForRoles(

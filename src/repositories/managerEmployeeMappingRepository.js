@@ -70,6 +70,26 @@ const findByEmployeeIds = async (employeeIds) => {
 };
 
 /**
+ * Every active mapping row owned by ANY of the given Manager user IDs — the
+ * Service PO Admin employee-scope lookup (a Service PO Admin's authorized
+ * Employees are the union of every Employee mapped to a Manager on their
+ * team; see teamMappingRepository.findByServicePOAdmin and
+ * employeeAccessControlService.js). Same batching rationale as
+ * findByEmployeeIds() above — one query for every Manager on the team,
+ * never one query per Manager.
+ *
+ * @param {number[]} managerUserIds
+ * @param {number} companyId
+ * @returns {Promise<ManagerEmployeeMapping[]>}
+ */
+const findByManagerUserIds = async (managerUserIds, companyId) => {
+  if (!managerUserIds || managerUserIds.length === 0) return [];
+  return ManagerEmployeeMapping.findAll({
+    where: { manager_user_id: { [Op.in]: managerUserIds }, company_id: companyId, status: 'active' },
+  });
+};
+
+/**
  * The mapping row for one specific (employee, mapping_type) slot, if any —
  * the uniqueness/409 check when assigning a Primary or Secondary Manager.
  *
@@ -119,6 +139,7 @@ module.exports = {
   findByManager,
   findAllByEmployee,
   findByEmployeeIds,
+  findByManagerUserIds,
   findByEmployeeAndType,
   findByManagerAndEmployee,
   create,

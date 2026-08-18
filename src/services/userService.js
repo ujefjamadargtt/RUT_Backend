@@ -7,6 +7,7 @@ const employeeRepository = require('../repositories/employeeRepository');
 const roleRepository = require('../repositories/roleRepository');
 const userAdditionalRoleRepository = require('../repositories/userAdditionalRoleRepository');
 const roleHierarchyService = require('./roleHierarchyService');
+const userAccessControlService = require('./userAccessControlService');
 const { getCreatableRoleNames } = require('../config/roleHierarchy');
 const { createAuditLog } = require('../middlewares/auditLog');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
@@ -77,18 +78,26 @@ function assertAdditionalRolesAreOperational(roles) {
 }
 
 /**
- * Return a paginated, filtered list of users.
+ * Return a paginated, filtered list of users — scoped to whatever Users
+ * `authContext`'s caller is authorized to see (see
+ * userAccessControlService.resolveUserAccessWhere). Callers with no User
+ * Management permission at all never reach this function — see
+ * userController.getAll's function-level gate.
+ *
  * @param {object} query - Express req.query
+ * @param {object} authContext - { userId, companyId, hierarchyRank } — see controller
  * @returns {Promise<{ data: User[], meta: object }>}
  */
-const getAll = async (query = {}, companyId) => {
+const getAll = async (query = {}, authContext) => {
   const { page, limit, offset } = getPaginationParams(query);
+  const accessWhere = await userAccessControlService.resolveUserAccessWhere(authContext);
 
   const filters = {
     search: query.search || '',
     status: query.status || 'all',
     role_id: query.role_id || null,
-    companyId,
+    companyId: authContext.companyId,
+    accessWhere,
   };
 
   const sort = {
@@ -105,11 +114,17 @@ const getAll = async (query = {}, companyId) => {
 /**
  * Return a single user by ID including employee and role data.
  * Throws 404 if not found.
+ *
  * @param {number} id
+ * @param {number} companyId
+ * @param {object} [accessWhere] - userAccessControlService object-level
+ *   scope for the public GET /users/:id API (see userController.getById);
+ *   internal callers (update/delete's existence check below) omit this and
+ *   keep the plain companyId-only lookup they've always used.
  * @returns {Promise<User>}
  */
-const getById = async (id, companyId) => {
-  const user = await userRepository.findById(id, companyId);
+const getById = async (id, companyId, accessWhere = null) => {
+  const user = await userRepository.findById(id, companyId, accessWhere);
   if (!user) {
     const err = new Error(`User with ID ${id} not found.`);
     err.statusCode = 404;

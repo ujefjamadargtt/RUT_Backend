@@ -4,6 +4,7 @@ const express = require('express');
 const router = express.Router();
 
 const authenticate = require('../middlewares/auth');
+const requirePlatformAdmin = require('../middlewares/requirePlatformAdmin');
 const { validate } = require('../middlewares/validateRequest');
 const {
   roleFormMappingSchema,
@@ -18,7 +19,16 @@ const rbacController = require('../controllers/rbacController');
  * @swagger
  * tags:
  *   name: RBAC
- *   description: User<->Role and Role<->Form mappings, plus the Get Accessible Forms lookup
+ *   description: Role<->Form permission mapping (Platform Admin only)
+ */
+
+/**
+ * Every route below discloses or edits Role -> Form permission mappings —
+ * gated by requirePlatformAdmin, not the generic authorize() middleware,
+ * for the same reason as role.routes.js: authorize()'s senior-tier bypass
+ * (ranks 1-4) would incorrectly admit Admin/Entity Admin/BU Admin, but the
+ * seeded RBAC data (role_capabilities: platform.manage_form_master) grants
+ * this to Platform Admin only.
  */
 
 /**
@@ -61,6 +71,7 @@ const rbacController = require('../controllers/rbacController');
 router.post(
   '/forms',
   authenticate,
+  requirePlatformAdmin,
   validate(formsForRolesSchema),
   rbacController.formsForRoles
 );
@@ -101,6 +112,7 @@ router.post(
 router.post(
   '/forms/mapping',
   authenticate,
+  requirePlatformAdmin,
   validate(mapFormSchema),
   rbacController.mapForm
 );
@@ -127,6 +139,7 @@ router.post(
 router.get(
   '/form-mappings/:roleId',
   authenticate,
+  requirePlatformAdmin,
   rbacController.roleFormMappings
 );
 
@@ -159,6 +172,7 @@ router.get(
 router.get(
   '/form-mappings',
   authenticate,
+  requirePlatformAdmin,
   validate(getRoleFormMappingQuerySchema, 'query'),
   rbacController.getRoleFormMappingById
 );
@@ -196,6 +210,7 @@ router.get(
 router.post(
   '/form-mappings',
   authenticate,
+  requirePlatformAdmin,
   validate(roleFormMappingSchema),
   rbacController.createRoleFormMapping
 );
@@ -231,6 +246,7 @@ router.post(
 router.delete(
   '/form-mappings/:roleId/:formId',
   authenticate,
+  requirePlatformAdmin,
   rbacController.deleteRoleFormMapping
 );
 
@@ -277,6 +293,7 @@ router.delete(
 router.put(
   '/form-mappings/:roleId',
   authenticate,
+  requirePlatformAdmin,
   validate(replaceRoleFormMappingsSchema),
   rbacController.replaceRoleFormMappings
 );

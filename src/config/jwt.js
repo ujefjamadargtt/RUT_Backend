@@ -1,6 +1,7 @@
 'use strict';
 
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 
 const {
   JWT_SECRET,
@@ -85,10 +86,24 @@ function verifyRefreshToken(token) {
  * shares this one token shape; there is no longer a separate Employee
  * audience/payload.
  *
+ * The refresh token payload previously carried ONLY `{ id: user.id }` — with
+ * no unique claim, `jwt.sign` (HS256) is a deterministic function of
+ * header+payload+secret, so a login immediately followed by a refresh
+ * inside the same one-second `iat` window produced a BYTE-IDENTICAL
+ * refresh JWT to the one just consumed. Every refresh token now embeds a
+ * fresh, cryptographically random `jti` (guaranteeing uniqueness
+ * regardless of timing) and a `familyId` — shared across every token
+ * descended from one login, so authRepository/authService can detect an
+ * already-rotated token being replayed and revoke the whole lineage. See
+ * database/migrations/20260857_add_refresh_token_rotation.sql.
+ *
  * @param {object} user - User record (plain object or Sequelize instance), with `role` included.
- * @returns {{ accessToken: string, refreshToken: string, expiresIn: string, refreshExpiresIn: string }}
+ * @param {object} [options]
+ * @param {string} [options.familyId] - reuse an existing session family
+ *   (rotation); omit to start a new one (login).
+ * @returns {{ accessToken: string, refreshToken: string, expiresIn: string, refreshExpiresIn: string, jti: string, familyId: string }}
  */
-function generateTokens(user) {
+function generateTokens(user, options = {}) {
   const payload = {
     id: user.id,
     email: user.email,
@@ -98,14 +113,19 @@ function generateTokens(user) {
     employeeId: user.employee_id,
   };
 
+  const jti = crypto.randomUUID();
+  const familyId = options.familyId || crypto.randomUUID();
+
   const accessToken = signToken(payload);
-  const refreshToken = signRefreshToken({ id: user.id });
+  const refreshToken = signRefreshToken({ id: user.id, jti, familyId });
 
   return {
     accessToken,
     refreshToken,
     expiresIn: ACCESS_TOKEN_EXPIRY,
     refreshExpiresIn: REFRESH_TOKEN_EXPIRY,
+    jti,
+    familyId,
   };
 }
 

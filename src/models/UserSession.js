@@ -57,6 +57,28 @@ module.exports = (sequelize) => {
         type: DataTypes.TEXT,
         allowNull: true,
       },
+      // Refresh token rotation + replay prevention — see database/migrations/
+      // 20260857_add_refresh_token_rotation.sql and authRepository.js. jti is
+      // the per-issuance identifier embedded in the refresh JWT itself and
+      // the sole lookup key for rotation/revocation going forward; family_id
+      // is shared across every token descended from one login, so a
+      // detected replay can revoke the whole lineage in one update.
+      jti: {
+        type: DataTypes.STRING(36),
+        allowNull: true,
+      },
+      family_id: {
+        type: DataTypes.STRING(36),
+        allowNull: true,
+      },
+      revoked_at: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
+      replaced_by_jti: {
+        type: DataTypes.STRING(36),
+        allowNull: true,
+      },
     },
     {
       sequelize,

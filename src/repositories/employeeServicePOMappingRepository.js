@@ -1,6 +1,6 @@
 'use strict';
 
-const { EmployeeServicePOMapping, Employee, ServicePO } = require('../models');
+const { EmployeeServicePOMapping, Employee, ServicePO, Project } = require('../models');
 
 /**
  * Employee Service PO Mapping Repository
@@ -92,6 +92,42 @@ const findByEmployee = async (employeeId, companyId, status) => {
 };
 
 /**
+ * Same as findByEmployee(), plus the Service PO's Project (id + name) — for
+ * the Employee Project Hours report (employeeProjectHoursReportService.js),
+ * which groups a mapped PO under its Project. Kept as a separate function
+ * rather than adding the extra include to findByEmployee() itself, so every
+ * other existing caller of findByEmployee() is completely unaffected.
+ * @param {number} employeeId
+ * @param {number} companyId
+ * @param {string} [status]
+ * @returns {Promise<EmployeeServicePOMapping[]>}
+ */
+const findByEmployeeWithProject = async (employeeId, companyId, status) => {
+  const where = { employee_id: employeeId, company_id: companyId };
+  if (status) where.status = status;
+
+  return EmployeeServicePOMapping.findAll({
+    where,
+    include: [
+      {
+        model: ServicePO,
+        as: 'servicePO',
+        attributes: ['id', 'service_po_code', 'service_po_name', 'status', 'client_id', 'project_id'],
+        include: [
+          {
+            model: Project,
+            as: 'project',
+            attributes: ['id', 'project_code', 'project_name'],
+            required: false,
+          },
+        ],
+      },
+    ],
+    order: [['created_at', 'DESC']],
+  });
+};
+
+/**
  * List every Employee mapped to one Service PO, joined with the employee's
  * name/code, optionally filtered by status.
  * @param {number} servicePOId
@@ -123,5 +159,6 @@ module.exports = {
   updateStatus,
   remove,
   findByEmployee,
+  findByEmployeeWithProject,
   findByServicePO,
 };

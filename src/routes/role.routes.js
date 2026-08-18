@@ -4,6 +4,7 @@ const express = require('express');
 const router = express.Router();
 
 const authenticate = require('../middlewares/auth');
+const requirePlatformAdmin = require('../middlewares/requirePlatformAdmin');
 const { validate } = require('../middlewares/validateRequest');
 const {
   createRoleSchema,
@@ -15,7 +16,21 @@ const roleController = require('../controllers/roleController');
  * @swagger
  * tags:
  *   name: Roles
- *   description: Role management (Management only for write operations)
+ *   description: Role management (Platform Admin only)
+ */
+
+/**
+ * Role Master — reveals the complete system role hierarchy (Admin, BU
+ * Admin, Entity Admin, Manager, ...), so every route here is gated by
+ * requirePlatformAdmin, NOT the generic authorize() middleware:
+ * authorize()'s rank-based senior-tier bypass (ranks 1-4) would let Admin/
+ * Entity Admin/BU Admin straight through, but the seeded RBAC data
+ * (role_capabilities: platform.manage_role_master) grants this to Platform
+ * Admin ONLY — the same reasoning requireAdmin.js/requirePlatformAdmin.js
+ * already document for other Platform-Admin-exclusive actions (e.g.
+ * creating an Admin). auth.js's isPlatformAdminAllowedRoute() already
+ * whitelists this baseUrl ('/roles') for Platform Admin specifically,
+ * confirming this is the intended scope.
  */
 
 /**
@@ -47,6 +62,7 @@ const roleController = require('../controllers/roleController');
 router.get(
   '/',
   authenticate,
+  requirePlatformAdmin,
   roleController.getAll
 );
 
@@ -72,6 +88,7 @@ router.get(
 router.get(
   '/:id',
   authenticate,
+  requirePlatformAdmin,
   roleController.getById
 );
 
@@ -100,6 +117,7 @@ router.get(
 router.post(
   '/',
   authenticate,
+  requirePlatformAdmin,
   validate(createRoleSchema),
   roleController.create
 );
@@ -134,6 +152,7 @@ router.post(
 router.put(
   '/:id',
   authenticate,
+  requirePlatformAdmin,
   validate(updateRoleSchema),
   roleController.update
 );
@@ -168,6 +187,7 @@ router.put(
 router.delete(
   '/:id',
   authenticate,
+  requirePlatformAdmin,
   roleController.delete
 );
 

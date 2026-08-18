@@ -299,6 +299,38 @@ const getMonthlyHierarchyBreakdown = async ({ employeeId, month, year, companyId
 };
 
 /**
+ * Hierarchy Breakdown for an arbitrary inclusive date range — hours grouped
+ * by (service_po_id, hierarchy_node_id), for one employee. Same shape/
+ * semantics as getDailyHierarchyBreakdown/getMonthlyHierarchyBreakdown
+ * (hierarchy_node_id is null for hours logged directly against the Service
+ * PO itself), generalised to any [startDate, endDate] span so a single
+ * function covers "specific date" (startDate === endDate), "month"
+ * (calendar month's bounds), and "date range" callers alike — see
+ * employeeProjectHoursReportService.js. Deliberately NOT filtered by
+ * status, matching every other Employee-facing aggregate in this file
+ * (getDailyHierarchyBreakdown, getMonthlyHierarchyBreakdown): an employee
+ * sees their own logged hours regardless of approval/sync state.
+ * @param {object} params - { employeeId, startDate, endDate, companyId }
+ * @returns {Promise<Array<{ service_po_id, hierarchy_node_id, total_hours }>>}
+ */
+const getHierarchyBreakdownForRange = async ({ employeeId, startDate, endDate, companyId }) => {
+  return EmployeeWorkLog.findAll({
+    attributes: [
+      'service_po_id',
+      'hierarchy_node_id',
+      [fn('SUM', col('hours')), 'total_hours'],
+    ],
+    where: {
+      employee_id: parseInt(employeeId, 10),
+      company_id: companyId,
+      work_date: { [Op.gte]: startDate, [Op.lte]: endDate },
+    },
+    group: ['service_po_id', 'hierarchy_node_id'],
+    raw: true,
+  });
+};
+
+/**
  * ALL work log rows for one company/month/year (regardless of status),
  * joined with Employee/ServicePO/SubProject — the ONLY data source for the
  * Admin "Sync Employee Work Logs" flow (see timesheetService.previewPmsImport
@@ -456,6 +488,29 @@ const findForApprovalSummary = async ({ employeeId, companyId, startDate, endDat
     where,
     include: buildIncludes(),
     order: [['work_date', 'DESC'], ['id', 'ASC']],
+  });
+};
+
+/**
+ * Same as findForApprovalSummary() above, but for MULTIPLE employees at
+ * once — the source data for the Timesheet Approval Status Report
+ * (timesheetApprovalReportService.js), which can show a Manager's whole
+ * mapped team in one call rather than one employee at a time. Not filtered
+ * by status, for the same reason findForApprovalSummary() isn't.
+ * @param {object} params - { employeeIds, companyId, startDate, endDate }
+ * @returns {Promise<EmployeeWorkLog[]>}
+ */
+const findForApprovalSummaryByEmployees = async ({ employeeIds, companyId, startDate, endDate }) => {
+  if (!employeeIds || employeeIds.length === 0) return [];
+
+  const where = { employee_id: { [Op.in]: employeeIds }, company_id: companyId };
+  if (startDate) where.work_date = { ...where.work_date, [Op.gte]: startDate };
+  if (endDate) where.work_date = { ...where.work_date, [Op.lte]: endDate };
+
+  return EmployeeWorkLog.findAll({
+    where,
+    include: buildIncludes(),
+    order: [['employee_id', 'ASC'], ['work_date', 'DESC'], ['id', 'ASC']],
   });
 };
 
@@ -697,6 +752,7 @@ module.exports = {
   getCalendarSummary,
   getDailyHierarchyBreakdown,
   getMonthlyHierarchyBreakdown,
+  getHierarchyBreakdownForRange,
   getMonthlyLogHierarchyBreakdown,
   deleteMonthlyEntries,
   hasMonthlyEntry,
@@ -705,6 +761,7 @@ module.exports = {
   revertSyncStatusByImportIds,
   getReportRows,
   findForApprovalSummary,
+  findForApprovalSummaryByEmployees,
   approveByEmployeeAndDates,
   approveByEmployeeAndMonths,
   markApprovedByIds,

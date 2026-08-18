@@ -17,7 +17,7 @@ const { Employee, ServicePOResource, ServicePO, User } = require('../models');
  * @returns {Promise<{ rows: Employee[], count: number }>}
  */
 const findAll = async (filters = {}, pagination = {}, sort = {}) => {
-  const { search, status, designation, companyId } = filters;
+  const { search, status, designation, companyId, accessWhere } = filters;
   const { limit = 20, offset = 0 } = pagination;
   const { sortBy: requestedSortBy = 'created_at', sortOrder = 'DESC' } = sort;
   // Defense-in-depth allowlist matching employeeValidation.js's sort_by enum
@@ -29,7 +29,14 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
     ? sortOrder.toUpperCase()
     : 'DESC';
 
-  const where = { is_deleted: false, company_id: companyId };
+  // accessWhere (employeeAccessControlService.resolveEmployeeAccessWhere) is
+  // the authoritative object-level scope when supplied — it already decides
+  // company_id (or an explicit id-in-scope list) per the caller's role, so
+  // it takes precedence over the raw companyId fallback other, non-scoped
+  // callers of this same filters shape still rely on.
+  const where = accessWhere
+    ? { is_deleted: false, ...accessWhere }
+    : { is_deleted: false, company_id: companyId };
 
   // Status filter — omit clause entirely when 'all' is requested
   if (status && status !== 'all') {
@@ -84,13 +91,29 @@ const findById = async (id, companyId) => {
  * so that GET/PUT /employees/:id can flatten `email` onto the response the
  * same way GET /employees already does, without adding an unnecessary
  * include everywhere else findById() is used.
+ *
+ * `accessWhere` (employeeAccessControlService.resolveEmployeeAccessWhere)
+ * is merged directly into the WHERE clause of THIS SAME query, not checked
+ * afterward — an Employee outside the caller's authorized scope and an
+ * Employee that plain doesn't exist both simply fail to match a row here,
+ * so GET /employees/:id returns the identical 404 either way and never
+ * discloses which case it was. When omitted, falls back to a bare
+ * companyId filter for callers that don't need per-object scoping.
+ *
  * @param {number} id
  * @param {number} companyId
+ * @param {object} [accessWhere] - caller's authorized-scope WHERE fragment
  * @returns {Promise<Employee|null>}
  */
-const findByIdWithEmail = async (id, companyId) => {
+const findByIdWithEmail = async (id, companyId, accessWhere = null) => {
+  // Op.and, not object spread: accessWhere may itself carry an `id` key
+  // (the Manager/Service PO Admin/Employee scope is an id-in-list filter) —
+  // spreading it after `{ id }` would silently overwrite the requested id
+  // with the scope's list instead of ANDing the two together.
   return Employee.findOne({
-    where: { id, is_deleted: false, company_id: companyId },
+    where: accessWhere
+      ? { [Op.and]: [{ id, is_deleted: false }, accessWhere] }
+      : { id, is_deleted: false, company_id: companyId },
     include: [
       {
         model: User,
