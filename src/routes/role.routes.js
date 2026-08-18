@@ -20,17 +20,25 @@ const roleController = require('../controllers/roleController');
  */
 
 /**
- * Role Master — reveals the complete system role hierarchy (Admin, BU
- * Admin, Entity Admin, Manager, ...), so every route here is gated by
- * requirePlatformAdmin, NOT the generic authorize() middleware:
- * authorize()'s rank-based senior-tier bypass (ranks 1-4) would let Admin/
- * Entity Admin/BU Admin straight through, but the seeded RBAC data
- * (role_capabilities: platform.manage_role_master) grants this to Platform
+ * Role Master — CRUD and single-role detail reveal the complete system role
+ * hierarchy (hierarchy_rank, inherits_role_id, is_system, ...), so those
+ * routes (GET /:id, POST, PUT, DELETE) are gated by requirePlatformAdmin,
+ * NOT the generic authorize() middleware: authorize()'s rank-based
+ * senior-tier bypass (ranks 1-4) would let Admin/Entity Admin/BU Admin
+ * straight through, but the seeded RBAC data (role_capabilities:
+ * platform.manage_role_master) grants Role Master management to Platform
  * Admin ONLY — the same reasoning requireAdmin.js/requirePlatformAdmin.js
  * already document for other Platform-Admin-exclusive actions (e.g.
- * creating an Admin). auth.js's isPlatformAdminAllowedRoute() already
- * whitelists this baseUrl ('/roles') for Platform Admin specifically,
- * confirming this is the intended scope.
+ * creating an Admin).
+ *
+ * GET / (the plain list) is the one exception, deliberately left open to
+ * ANY authenticated role via `authenticate` alone: it's the role-selection
+ * dropdown source for non-Platform-Admin flows like BU Admin's Create
+ * Employee / Create User screens (see userService.js's ROLE_CREATION_MATRIX
+ * / assertActorCanAssignRoles, which is what actually enforces who may be
+ * assigned which role — this list endpoint is read-only and never the
+ * authorization boundary itself). roleRepository.findAll() already excludes
+ * "Platform Admin" from the result set regardless of caller.
  */
 
 /**
@@ -62,7 +70,6 @@ const roleController = require('../controllers/roleController');
 router.get(
   '/',
   authenticate,
-  requirePlatformAdmin,
   roleController.getAll
 );
 

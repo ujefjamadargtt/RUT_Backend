@@ -46,6 +46,7 @@ const employeeServicePOMappingRoutes = require('./routes/employeeServicePOMappin
 const employeeTimesheetRoutes = require('./routes/employeeTimesheet.routes');
 const employeeMonthlyWorkLogRoutes = require('./routes/employeeMonthlyWorkLog.routes');
 const employeeReportRoutes = require('./routes/employeeReport.routes');
+const platformAdminRoutes = require('./routes/platformAdmin.routes');
 
 const app = express();
 
@@ -228,6 +229,7 @@ app.use(`${API_PREFIX}/employee-servicepo-mapping`, employeeServicePOMappingRout
 app.use(`${API_PREFIX}/employee-timesheets`, employeeTimesheetRoutes);
 app.use(`${API_PREFIX}/employee-timesheets/monthly`, employeeMonthlyWorkLogRoutes);
 app.use(`${API_PREFIX}/employee-reports`, employeeReportRoutes);
+app.use(`${API_PREFIX}/platform-admin`, platformAdminRoutes);
 
 // ─── 404 Handler ──────────────────────────────────────────────────────────────
 app.use((req, res) => {

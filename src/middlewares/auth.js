@@ -29,6 +29,7 @@ function isPlatformAdminAllowedRoute(req) {
   if (req.baseUrl.endsWith('/admins')) return true;
   if (req.baseUrl.endsWith('/forms')) return true;
   if (req.baseUrl.endsWith('/roles')) return true;
+  if (req.baseUrl.endsWith('/platform-admin')) return true;
   return false;
 }
 
