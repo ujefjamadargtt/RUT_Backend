@@ -8,6 +8,21 @@ const { ServicePOMonthlyBudget, ServicePO, Client } = require('../models');
 // budget data on POs that are actually still open.
 const ACTIVE_PO_STATUSES = ['in-progress', 'on-hold', 'pending'];
 
+// A Service PO flagged 'internal-no-invoice' is, by definition, never
+// invoiced — it has no Invoice/Billed Amount to enter for any month, so it
+// must never appear in the "pick a Service PO" surfaces below (the dropdown
+// and the current-month grid). This is a hard, permanent exclusion — not a
+// frontend-toggleable filter — same as ACTIVE_PO_STATUSES/is_deleted above,
+// which the frontend also never has to ask for. A PO with no
+// invoice_frequency set yet (NULL) is intentionally NOT excluded — that
+// means "not yet classified", not "explicitly no invoice".
+const excludeInternalNoInvoice = {
+  [Op.or]: [
+    { invoice_frequency: { [Op.ne]: 'internal-no-invoice' } },
+    { invoice_frequency: null },
+  ],
+};
+
 /**
  * Service PO Monthly Budget Repository
  * All direct database interaction for service_po_monthly_budgets.
@@ -70,7 +85,12 @@ const findById = async (id, companyId) => {
  */
 const findActiveServicePOsWithBudget = async (month, year, companyId) => {
   return ServicePO.findAll({
-    where: { status: { [Op.in]: ACTIVE_PO_STATUSES }, is_deleted: false, company_id: companyId },
+    where: {
+      status: { [Op.in]: ACTIVE_PO_STATUSES },
+      is_deleted: false,
+      company_id: companyId,
+      ...excludeInternalNoInvoice,
+    },
     include: [
       {
         model: Client,
@@ -129,7 +149,12 @@ const findBudgetsForMonth = async (month, year, companyId, servicePOIds) => {
  * @returns {Promise<ServicePO[]>}
  */
 const findActiveServicePOsForDropdown = async (companyId, servicePOIds) => {
-  const where = { status: { [Op.in]: ACTIVE_PO_STATUSES }, is_deleted: false, company_id: companyId };
+  const where = {
+    status: { [Op.in]: ACTIVE_PO_STATUSES },
+    is_deleted: false,
+    company_id: companyId,
+    ...excludeInternalNoInvoice,
+  };
   if (servicePOIds !== null) {
     where.id = { [Op.in]: servicePOIds };
   }

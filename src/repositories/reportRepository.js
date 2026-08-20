@@ -2127,6 +2127,504 @@ async function getClientServicePOHours(filters) {
   return sequelize.query(query, { replacements, type: QueryTypes.SELECT });
 }
 
+/**
+ * Convert a "YYYY-MM-DD" date string to a single comparable integer
+ * (year*12 + month) — the same encoding dashboardRepository.js uses to
+ * compare an arbitrary date range against service_po_monthly_budgets/
+ * cost_budget_master rows, which only ever store a whole calendar month
+ * (year, month), never a specific day.
+ * @param {string} dateStr - "YYYY-MM-DD"
+ * @returns {number}
+ */
+function periodKey(dateStr) {
+  const d = new Date(dateStr);
+  return d.getUTCFullYear() * 12 + (d.getUTCMonth() + 1);
+}
+
+/**
+ * Shared WHERE-clause builder for the trend/bench reports below (Monthly
+ * Hours Trend, Monthly Utilization Trend, Leave/No-Work Hours Trend,
+ * Employee Bench %) — all read `timesheets t` joined to `service_pos sp`
+ * (+ `service_types st` where a category is needed) over an explicit
+ * startDate/endDate window. Mirrors dashboardRepository.js's
+ * buildAnalyticsFilters() so these Reports reproduce the exact same
+ * business meaning as the Dashboard analytics they're based on.
+ *
+ * @param {object} filters - { companyId, startDate, endDate, employeeId, clientId, poId, serviceTypeId, hoursSource, roleId }
+ * @param {object} replacements - mutated in place with the bind values this clause needs
+ * @returns {string} SQL WHERE clause (without the WHERE keyword)
+ */
+function buildTrendFilters(filters, replacements) {
+  const { companyId, startDate, endDate, employeeId, clientId, poId, serviceTypeId, roleId } = filters;
+  const conditions = [
+    't.company_id = :companyId',
+    't.timesheet_date >= :startDate',
+    't.timesheet_date <= :endDate',
+  ];
+  replacements.companyId = companyId;
+  replacements.startDate = startDate;
+  replacements.endDate = endDate;
+
+  if (employeeId) {
+    conditions.push('t.employee_id = :employeeId');
+    replacements.employeeId = employeeId;
+  }
+  if (clientId) {
+    conditions.push('sp.client_id = :clientId');
+    replacements.clientId = clientId;
+  }
+  if (poId) {
+    conditions.push('t.service_po_id = :poId');
+    replacements.poId = poId;
+  }
+  if (serviceTypeId) {
+    conditions.push('st.id = :serviceTypeId');
+    replacements.serviceTypeId = serviceTypeId;
+  }
+  // Role ID 5 only: exclude unpublished timesheet rows — same guard used
+  // throughout this file and dashboardRepository.js.
+  if (Number(roleId) === 5) {
+    conditions.push(
+      'EXISTS (SELECT 1 FROM timesheet_import_history h WHERE h.id = t.timesheet_import_id AND h.is_publish = true)'
+    );
+  }
+
+  return conditions.join(' AND ');
+}
+
+/**
+ * Client Cost Analytics Report — Part A: total hours per client, entire
+ * dataset, unfiltered (matches the Dashboard analytics2 report this is
+ * based on — client_wise_cost_analytics is deliberately never scoped by
+ * period/employee/client/PO). Merged with getClientCostAnalyticsCost() by
+ * the service layer, same two-query-then-merge approach
+ * dashboardRepository.js's getClientWiseCostAnalytics() uses (a client with
+ * hours but no cost, or vice versa, must still appear).
+ *
+ * @param {object} filters - { companyId, hoursSource }
+ * @returns {Promise<object[]>} rows: { client_id, client_name, total_hours }
+ */
+async function getClientCostAnalyticsHours(filters) {
+  const { companyId, hoursSource } = filters;
+  const hoursCol = (hoursSource === 'O') ? 't.hours_logged' : 'COALESCE(t.modified_hours, t.hours_logged)';
+
+  return sequelize.query(
+    `SELECT
+       c.id AS client_id,
+       c.client_name,
+       ROUND(SUM(${hoursCol})::NUMERIC, 2) AS total_hours
+     FROM timesheets t
+     INNER JOIN service_pos sp ON sp.id = t.service_po_id
+     INNER JOIN clients c      ON c.id  = sp.client_id
+     WHERE t.company_id = :companyId
+     GROUP BY c.id, c.client_name`,
+    { replacements: { companyId }, type: QueryTypes.SELECT }
+  );
+}
+
+/**
+ * Client Cost Analytics Report — Part B: total cost (Invoice Master —
+ * service_po_monthly_budgets.billed_amount) per client, entire dataset,
+ * unfiltered. See getClientCostAnalyticsHours() above.
+ *
+ * @param {object} filters - { companyId }
+ * @returns {Promise<object[]>} rows: { client_id, client_name, total_cost }
+ */
+async function getClientCostAnalyticsCost(filters) {
+  const { companyId } = filters;
+
+  return sequelize.query(
+    `SELECT
+       c.id AS client_id,
+       c.client_name,
+       ROUND(COALESCE(SUM(spmb.billed_amount), 0)::NUMERIC, 2) AS total_cost
+     FROM service_po_monthly_budgets spmb
+     INNER JOIN service_pos sp ON sp.id = spmb.service_po_id
+     INNER JOIN clients c      ON c.id  = sp.client_id
+     WHERE sp.company_id = :companyId
+     GROUP BY c.id, c.client_name`,
+    { replacements: { companyId }, type: QueryTypes.SELECT }
+  );
+}
+
+/**
+ * Client Cost Analytics Report — Part C: per client, total cost broken down
+ * by service-type category (Invoice Master basis), entire dataset,
+ * unfiltered — same shape/scope as dashboardRepository.js's
+ * getClientCategoryCostMatrix().
+ *
+ * @param {object} filters - { companyId }
+ * @returns {Promise<object[]>} rows: { client_id, client_name, category_name, cost }
+ */
+async function getClientCategoryCostMatrixReport(filters) {
+  const { companyId } = filters;
+
+  return sequelize.query(
+    `SELECT
+       c.id AS client_id,
+       c.client_name,
+       COALESCE(sc.name, 'Uncategorized') AS category_name,
+       ROUND(COALESCE(SUM(spmb.billed_amount), 0)::NUMERIC, 2) AS cost
+     FROM service_po_monthly_budgets spmb
+     INNER JOIN service_pos sp        ON sp.id = spmb.service_po_id
+     INNER JOIN clients c             ON c.id  = sp.client_id
+     INNER JOIN service_types st      ON st.id = sp.service_type_id
+     LEFT  JOIN service_categories sc ON sc.id = st.service_category_id
+     WHERE sp.company_id = :companyId
+     GROUP BY c.id, c.client_name, category_name
+     ORDER BY c.client_name, category_name`,
+    { replacements: { companyId }, type: QueryTypes.SELECT }
+  );
+}
+
+/**
+ * Client Wise Analytics Report — Part A: total hours + distinct project
+ * (Service PO) count per client, for the given period/filters. Merged with
+ * getClientWiseAnalyticsCost() by the service layer — mirrors
+ * dashboardRepository.js's getClientWiseAnalytics().
+ *
+ * @param {object} filters - { companyId, startDate, endDate, employeeId, clientId, poId, serviceTypeId, hoursSource, roleId }
+ * @returns {Promise<object[]>} rows: { client_id, client_name, total_hours, total_projects }
+ */
+async function getClientWiseAnalyticsHours(filters) {
+  const replacements = {};
+  const whereClause = buildTrendFilters(filters, replacements);
+  const hoursCol = (filters.hoursSource === 'O') ? 't.hours_logged' : 'COALESCE(t.modified_hours, t.hours_logged)';
+
+  return sequelize.query(
+    `SELECT
+       c.id AS client_id,
+       c.client_name,
+       ROUND(SUM(${hoursCol})::NUMERIC, 2) AS total_hours,
+       COUNT(DISTINCT sp.id) AS total_projects
+     FROM timesheets t
+     INNER JOIN service_pos sp   ON sp.id = t.service_po_id
+     INNER JOIN clients c        ON c.id  = sp.client_id
+     INNER JOIN service_types st ON st.id = sp.service_type_id
+     WHERE ${whereClause}
+     GROUP BY c.id, c.client_name`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+}
+
+/**
+ * Client Wise Analytics Report — Part B: total cost (Invoice Master) per
+ * client, for the given period/filters. See getClientWiseAnalyticsHours()
+ * above. employeeId (no direct equivalent on Invoice Master) narrows to
+ * Service POs that employee actually logged hours against in the period,
+ * while still summing that PO's full billed_amount — same documented
+ * interpretation as dashboardRepository.js's buildInvoiceMasterFilters().
+ *
+ * @param {object} filters - { companyId, startDate, endDate, employeeId, clientId, poId, serviceTypeId }
+ * @returns {Promise<object[]>} rows: { client_id, client_name, total_cost }
+ */
+async function getClientWiseAnalyticsCost(filters) {
+  const { companyId, startDate, endDate, employeeId, clientId, poId, serviceTypeId } = filters;
+  const replacements = { companyId, startPeriodKey: periodKey(startDate), endPeriodKey: periodKey(endDate) };
+  const conditions = [
+    'sp.company_id = :companyId',
+    '(spmb.year * 12 + spmb.month) BETWEEN :startPeriodKey AND :endPeriodKey',
+  ];
+
+  if (clientId) {
+    conditions.push('sp.client_id = :clientId');
+    replacements.clientId = clientId;
+  }
+  if (poId) {
+    conditions.push('sp.id = :poId');
+    replacements.poId = poId;
+  }
+  if (serviceTypeId) {
+    conditions.push('st.id = :serviceTypeId');
+    replacements.serviceTypeId = serviceTypeId;
+  }
+  if (employeeId) {
+    conditions.push(
+      'EXISTS (SELECT 1 FROM timesheets et WHERE et.service_po_id = sp.id AND et.employee_id = :employeeId ' +
+      'AND et.timesheet_date >= :empStartDate AND et.timesheet_date <= :empEndDate)'
+    );
+    replacements.employeeId = employeeId;
+    replacements.empStartDate = startDate;
+    replacements.empEndDate = endDate;
+  }
+
+  return sequelize.query(
+    `SELECT
+       c.id AS client_id,
+       c.client_name,
+       ROUND(COALESCE(SUM(spmb.billed_amount), 0)::NUMERIC, 2) AS total_cost
+     FROM service_po_monthly_budgets spmb
+     INNER JOIN service_pos sp   ON sp.id = spmb.service_po_id
+     INNER JOIN clients c        ON c.id  = sp.client_id
+     INNER JOIN service_types st ON st.id = sp.service_type_id
+     WHERE ${conditions.join(' AND ')}
+     GROUP BY c.id, c.client_name`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+}
+
+/**
+ * Monthly Hours Trend Report — Cost by Category series: total cost per
+ * month (Invoice Master — service_po_monthly_budgets.billed_amount) broken
+ * down by service-type category — same business rule as
+ * dashboardRepository.js's getCostTrendByType(). No timesheets join —
+ * Invoice Master rows are already at the (Service PO, month, year)
+ * granularity, so no aggregation-inflation risk.
+ *
+ * @param {object} filters - { companyId, startDate, endDate, clientId, poId, serviceTypeId }
+ * @returns {Promise<object[]>} rows: { year, month, category_name, cost }
+ */
+async function getMonthlyCostByCategory(filters) {
+  const { companyId, startDate, endDate, clientId, poId, serviceTypeId } = filters;
+  const replacements = { companyId, startPeriodKey: periodKey(startDate), endPeriodKey: periodKey(endDate) };
+  const conditions = [
+    'sp.company_id = :companyId',
+    '(spmb.year * 12 + spmb.month) BETWEEN :startPeriodKey AND :endPeriodKey',
+  ];
+
+  if (clientId) {
+    conditions.push('sp.client_id = :clientId');
+    replacements.clientId = clientId;
+  }
+  if (poId) {
+    conditions.push('sp.id = :poId');
+    replacements.poId = poId;
+  }
+  if (serviceTypeId) {
+    conditions.push('st.id = :serviceTypeId');
+    replacements.serviceTypeId = serviceTypeId;
+  }
+
+  return sequelize.query(
+    `SELECT
+       spmb.year,
+       spmb.month,
+       COALESCE(sc.name, 'Uncategorized') AS category_name,
+       ROUND(COALESCE(SUM(spmb.billed_amount), 0)::NUMERIC, 2) AS cost
+     FROM service_po_monthly_budgets spmb
+     INNER JOIN service_pos sp        ON sp.id = spmb.service_po_id
+     INNER JOIN service_types st      ON st.id = sp.service_type_id
+     LEFT  JOIN service_categories sc ON sc.id = st.service_category_id
+     WHERE ${conditions.join(' AND ')}
+     GROUP BY spmb.year, spmb.month, category_name
+     ORDER BY spmb.year, spmb.month, category_name`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+}
+
+/**
+ * Monthly Hours Trend Report — total hours per month, broken down by
+ * service-type category (via service_categories.report_bucket_key, same
+ * data-driven classification as dashboardRepository.js's
+ * getAnalyticsMonthlyTrend() — never a hardcoded category-name comparison).
+ *
+ * @param {object} filters - { companyId, startDate, endDate, employeeId, clientId, poId, serviceTypeId, hoursSource, roleId }
+ * @returns {Promise<object[]>} rows: { year, month, category_name, report_bucket_key, hours }
+ */
+async function getMonthlyHoursByCategory(filters) {
+  const replacements = {};
+  const whereClause = buildTrendFilters(filters, replacements);
+  const hoursCol = (filters.hoursSource === 'O') ? 't.hours_logged' : 'COALESCE(t.modified_hours, t.hours_logged)';
+
+  return sequelize.query(
+    `SELECT
+       EXTRACT(YEAR  FROM t.timesheet_date)::int AS year,
+       EXTRACT(MONTH FROM t.timesheet_date)::int AS month,
+       COALESCE(sc.name, 'Uncategorized')         AS category_name,
+       sc.report_bucket_key,
+       ROUND(SUM(${hoursCol})::NUMERIC, 2)     AS hours
+     FROM timesheets t
+     INNER JOIN service_pos sp   ON sp.id = t.service_po_id
+     INNER JOIN service_types st ON st.id = sp.service_type_id
+     LEFT JOIN service_categories sc ON sc.id = st.service_category_id
+     WHERE ${whereClause}
+     GROUP BY year, month, category_name, sc.report_bucket_key
+     ORDER BY year, month`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+}
+
+/**
+ * Monthly Hours Trend Report — Utilization series: total hours logged per
+ * month and the subset logged against a Billable-category Service PO
+ * (service_categories.report_bucket_key = 'billable'), same business rule
+ * as dashboardRepository.js's getMonthlyBillableUtilization().
+ *
+ * @param {object} filters - { companyId, startDate, endDate, employeeId, clientId, poId, serviceTypeId, hoursSource, roleId }
+ * @returns {Promise<object[]>} rows: { year, month, total_hours, billable_hours }
+ */
+async function getMonthlyUtilizationTrend(filters) {
+  const replacements = {};
+  const whereClause = buildTrendFilters(filters, replacements);
+  const hoursCol = (filters.hoursSource === 'O') ? 't.hours_logged' : 'COALESCE(t.modified_hours, t.hours_logged)';
+
+  return sequelize.query(
+    `SELECT
+       EXTRACT(YEAR  FROM t.timesheet_date)::int AS year,
+       EXTRACT(MONTH FROM t.timesheet_date)::int AS month,
+       ROUND(SUM(${hoursCol})::NUMERIC, 2) AS total_hours,
+       ROUND(COALESCE(SUM(CASE WHEN sc.report_bucket_key = 'billable' THEN ${hoursCol} END), 0)::NUMERIC, 2) AS billable_hours
+     FROM timesheets t
+     INNER JOIN service_pos sp   ON sp.id = t.service_po_id
+     INNER JOIN service_types st ON st.id = sp.service_type_id
+     LEFT JOIN service_categories sc ON sc.id = st.service_category_id
+     WHERE ${whereClause}
+     GROUP BY year, month
+     ORDER BY year, month`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+}
+
+/**
+ * Monthly Hours Trend Report — Leave Hours series: total hours per month
+ * logged against the "Leaves" service type only — same rule as
+ * dashboardRepository.js's getLeaveHoursTrend().
+ *
+ * @param {object} filters - { companyId, startDate, endDate, employeeId, clientId, poId, serviceTypeId, hoursSource, roleId }
+ * @returns {Promise<object[]>} rows: { year, month, leave_hours }
+ */
+async function getLeaveHoursTrendReport(filters) {
+  const replacements = {};
+  const whereClause = buildTrendFilters(filters, replacements);
+  const hoursCol = (filters.hoursSource === 'O') ? 't.hours_logged' : 'COALESCE(t.modified_hours, t.hours_logged)';
+
+  return sequelize.query(
+    `SELECT
+       EXTRACT(YEAR  FROM t.timesheet_date)::int AS year,
+       EXTRACT(MONTH FROM t.timesheet_date)::int AS month,
+       ROUND(SUM(${hoursCol})::NUMERIC, 2) AS leave_hours
+     FROM timesheets t
+     INNER JOIN service_pos sp   ON sp.id = t.service_po_id
+     INNER JOIN service_types st ON st.id = sp.service_type_id
+     WHERE ${whereClause}
+       AND LOWER(st.service_type_name) = 'leaves'
+     GROUP BY year, month
+     ORDER BY year, month`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+}
+
+/**
+ * Monthly Hours Trend Report — No Work Hours series: total hours per month
+ * logged against Service POs named exactly "Idle" or "On Bench"
+ * (case-insensitive) — same rule as dashboardRepository.js's getNoWorkTrend().
+ *
+ * @param {object} filters - { companyId, startDate, endDate, employeeId, clientId, poId, serviceTypeId, hoursSource, roleId }
+ * @returns {Promise<object[]>} rows: { year, month, no_work_hours }
+ */
+async function getNoWorkTrendReport(filters) {
+  const replacements = {};
+  const whereClause = buildTrendFilters(filters, replacements);
+  const hoursCol = (filters.hoursSource === 'O') ? 't.hours_logged' : 'COALESCE(t.modified_hours, t.hours_logged)';
+
+  return sequelize.query(
+    `SELECT
+       EXTRACT(YEAR  FROM t.timesheet_date)::int AS year,
+       EXTRACT(MONTH FROM t.timesheet_date)::int AS month,
+       ROUND(SUM(${hoursCol})::NUMERIC, 2) AS no_work_hours
+     FROM timesheets t
+     INNER JOIN service_pos sp ON sp.id = t.service_po_id
+     WHERE ${whereClause}
+       AND LOWER(sp.service_po_name) IN ('idle', 'on bench')
+     GROUP BY year, month
+     ORDER BY year, month`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+}
+
+/**
+ * Employee Bench Percentage Report — hours per (employee, Service PO) pair
+ * for the given period/filters, the same raw shape
+ * dashboardRepository.js's getAnalyticsBenchDetail() returns; the service
+ * layer applies the same "Idle"/"Bench" keyword match (on the Service PO
+ * name) to split each employee's hours into bench vs total.
+ *
+ * @param {object} filters - { companyId, startDate, endDate, employeeId, clientId, poId, hoursSource, roleId }
+ * @returns {Promise<object[]>} rows: { employee_id, employee_code, full_name, service_po_name, hours }
+ */
+async function getEmployeeBenchDetailReport(filters) {
+  const replacements = {};
+  const whereClause = buildTrendFilters(filters, replacements);
+  const hoursCol = (filters.hoursSource === 'O') ? 't.hours_logged' : 'COALESCE(t.modified_hours, t.hours_logged)';
+
+  return sequelize.query(
+    `SELECT
+       e.id AS employee_id,
+       e.employee_code,
+       e.full_name,
+       sp.service_po_name,
+       ROUND(SUM(${hoursCol})::NUMERIC, 2) AS hours
+     FROM timesheets t
+     INNER JOIN employees e    ON e.id  = t.employee_id
+     INNER JOIN service_pos sp ON sp.id = t.service_po_id
+     WHERE ${whereClause}
+     GROUP BY e.id, e.employee_code, e.full_name, sp.service_po_name`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+}
+
+/**
+ * Budget vs Billed Report — Budget Cost (cost_budget_master.invoice_amount)
+ * vs Actual Billed Amount (service_po_monthly_budgets.billed_amount), one
+ * row per (service_po_id, month, year) present in EITHER table for the
+ * given period/filters — same FULL OUTER JOIN business logic as
+ * dashboardRepository.js's getBudgetVsBilled(), reproduced here (not
+ * called directly) so this Report stays independently correct even if the
+ * Dashboard's own implementation changes shape later. Only 'active'
+ * cost_budget_master rows count as budget. employeeId has no meaning here
+ * (both source tables are Service-PO-level, never per-employee) and is
+ * intentionally not a supported filter.
+ *
+ * @param {object} filters - { companyId, startDate, endDate, clientId, poId, serviceTypeId }
+ * @returns {Promise<object[]>} rows: { service_po_id, service_po_code, service_po_name, client_id, client_name, year, month, budget_cost, billed_amount }
+ */
+async function getBudgetVsBilled(filters) {
+  const { companyId, startDate, endDate, clientId, poId, serviceTypeId } = filters;
+  const replacements = { companyId, startPeriodKey: periodKey(startDate), endPeriodKey: periodKey(endDate) };
+  const conditions = [
+    'sp.company_id = :companyId',
+    "(cbm.id IS NULL OR cbm.status = 'active')",
+    '(COALESCE(cbm.year, spmb.year) * 12 + COALESCE(cbm.month, spmb.month)) BETWEEN :startPeriodKey AND :endPeriodKey',
+  ];
+
+  if (clientId) {
+    conditions.push('sp.client_id = :clientId');
+    replacements.clientId = clientId;
+  }
+  if (poId) {
+    conditions.push('sp.id = :poId');
+    replacements.poId = poId;
+  }
+  if (serviceTypeId) {
+    conditions.push('st.id = :serviceTypeId');
+    replacements.serviceTypeId = serviceTypeId;
+  }
+
+  return sequelize.query(
+    `SELECT
+       COALESCE(cbm.service_po_id, spmb.service_po_id) AS service_po_id,
+       sp.service_po_code,
+       sp.service_po_name,
+       sp.client_id,
+       c.client_name,
+       COALESCE(cbm.year, spmb.year)   AS year,
+       COALESCE(cbm.month, spmb.month) AS month,
+       ROUND(COALESCE(cbm.invoice_amount, 0)::NUMERIC, 2) AS budget_cost,
+       ROUND(COALESCE(spmb.billed_amount, 0)::NUMERIC, 2) AS billed_amount
+     FROM cost_budget_master cbm
+     FULL OUTER JOIN service_po_monthly_budgets spmb
+       ON spmb.service_po_id = cbm.service_po_id
+      AND spmb.month = cbm.month
+      AND spmb.year = cbm.year
+     INNER JOIN service_pos sp   ON sp.id = COALESCE(cbm.service_po_id, spmb.service_po_id)
+     INNER JOIN service_types st ON st.id = sp.service_type_id
+     INNER JOIN clients c        ON c.id  = sp.client_id
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY sp.id, year, month`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+}
+
 module.exports = {
   getEmployeeHourlyRate,
   getMonthlyCostSummary,
@@ -2140,6 +2638,18 @@ module.exports = {
   getInvoicePOSummary,
   getResourceUtilization,
   getMonthlyResourceUtilization,
+  getClientCostAnalyticsHours,
+  getClientCostAnalyticsCost,
+  getClientCategoryCostMatrixReport,
+  getClientWiseAnalyticsHours,
+  getClientWiseAnalyticsCost,
+  getMonthlyHoursByCategory,
+  getMonthlyCostByCategory,
+  getMonthlyUtilizationTrend,
+  getLeaveHoursTrendReport,
+  getNoWorkTrendReport,
+  getEmployeeBenchDetailReport,
+  getBudgetVsBilled,
   getResourseProjectUtilizationReport,
   getClientServicePOHours,
 };

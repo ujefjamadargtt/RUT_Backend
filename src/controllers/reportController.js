@@ -329,6 +329,126 @@ async function getClientServicePOHoursReport(req, res, next) {
   }
 }
 
+/**
+ * GET /api/v1/reports/client-cost-analytics
+ *
+ * Query params: hoursSource, page, limit (page/limit apply only to the
+ * top_clients ranking within the response, default limit 15)
+ *
+ * Based on Dashboard analytics2's client_wise_cost_analytics +
+ * top_clients_by_cost + client_category_cost_matrix reports — always the
+ * complete, unfiltered, all-time dataset, matching the Dashboard's own scope.
+ */
+async function getClientCostAnalytics(req, res, next) {
+  try {
+    const filters = { ...req.body, ...req.query };
+    const data = await reportService.getClientCostAnalytics(filters, req.companyId);
+    return sendSuccess(res, data, 'Client cost analytics report fetched successfully.');
+  } catch (err) {
+    if (err.statusCode) {
+      return sendError(res, err.message, err.statusCode);
+    }
+    logger.error('getClientCostAnalytics error', { error: err.message, stack: err.stack });
+    next(err);
+  }
+}
+
+/**
+ * GET /api/v1/reports/client-wise-analytics
+ *
+ * Query params: month + year, OR startDate + endDate (exactly one mode,
+ * required), employeeId, clientId, poId, serviceTypeId, page, limit,
+ * sortBy, sortOrder
+ *
+ * Based on Dashboard analytics2's client_wise_analytics report.
+ */
+async function getClientWiseAnalytics(req, res, next) {
+  try {
+    const filters = { ...req.body, ...req.query };
+    const { data, meta } = await reportService.getClientWiseAnalyticsReport(filters, req.companyId);
+    return sendPaginated(res, data, meta, 'Client wise analytics report fetched successfully.');
+  } catch (err) {
+    if (err.statusCode) {
+      return sendError(res, err.message, err.statusCode);
+    }
+    logger.error('getClientWiseAnalytics error', { error: err.message, stack: err.stack });
+    next(err);
+  }
+}
+
+/**
+ * GET /api/v1/reports/monthly-hours-trend
+ *
+ * Query params: month + year, OR startDate + endDate (exactly one mode,
+ * required), employeeId, clientId, poId, serviceTypeId
+ *
+ * Based on Dashboard analytics' monthly_hours_trend chart and analytics2's
+ * monthly_resource_utilization/leave_hours_trend/no_work_trend reports,
+ * bundled into one report (all four are month-by-month trends sharing the
+ * same period/filter resolution). Not paginated — a fixed-size series
+ * spanning the resolved period.
+ */
+async function getMonthlyHoursTrend(req, res, next) {
+  try {
+    const filters = { ...req.body, ...req.query };
+    const data = await reportService.getMonthlyHoursTrend(filters, req.companyId);
+    return sendSuccess(res, data, 'Monthly hours trend report fetched successfully.');
+  } catch (err) {
+    if (err.statusCode) {
+      return sendError(res, err.message, err.statusCode);
+    }
+    logger.error('getMonthlyHoursTrend error', { error: err.message, stack: err.stack });
+    next(err);
+  }
+}
+
+/**
+ * GET /api/v1/reports/employee-bench-percentage
+ *
+ * Query params: month + year, OR startDate + endDate (exactly one mode,
+ * required), employeeId, clientId, poId, page, limit, sortBy, sortOrder
+ *
+ * Based on Dashboard analytics' employee_bench_pct chart.
+ */
+async function getEmployeeBenchPercentage(req, res, next) {
+  try {
+    const filters = { ...req.body, ...req.query };
+    const { data, meta } = await reportService.getEmployeeBenchPercentage(filters, req.companyId);
+    return sendPaginated(res, data, meta, 'Employee bench percentage report fetched successfully.');
+  } catch (err) {
+    if (err.statusCode) {
+      return sendError(res, err.message, err.statusCode);
+    }
+    logger.error('getEmployeeBenchPercentage error', { error: err.message, stack: err.stack });
+    next(err);
+  }
+}
+
+/**
+ * GET /api/v1/reports/budget-vs-billed
+ *
+ * Query params: month + year, OR startDate + endDate (exactly one mode,
+ * required), clientId, poId, serviceTypeId, page, limit (apply to
+ * by_service_po only), sortBy, sortOrder
+ *
+ * Based on Dashboard analytics2's budget_vs_billed report — Budget Cost
+ * (cost_budget_master.invoice_amount) vs Actual Billed Amount
+ * (service_po_monthly_budgets.billed_amount).
+ */
+async function getBudgetVsBilled(req, res, next) {
+  try {
+    const filters = { ...req.body, ...req.query };
+    const data = await reportService.getBudgetVsBilledReport(filters, req.companyId);
+    return sendSuccess(res, data, 'Budget vs Billed report fetched successfully.');
+  } catch (err) {
+    if (err.statusCode) {
+      return sendError(res, err.message, err.statusCode);
+    }
+    logger.error('getBudgetVsBilled error', { error: err.message, stack: err.stack });
+    next(err);
+  }
+}
+
 module.exports = {
   getEmployeeHourlyRate,
   getMonthlyCostSummary,
@@ -344,4 +464,9 @@ module.exports = {
   getMonthlyResourceUtilization,
   getResourseProjectUtilizationReport,
   getClientServicePOHoursReport,
+  getClientCostAnalytics,
+  getClientWiseAnalytics,
+  getMonthlyHoursTrend,
+  getEmployeeBenchPercentage,
+  getBudgetVsBilled,
 };

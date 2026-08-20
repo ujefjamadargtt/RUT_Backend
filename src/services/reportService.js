@@ -1,6 +1,7 @@
 'use strict';
 
 const reportRepo = require('../repositories/reportRepository');
+const serviceCategoryRepo = require('../repositories/serviceCategoryRepository');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
 const logger = require('../utils/logger');
 const dateHelper = require('../helpers/dateHelper');
@@ -1044,6 +1045,520 @@ async function getClientServicePOHoursReport(query, companyId) {
   return Array.from(clientsById.values());
 }
 
+// ── Trend/period helpers shared by the 5 new reports below, based on the
+// Dashboard analytics/analytics2 endpoints (dashboardService.js) — kept as
+// independent, isolated implementations (not calls into dashboardService.js)
+// so these Reports stay correct even if the Dashboard's own shape changes,
+// matching this file's own existing "separate, isolated implementation"
+// convention (see getInvoicePOSummary's doc comment).
+
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function reportMonthLabel(year, month) {
+  return `${MONTH_NAMES[month - 1]}-${String(year).slice(2)}`;
+}
+
+/**
+ * Every {year, month} pair spanning an inclusive date range, in order —
+ * used to zero-fill trend series so a month with no activity still appears.
+ * @param {string} startDate - YYYY-MM-DD
+ * @param {string} endDate   - YYYY-MM-DD
+ * @returns {{ year: number, month: number }[]}
+ */
+function monthsInDateRange(startDate, endDate) {
+  const [startYear, startMonth] = startDate.split('-').map(Number);
+  const [endYear, endMonth] = endDate.split('-').map(Number);
+
+  const months = [];
+  let year = startYear;
+  let month = startMonth;
+  while (year < endYear || (year === endYear && month <= endMonth)) {
+    months.push({ year, month });
+    month += 1;
+    if (month > 12) {
+      month = 1;
+      year += 1;
+    }
+  }
+  return months;
+}
+
+// Keywords (case-insensitive substring match on service_po_name) that count
+// as "bench" time — same rule as dashboardService.js's isBenchServiceType().
+const BENCH_KEYWORDS = ['idle', 'bench'];
+function isBenchServiceTypeReport(servicePOName) {
+  const name = (servicePOName || '').toLowerCase();
+  return BENCH_KEYWORDS.some((k) => name.includes(k));
+}
+
+/**
+ * Client Cost Analytics Report — total hours/cost per client across the
+ * entire dataset (unfiltered — matches Dashboard analytics2's
+ * client_wise_cost_analytics report, which is deliberately never scoped by
+ * period/employee/client/PO), a Top Clients by Cost ranking (paginated
+ * independently via page/limit, default 15), and a per-client x
+ * service-type-category cost matrix. Based on
+ * dashboardService.js's buildClientWiseCostAnalytics()/
+ * buildTopClientsByCost()/buildClientCategoryCostMatrix() — reproduced here
+ * as an independent Reports Module implementation of the same business
+ * logic (Invoice Master / service_po_monthly_budgets.billed_amount basis).
+ *
+ * @param {object} query - req.query: { hoursSource?, page?, limit? } (page/limit apply to top_clients only, default limit 15)
+ * @param {number} companyId
+ * @returns {Promise<{
+ *   clients: { client_id: number, client_name: string, total_hours: number, total_cost: number }[],
+ *   top_clients: { data: object[], pagination: { page: number, limit: number, total_records: number, total_pages: number } },
+ *   category_matrix: { client_id: number, client_name: string, categories: object, total_cost: number }[],
+ * }>}
+ */
+async function getClientCostAnalytics(query, companyId) {
+  const hoursSource = query.hoursSource;
+
+  const [hoursRows, costRows, categories, matrixRows] = await Promise.all([
+    reportRepo.getClientCostAnalyticsHours({ companyId, hoursSource }),
+    reportRepo.getClientCostAnalyticsCost({ companyId }),
+    serviceCategoryRepo.findAll({ companyId }),
+    reportRepo.getClientCategoryCostMatrixReport({ companyId }),
+  ]);
+  const categoryNames = categories.map((c) => c.name);
+
+  const clientMap = new Map();
+  for (const row of hoursRows) {
+    clientMap.set(row.client_id, {
+      client_id: row.client_id,
+      client_name: row.client_name,
+      total_hours: round2(row.total_hours),
+      total_cost: 0,
+    });
+  }
+  for (const row of costRows) {
+    if (!clientMap.has(row.client_id)) {
+      clientMap.set(row.client_id, {
+        client_id: row.client_id,
+        client_name: row.client_name,
+        total_hours: 0,
+        total_cost: round2(row.total_cost),
+      });
+    } else {
+      clientMap.get(row.client_id).total_cost = round2(row.total_cost);
+    }
+  }
+  const clients = Array.from(clientMap.values()).sort((a, b) => b.total_cost - a.total_cost);
+
+  const { page, limit, offset } = getPaginationParams({ page: query.page, limit: query.limit || 15 });
+  const topClientsData = clients
+    .slice(offset, offset + limit)
+    .map((client, idx) => ({ rank: offset + idx + 1, ...client }));
+  const topClientsMeta = getPaginationMeta(clients.length, page, limit);
+
+  const matrixMap = new Map();
+  for (const row of matrixRows) {
+    if (!matrixMap.has(row.client_id)) {
+      matrixMap.set(row.client_id, {
+        client_id: row.client_id,
+        client_name: row.client_name,
+        categories: Object.fromEntries(categoryNames.map((name) => [name, 0])),
+        total_cost: 0,
+      });
+    }
+    const client = matrixMap.get(row.client_id);
+    const cost = round2(row.cost);
+    client.categories[row.category_name] = cost;
+    client.total_cost = round2(client.total_cost + cost);
+  }
+
+  return {
+    clients,
+    top_clients: {
+      data: topClientsData,
+      pagination: {
+        page: topClientsMeta.page,
+        limit: topClientsMeta.limit,
+        total_records: topClientsMeta.total,
+        total_pages: topClientsMeta.totalPages,
+      },
+    },
+    category_matrix: Array.from(matrixMap.values()).sort((a, b) => b.total_cost - a.total_cost),
+  };
+}
+
+/**
+ * Client Wise Analytics Report — total cost, total hours, average
+ * cost/hour, distinct project (Service PO) count, and % of total cost, per
+ * client, for a given period. Based on Dashboard analytics2's
+ * client_wise_analytics report (dashboardService.buildClientWiseAnalytics())
+ * — an independent Reports Module implementation of the same business logic.
+ * percentage_of_total_cost is computed against the sum of every client
+ * matching these SAME filters (before pagination), not just the current page.
+ *
+ * @param {object} query - req.query: month+year XOR startDate+endDate (required),
+ *   employeeId?, clientId?, poId?, serviceTypeId?, hoursSource?, roleId?, page?, limit?, sortBy?, sortOrder?
+ * @param {number} companyId
+ * @returns {Promise<{ data: object[], meta: object }>}
+ */
+async function getClientWiseAnalyticsReport(query, companyId) {
+  const { startDate, endDate } = resolveClientServicePODateRange(query);
+
+  const filters = {
+    companyId,
+    startDate,
+    endDate,
+    employeeId: query.employeeId ? parseInt(query.employeeId, 10) : undefined,
+    clientId: query.clientId ? parseInt(query.clientId, 10) : undefined,
+    poId: query.poId ? parseInt(query.poId, 10) : undefined,
+    serviceTypeId: query.serviceTypeId ? parseInt(query.serviceTypeId, 10) : undefined,
+    hoursSource: query.hoursSource,
+    roleId: query.roleId,
+  };
+
+  const [hoursRows, costRows] = await Promise.all([
+    reportRepo.getClientWiseAnalyticsHours(filters),
+    reportRepo.getClientWiseAnalyticsCost(filters),
+  ]);
+
+  const clientMap = new Map();
+  for (const row of hoursRows) {
+    clientMap.set(row.client_id, {
+      client_id: row.client_id,
+      client_name: row.client_name,
+      total_hours: parseFloat(row.total_hours) || 0,
+      total_projects: parseInt(row.total_projects, 10) || 0,
+      total_cost: 0,
+    });
+  }
+  for (const row of costRows) {
+    if (!clientMap.has(row.client_id)) {
+      clientMap.set(row.client_id, {
+        client_id: row.client_id,
+        client_name: row.client_name,
+        total_hours: 0,
+        total_projects: 0,
+        total_cost: parseFloat(row.total_cost) || 0,
+      });
+    } else {
+      clientMap.get(row.client_id).total_cost = parseFloat(row.total_cost) || 0;
+    }
+  }
+
+  const allClients = Array.from(clientMap.values());
+  const overallTotalCost = allClients.reduce((sum, c) => sum + c.total_cost, 0);
+
+  const shaped = allClients.map((c) => ({
+    client_id: c.client_id,
+    client_name: c.client_name,
+    total_cost: round2(c.total_cost),
+    total_hours: round2(c.total_hours),
+    average_cost_per_hour: c.total_hours > 0 ? round2(c.total_cost / c.total_hours) : 0,
+    total_projects: c.total_projects,
+    percentage_of_total_cost: overallTotalCost > 0 ? round2((c.total_cost / overallTotalCost) * 100) : 0,
+  }));
+
+  const allowedSort = ['total_cost', 'total_hours', 'average_cost_per_hour', 'total_projects', 'percentage_of_total_cost'];
+  const sortBy = allowedSort.includes(query.sortBy) ? query.sortBy : 'total_cost';
+  const sortOrder = (query.sortOrder || 'DESC').toUpperCase() === 'ASC' ? 1 : -1;
+  shaped.sort((a, b) => (a[sortBy] - b[sortBy]) * sortOrder);
+
+  const { page, limit, offset } = getPaginationParams(query);
+  const data = shaped.slice(offset, offset + limit);
+  const meta = getPaginationMeta(shaped.length, page, limit);
+
+  return { data, meta };
+}
+
+/**
+ * Monthly Hours Trend Report — five month-by-month series over a given
+ * period: hours by billable/non-billable/customer-non-billable/other
+ * category, cost by service-type category (Invoice Master basis), overall
+ * utilization % (billable hours / total hours), Leave hours, and No Work
+ * (Idle/On Bench) hours. Based on Dashboard analytics' monthly_hours_trend
+ * chart and analytics2's cost_trend_by_type/monthly_resource_utilization/
+ * leave_hours_trend/no_work_trend reports — bundled into one report since
+ * all five are month-by-month trends sharing the same period/filter
+ * resolution; an independent Reports Module implementation of the same
+ * business logic.
+ *
+ * @param {object} query - req.query: month+year XOR startDate+endDate (required),
+ *   employeeId?, clientId?, poId?, serviceTypeId?, hoursSource?, roleId?
+ * @param {number} companyId
+ * @returns {Promise<{
+ *   monthly_hours_by_category: { month: string, Billable: number, 'Non-Billable': number, 'Customer Non-Billable': number, Other: number }[],
+ *   monthly_cost_by_category: { month: string, categories: { category_name: string, cost: number }[] }[],
+ *   monthly_utilization: { month: string, total_hours: number, billable_hours: number, utilization_percentage: number }[],
+ *   leave_hours_trend: { month: string, leave_hours: number }[],
+ *   no_work_trend: { month: string, no_work_hours: number }[],
+ * }>}
+ */
+async function getMonthlyHoursTrend(query, companyId) {
+  const { startDate, endDate } = resolveClientServicePODateRange(query);
+
+  const filters = {
+    companyId,
+    startDate,
+    endDate,
+    employeeId: query.employeeId ? parseInt(query.employeeId, 10) : undefined,
+    clientId: query.clientId ? parseInt(query.clientId, 10) : undefined,
+    poId: query.poId ? parseInt(query.poId, 10) : undefined,
+    serviceTypeId: query.serviceTypeId ? parseInt(query.serviceTypeId, 10) : undefined,
+    hoursSource: query.hoursSource,
+    roleId: query.roleId,
+  };
+  const months = monthsInDateRange(startDate, endDate);
+
+  const [categoryRows, costRows, categories, utilizationRows, leaveRows, noWorkRows] = await Promise.all([
+    reportRepo.getMonthlyHoursByCategory(filters),
+    reportRepo.getMonthlyCostByCategory(filters),
+    serviceCategoryRepo.findAll({ companyId }),
+    reportRepo.getMonthlyUtilizationTrend(filters),
+    reportRepo.getLeaveHoursTrendReport(filters),
+    reportRepo.getNoWorkTrendReport(filters),
+  ]);
+  const categoryNames = categories.map((c) => c.name);
+
+  const REPORT_BUCKET_LABELS = { billable: 'Billable', non_billable: 'Non-Billable', customer_non_billable: 'Customer Non-Billable' };
+  const emptyBucket = () => ({ Billable: 0, 'Non-Billable': 0, 'Customer Non-Billable': 0, Other: 0 });
+  const categoryByMonth = new Map();
+  for (const row of categoryRows) {
+    const key = `${row.year}-${row.month}`;
+    if (!categoryByMonth.has(key)) categoryByMonth.set(key, emptyBucket());
+    const bucket = categoryByMonth.get(key);
+    const label = REPORT_BUCKET_LABELS[row.report_bucket_key] || 'Other';
+    bucket[label] = round2(bucket[label] + (parseFloat(row.hours) || 0));
+  }
+  const monthly_hours_by_category = months.map(({ year, month }) => ({
+    month: reportMonthLabel(year, month),
+    ...(categoryByMonth.get(`${year}-${month}`) || emptyBucket()),
+  }));
+
+  // Cost by category — same "known categories + any extra encountered"
+  // zero-fill approach as dashboardService.js's buildCostTrendByType(), so
+  // a category with no cost this month still appears as 0 rather than
+  // being silently absent.
+  const costByKey = new Map();
+  const extraCategoriesByMonth = new Map();
+  for (const row of costRows) {
+    costByKey.set(`${row.year}-${row.month}-${row.category_name}`, parseFloat(row.cost) || 0);
+    if (!categoryNames.includes(row.category_name)) {
+      const key = `${row.year}-${row.month}`;
+      if (!extraCategoriesByMonth.has(key)) extraCategoriesByMonth.set(key, new Set());
+      extraCategoriesByMonth.get(key).add(row.category_name);
+    }
+  }
+  const monthly_cost_by_category = months.map(({ year, month }) => {
+    const key = `${year}-${month}`;
+    const allNames = [...categoryNames, ...(extraCategoriesByMonth.get(key) || [])];
+    return {
+      month: reportMonthLabel(year, month),
+      categories: allNames.map((name) => ({
+        category_name: name,
+        cost: round2(costByKey.get(`${key}-${name}`) || 0),
+      })),
+    };
+  });
+
+  const utilizationByMonth = new Map(utilizationRows.map((row) => [`${row.year}-${row.month}`, row]));
+  const monthly_utilization = months.map(({ year, month }) => {
+    const row = utilizationByMonth.get(`${year}-${month}`);
+    const totalHours = row ? parseFloat(row.total_hours) || 0 : 0;
+    const billableHours = row ? parseFloat(row.billable_hours) || 0 : 0;
+    return {
+      month: reportMonthLabel(year, month),
+      total_hours: round2(totalHours),
+      billable_hours: round2(billableHours),
+      utilization_percentage: totalHours > 0 ? round2((billableHours / totalHours) * 100) : 0,
+    };
+  });
+
+  const leaveByMonth = new Map(leaveRows.map((row) => [`${row.year}-${row.month}`, parseFloat(row.leave_hours) || 0]));
+  const leave_hours_trend = months.map(({ year, month }) => ({
+    month: reportMonthLabel(year, month),
+    leave_hours: round2(leaveByMonth.get(`${year}-${month}`) || 0),
+  }));
+
+  const noWorkByMonth = new Map(noWorkRows.map((row) => [`${row.year}-${row.month}`, parseFloat(row.no_work_hours) || 0]));
+  const no_work_trend = months.map(({ year, month }) => ({
+    month: reportMonthLabel(year, month),
+    no_work_hours: round2(noWorkByMonth.get(`${year}-${month}`) || 0),
+  }));
+
+  return { monthly_hours_by_category, monthly_cost_by_category, monthly_utilization, leave_hours_trend, no_work_trend };
+}
+
+/**
+ * Employee Bench Percentage Report — per employee, the share of their
+ * total hours logged against "Idle"/"On Bench"-named Service POs, for a
+ * given period. Based on Dashboard analytics' employee_bench_pct chart
+ * (dashboardService.js) — an independent Reports Module implementation of
+ * the same business logic.
+ *
+ * @param {object} query - req.query: month+year XOR startDate+endDate (required),
+ *   employeeId?, clientId?, poId?, hoursSource?, roleId?, page?, limit?, sortBy?, sortOrder?
+ * @param {number} companyId
+ * @returns {Promise<{ data: object[], meta: object }>}
+ */
+async function getEmployeeBenchPercentage(query, companyId) {
+  const { startDate, endDate } = resolveClientServicePODateRange(query);
+
+  const filters = {
+    companyId,
+    startDate,
+    endDate,
+    employeeId: query.employeeId ? parseInt(query.employeeId, 10) : undefined,
+    clientId: query.clientId ? parseInt(query.clientId, 10) : undefined,
+    poId: query.poId ? parseInt(query.poId, 10) : undefined,
+    hoursSource: query.hoursSource,
+    roleId: query.roleId,
+  };
+
+  const rows = await reportRepo.getEmployeeBenchDetailReport(filters);
+
+  const empMap = new Map();
+  for (const row of rows) {
+    if (!empMap.has(row.employee_id)) {
+      empMap.set(row.employee_id, {
+        employee_id: row.employee_id,
+        employee_code: row.employee_code,
+        full_name: row.full_name,
+        bench_hours: 0,
+        total_hours: 0,
+      });
+    }
+    const emp = empMap.get(row.employee_id);
+    const hours = parseFloat(row.hours) || 0;
+    emp.total_hours += hours;
+    if (isBenchServiceTypeReport(row.service_po_name)) emp.bench_hours += hours;
+  }
+
+  const shaped = Array.from(empMap.values()).map((emp) => ({
+    employee_id: emp.employee_id,
+    employee_code: emp.employee_code,
+    full_name: emp.full_name,
+    bench_hours: round2(emp.bench_hours),
+    total_hours: round2(emp.total_hours),
+    bench_pct: emp.total_hours > 0 ? round2((emp.bench_hours / emp.total_hours) * 100) : 0,
+  }));
+
+  const allowedSort = ['bench_pct', 'bench_hours', 'total_hours'];
+  const sortBy = allowedSort.includes(query.sortBy) ? query.sortBy : 'bench_pct';
+  const sortOrder = (query.sortOrder || 'DESC').toUpperCase() === 'ASC' ? 1 : -1;
+  shaped.sort((a, b) => (a[sortBy] - b[sortBy]) * sortOrder);
+
+  const { page, limit, offset } = getPaginationParams(query);
+  const data = shaped.slice(offset, offset + limit);
+  const meta = getPaginationMeta(shaped.length, page, limit);
+
+  return { data, meta };
+}
+
+/**
+ * Budget vs Billed Report — Budget Cost (cost_budget_master.invoice_amount)
+ * vs Actual Billed Amount (service_po_monthly_budgets.billed_amount) for a
+ * given period: a monthly trend, a per-Service-PO breakdown (paginated), an
+ * overall summary, and over-/under-budget Service PO lists. Based on
+ * Dashboard analytics2's budget_vs_billed report
+ * (dashboardService.buildBudgetVsBilledAnalytics()) — an independent
+ * Reports Module implementation of the same business logic. employeeId has
+ * no meaning here (both source tables are Service-PO-level, never
+ * per-employee) and is intentionally not a supported filter.
+ *
+ * @param {object} query - req.query: month+year XOR startDate+endDate (required),
+ *   clientId?, poId?, serviceTypeId?, page?, limit?, sortBy?, sortOrder?
+ * @param {number} companyId
+ * @returns {Promise<{
+ *   monthly: object[], by_service_po: { data: object[], meta: object }, summary: object,
+ *   over_budget_service_pos: object[], under_budget_service_pos: object[],
+ * }>}
+ */
+async function getBudgetVsBilledReport(query, companyId) {
+  const { startDate, endDate } = resolveClientServicePODateRange(query);
+
+  const filters = {
+    companyId,
+    startDate,
+    endDate,
+    clientId: query.clientId ? parseInt(query.clientId, 10) : undefined,
+    poId: query.poId ? parseInt(query.poId, 10) : undefined,
+    serviceTypeId: query.serviceTypeId ? parseInt(query.serviceTypeId, 10) : undefined,
+  };
+
+  const rows = await reportRepo.getBudgetVsBilled(filters);
+
+  const variancePct = (budget, variance) => (budget > 0 ? round2((variance / budget) * 100) : null);
+
+  const monthlyMap = new Map();
+  for (const row of rows) {
+    const key = `${row.year}-${row.month}`;
+    if (!monthlyMap.has(key)) {
+      monthlyMap.set(key, { year: row.year, month: row.month, budget_cost: 0, billed_amount: 0 });
+    }
+    const bucket = monthlyMap.get(key);
+    bucket.budget_cost = round2(bucket.budget_cost + (parseFloat(row.budget_cost) || 0));
+    bucket.billed_amount = round2(bucket.billed_amount + (parseFloat(row.billed_amount) || 0));
+  }
+  const monthly = Array.from(monthlyMap.values())
+    .sort((a, b) => (a.year - b.year) || (a.month - b.month))
+    .map(({ year, month, budget_cost, billed_amount }) => {
+      const variance = round2(billed_amount - budget_cost);
+      return { month: reportMonthLabel(year, month), budget_cost, billed_amount, variance, variance_pct: variancePct(budget_cost, variance) };
+    });
+
+  const poMap = new Map();
+  for (const row of rows) {
+    if (!poMap.has(row.service_po_id)) {
+      poMap.set(row.service_po_id, {
+        service_po_id: row.service_po_id,
+        service_po_code: row.service_po_code,
+        service_po_name: row.service_po_name,
+        client_name: row.client_name,
+        budget_cost: 0,
+        billed_amount: 0,
+      });
+    }
+    const bucket = poMap.get(row.service_po_id);
+    bucket.budget_cost = round2(bucket.budget_cost + (parseFloat(row.budget_cost) || 0));
+    bucket.billed_amount = round2(bucket.billed_amount + (parseFloat(row.billed_amount) || 0));
+  }
+  const byServicePOAll = Array.from(poMap.values()).map((po) => {
+    const variance = round2(po.billed_amount - po.budget_cost);
+    return { ...po, variance, variance_pct: variancePct(po.budget_cost, variance) };
+  });
+
+  const allowedSort = ['budget_cost', 'billed_amount', 'variance', 'variance_pct'];
+  const sortBy = allowedSort.includes(query.sortBy) ? query.sortBy : 'service_po_id';
+  const sortOrder = (query.sortOrder || 'ASC').toUpperCase() === 'DESC' ? -1 : 1;
+  byServicePOAll.sort((a, b) => {
+    const av = a[sortBy];
+    const bv = b[sortBy];
+    if (av === null && bv === null) return 0;
+    if (av === null) return 1;
+    if (bv === null) return -1;
+    return (av - bv) * sortOrder;
+  });
+
+  const { page, limit, offset } = getPaginationParams(query);
+  const byServicePOPage = byServicePOAll.slice(offset, offset + limit);
+  const byServicePOMeta = getPaginationMeta(byServicePOAll.length, page, limit);
+
+  const totalBudgetCost = round2(byServicePOAll.reduce((sum, po) => sum + po.budget_cost, 0));
+  const totalBilledAmount = round2(byServicePOAll.reduce((sum, po) => sum + po.billed_amount, 0));
+  const totalVariance = round2(totalBilledAmount - totalBudgetCost);
+  const summary = {
+    total_budget_cost: totalBudgetCost,
+    total_billed_amount: totalBilledAmount,
+    total_variance: totalVariance,
+    total_variance_pct: variancePct(totalBudgetCost, totalVariance),
+  };
+
+  const over_budget_service_pos = byServicePOAll.filter((po) => po.billed_amount > po.budget_cost);
+  const under_budget_service_pos = byServicePOAll.filter((po) => po.billed_amount < po.budget_cost);
+
+  return {
+    monthly,
+    by_service_po: { data: byServicePOPage, meta: byServicePOMeta },
+    summary,
+    over_budget_service_pos,
+    under_budget_service_pos,
+  };
+}
+
 module.exports = {
   getEmployeeHourlyRate,
   getMonthlyCostSummary,
@@ -1059,4 +1574,9 @@ module.exports = {
   getMonthlyResourceUtilization,
   getResourseProjectUtilizationReport,
   getClientServicePOHoursReport,
+  getClientCostAnalytics,
+  getClientWiseAnalyticsReport,
+  getMonthlyHoursTrend,
+  getEmployeeBenchPercentage,
+  getBudgetVsBilledReport,
 };

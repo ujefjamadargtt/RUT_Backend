@@ -992,4 +992,292 @@ router.get(
   reportController.getClientServicePOHoursReport
 );
 
+/**
+ * @swagger
+ * /reports/client-cost-analytics:
+ *   get:
+ *     summary: Client cost analytics — total hours/cost per client, Top Clients by Cost ranking, and client x category cost matrix
+ *     description: >
+ *       Based on the Dashboard Analytics2 endpoint's client_wise_cost_analytics,
+ *       top_clients_by_cost, and client_category_cost_matrix reports. Always
+ *       the complete, unfiltered, all-time dataset (Invoice Master /
+ *       service_po_monthly_budgets.billed_amount basis) — no period or
+ *       entity filter applies, matching the Dashboard's own scope.
+ *     tags: [Reports]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: hoursSource
+ *         schema: { type: string, enum: [O, M] }
+ *         description: "'O' = original hours_logged, 'M' (default) = modified_hours falling back to hours_logged."
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, minimum: 1 }
+ *         description: Page number for the top_clients ranking only.
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *         description: Page size for the top_clients ranking only. Defaults to 15.
+ *     responses:
+ *       200:
+ *         description: "{ clients: [...], top_clients: { data, pagination }, category_matrix: [...] }"
+ *       401:
+ *         description: Unauthorized
+ */
+router.get(
+  '/client-cost-analytics',
+  authenticate,
+  reportController.getClientCostAnalytics
+);
+
+/**
+ * @swagger
+ * /reports/client-wise-analytics:
+ *   get:
+ *     summary: Per-client total cost, total hours, average cost/hour, project count, and % of total cost, for a period
+ *     description: >
+ *       Based on the Dashboard Analytics2 endpoint's client_wise_analytics
+ *       report. percentage_of_total_cost is computed against every client
+ *       matching these same filters, before pagination.
+ *     tags: [Reports]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         schema: { type: integer, minimum: 1, maximum: 12 }
+ *       - in: query
+ *         name: year
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: startDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: endDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: employeeId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: clientId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: poId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: serviceTypeId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: hoursSource
+ *         schema: { type: string, enum: [O, M] }
+ *       - in: query
+ *         name: sortBy
+ *         schema: { type: string, enum: [total_cost, total_hours, average_cost_per_hour, total_projects, percentage_of_total_cost] }
+ *       - in: query
+ *         name: sortOrder
+ *         schema: { type: string, enum: [ASC, DESC] }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, minimum: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *     responses:
+ *       200:
+ *         description: Paginated client wise analytics
+ *       401:
+ *         description: Unauthorized
+ *       422:
+ *         description: Missing/ambiguous date filter (must provide exactly one of month+year or startDate+endDate)
+ */
+router.get(
+  '/client-wise-analytics',
+  authenticate,
+  reportController.getClientWiseAnalytics
+);
+
+/**
+ * @swagger
+ * /reports/monthly-hours-trend:
+ *   get:
+ *     summary: Monthly hours-by-category, cost-by-category, utilization %, leave hours, and no-work (Idle/On Bench) hours trend
+ *     description: >
+ *       Based on the Dashboard Analytics endpoint's monthly_hours_trend chart
+ *       and the Analytics2 endpoint's cost_trend_by_type/
+ *       monthly_resource_utilization/leave_hours_trend/no_work_trend
+ *       reports, bundled into one report — all five are month-by-month
+ *       trends sharing the same period/filter resolution. Not paginated;
+ *       every month in the resolved period is zero-filled so the series
+ *       never has gaps.
+ *     tags: [Reports]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         schema: { type: integer, minimum: 1, maximum: 12 }
+ *       - in: query
+ *         name: year
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: startDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: endDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: employeeId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: clientId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: poId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: serviceTypeId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: hoursSource
+ *         schema: { type: string, enum: [O, M] }
+ *     responses:
+ *       200:
+ *         description: "{ monthly_hours_by_category, monthly_cost_by_category, monthly_utilization, leave_hours_trend, no_work_trend }"
+ *       401:
+ *         description: Unauthorized
+ *       422:
+ *         description: Missing/ambiguous date filter (must provide exactly one of month+year or startDate+endDate)
+ */
+router.get(
+  '/monthly-hours-trend',
+  authenticate,
+  reportController.getMonthlyHoursTrend
+);
+
+/**
+ * @swagger
+ * /reports/employee-bench-percentage:
+ *   get:
+ *     summary: Per-employee bench % — hours logged against Idle/On Bench Service POs as a share of total hours, for a period
+ *     description: >
+ *       Based on the Dashboard Analytics endpoint's employee_bench_pct chart.
+ *     tags: [Reports]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         schema: { type: integer, minimum: 1, maximum: 12 }
+ *       - in: query
+ *         name: year
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: startDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: endDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: employeeId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: clientId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: poId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: hoursSource
+ *         schema: { type: string, enum: [O, M] }
+ *       - in: query
+ *         name: sortBy
+ *         schema: { type: string, enum: [bench_pct, bench_hours, total_hours] }
+ *       - in: query
+ *         name: sortOrder
+ *         schema: { type: string, enum: [ASC, DESC] }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, minimum: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *     responses:
+ *       200:
+ *         description: Paginated employee bench percentage
+ *       401:
+ *         description: Unauthorized
+ *       422:
+ *         description: Missing/ambiguous date filter (must provide exactly one of month+year or startDate+endDate)
+ */
+router.get(
+  '/employee-bench-percentage',
+  authenticate,
+  reportController.getEmployeeBenchPercentage
+);
+
+/**
+ * @swagger
+ * /reports/budget-vs-billed:
+ *   get:
+ *     summary: Budget Cost (Cost Budget Master) vs Actual Billed Amount (Invoice Master) — monthly trend, per-Service-PO breakdown, and over/under-budget lists
+ *     description: >
+ *       Based on the Dashboard Analytics2 endpoint's budget_vs_billed report.
+ *       Budget Cost is cost_budget_master.invoice_amount (only 'active' rows
+ *       count); Actual Billed Amount is
+ *       service_po_monthly_budgets.billed_amount. employeeId does not apply
+ *       — both source tables are Service-PO-level, never per-employee.
+ *     tags: [Reports]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         schema: { type: integer, minimum: 1, maximum: 12 }
+ *       - in: query
+ *         name: year
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: startDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: endDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: clientId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: poId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: serviceTypeId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: sortBy
+ *         schema: { type: string, enum: [budget_cost, billed_amount, variance, variance_pct] }
+ *       - in: query
+ *         name: sortOrder
+ *         schema: { type: string, enum: [ASC, DESC] }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, minimum: 1 }
+ *         description: Applies to by_service_po only.
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *         description: Applies to by_service_po only.
+ *     responses:
+ *       200:
+ *         description: "{ monthly, by_service_po: { data, meta }, summary, over_budget_service_pos, under_budget_service_pos }"
+ *       401:
+ *         description: Unauthorized
+ *       422:
+ *         description: Missing/ambiguous date filter (must provide exactly one of month+year or startDate+endDate)
+ */
+router.get(
+  '/budget-vs-billed',
+  authenticate,
+  reportController.getBudgetVsBilled
+);
+
 module.exports = router;
