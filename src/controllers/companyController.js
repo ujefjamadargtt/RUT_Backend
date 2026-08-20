@@ -38,13 +38,14 @@ const getById = async (req, res, next) => {
 
 /**
  * POST /api/v1/companies
- * Creates a company and its first BU Admin in one transaction, under one
- * of the calling Entity Admin's own owned Entities.
+ * Creates a company, its first BU Admin, and that BU Admin's linked
+ * Employee record in one transaction, under one of the calling Entity
+ * Admin's own owned Entities.
  */
 const create = async (req, res, next) => {
   try {
     const result = await companyService.createWithAdmin(req.body, req.userId, getIpAddress(req), req.entityIds);
-    return sendCreated(res, result, 'Company and its first BU Admin created successfully.');
+    return sendCreated(res, result, 'Company and its first BU Admin (with linked Employee record) created successfully.');
   } catch (err) {
     if (err.statusCode === 409) {
       return sendError(res, err.message, 409);

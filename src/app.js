@@ -36,8 +36,11 @@ const serviceCategoryRoutes = require('./routes/serviceCategory.routes');
 const subProjectRoutes = require('./routes/subProject.routes');
 const monthlyCostRoutes = require('./routes/monthlyCost.routes');
 const servicePOMonthlyBudgetRoutes = require('./routes/servicePOMonthlyBudget.routes');
+const costBudgetRoutes = require('./routes/costBudget.routes');
+const resourceBudgetRoutes = require('./routes/resourceBudget.routes');
 const timesheetRoutes = require('./routes/timesheet.routes');
 const reportRoutes = require('./routes/report.routes');
+const managementReportRoutes = require('./routes/managementReport.routes');
 const dashboardRoutes = require('./routes/dashboard.routes');
 const notificationRoutes = require('./routes/notification.routes');
 const aiInsightRoutes = require('./routes/aiInsight.routes');
@@ -176,11 +179,38 @@ const swaggerOptions = {
   ],
 };
 
-const swaggerSpec = swaggerJsdoc(swaggerOptions);
-app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
-  customSiteTitle: 'RUT Portal API Docs',
-  swaggerOptions: { persistAuthorization: true },
-}));
+// swaggerJsdoc() parses every @swagger JSDoc block across routes/controllers/
+// models as YAML, synchronously, right here at module-load time. A single
+// malformed block (e.g. an unquoted `{ ... }`-shaped snippet inside a plain
+// `description:` string, which some YAML parsers misread as a flow mapping)
+// throws here — and since this file is required by server.js before the
+// HTTP server ever starts listening, an uncaught throw at this exact point
+// takes down the ENTIRE API, not just the docs page. Docs generation is
+// non-critical to serving traffic, so a failure here is logged and skipped
+// instead of being allowed to abort startup.
+let swaggerSpec = null;
+try {
+  swaggerSpec = swaggerJsdoc(swaggerOptions);
+} catch (err) {
+  logger.error('Swagger spec generation failed — /api-docs will be unavailable, but the API itself still starts.', {
+    error: err.message,
+  });
+  console.error('[startup] WARNING: Swagger spec generation failed:', err.message);
+}
+
+if (swaggerSpec) {
+  app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
+    customSiteTitle: 'RUT Portal API Docs',
+    swaggerOptions: { persistAuthorization: true },
+  }));
+} else {
+  app.use('/api-docs', (_req, res) => {
+    res.status(503).json({
+      success: false,
+      message: 'API documentation is temporarily unavailable due to a Swagger spec generation error. Check server logs.',
+    });
+  });
+}
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
@@ -219,8 +249,14 @@ app.use(`${API_PREFIX}/service-types`, serviceTypeRoutes);
 app.use(`${API_PREFIX}/sub-projects`, subProjectRoutes);
 app.use(`${API_PREFIX}/monthly-costs`, monthlyCostRoutes);
 app.use(`${API_PREFIX}/service-po-monthly-budgets`, servicePOMonthlyBudgetRoutes);
+app.use(`${API_PREFIX}/cost-budgets`, costBudgetRoutes);
+app.use(`${API_PREFIX}/resource-budgets`, resourceBudgetRoutes);
 app.use(`${API_PREFIX}/timesheets`, timesheetRoutes);
 app.use(`${API_PREFIX}/reports`, reportRoutes);
+// 10 new management/business reports (managementReportRepository/Service/
+// Controller/Routes) — mounted at the same /reports base path; endpoint
+// paths are disjoint from report.routes.js so this is a safe co-mount.
+app.use(`${API_PREFIX}/reports`, managementReportRoutes);
 app.use(`${API_PREFIX}/dashboard`, dashboardRoutes);
 app.use(`${API_PREFIX}/notifications`, notificationRoutes);
 app.use(`${API_PREFIX}/ai-insights`, aiInsightRoutes);

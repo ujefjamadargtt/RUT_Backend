@@ -16,9 +16,11 @@ const createServicePOSchema = Joi.object({
     .trim()
     .uppercase()
     .pattern(poCodePattern)
-    .optional()
+    .required()
     .messages({
       'string.pattern.base': 'PO code must be 2-30 uppercase alphanumeric characters (hyphens, underscores, slashes allowed).',
+      'any.required': 'Service PO number is required.',
+      'string.empty': 'Service PO number is required.',
     }),
 
   service_po_name: Joi.string()

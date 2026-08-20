@@ -76,12 +76,20 @@ router.get(
  * @swagger
  * /companies:
  *   post:
- *     summary: Create a company and its first BU Admin (Entity Admin only)
+ *     summary: Create a company and its first BU Admin, together with that BU Admin's Employee record (Entity Admin only)
  *     description: >
- *       Transactional — a company is never created without an owner. If
- *       admin-user creation fails, the company insert rolls back too.
- *       entity_id must be one of the calling Entity Admin's own owned
- *       Entities (403 otherwise).
+ *       Transactional — a company is never created without its BU Admin,
+ *       and the BU Admin is never created without a linked Employee
+ *       record and both the "BU Admin" and "Employee" roles. If any step
+ *       fails, every insert in this call rolls back. company.entity_id
+ *       must be one of the calling Entity Admin's own owned Entities (403
+ *       otherwise). employee.* fields/validation are the same as
+ *       POST /employees (see employeeValidation.createEmployeeSchema)
+ *       minus Manager assignment (doesn't apply to the first User in a
+ *       brand-new company) and minus email/password (collected once,
+ *       under `admin`, since they're this User's login credentials —
+ *       employee.email is accepted too, for form-reuse convenience, but
+ *       must match admin.admin_email if provided).
  *     tags: [Companies]
  *     security:
  *       - bearerAuth: []
@@ -91,16 +99,31 @@ router.get(
  *         application/json:
  *           schema:
  *             type: object
- *             required: [entity_id, company_code, company_name, admin_email, admin_password]
+ *             required: [company, admin, employee]
  *             properties:
- *               entity_id: { type: integer }
- *               company_code: { type: string, example: "ACME" }
- *               company_name: { type: string, example: "Acme Corporation" }
- *               admin_email: { type: string, example: "admin@acme.com" }
- *               admin_password: { type: string, example: "Str0ng!Pass" }
+ *               company:
+ *                 type: object
+ *                 required: [entity_id, company_code, company_name]
+ *                 properties:
+ *                   entity_id: { type: integer }
+ *                   company_code: { type: string, example: "ACME" }
+ *                   company_name: { type: string, example: "Acme Corporation" }
+ *               admin:
+ *                 type: object
+ *                 required: [admin_email, admin_password]
+ *                 properties:
+ *                   admin_email: { type: string, example: "admin@acme.com" }
+ *                   admin_password: { type: string, example: "Str0ng!Pass1" }
+ *               employee:
+ *                 type: object
+ *                 required: [employee_code, full_name]
+ *                 properties:
+ *                   employee_code: { type: string, example: "EMP001" }
+ *                   full_name: { type: string, example: "John Doe" }
+ *                   designation: { type: string, example: "Software Developer" }
  *     responses:
  *       201:
- *         description: Company and BU Admin created
+ *         description: Company, BU Admin, and linked Employee created
  *       403:
  *         description: entity_id does not belong to the caller
  *       409:

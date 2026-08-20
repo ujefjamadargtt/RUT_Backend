@@ -124,6 +124,14 @@ const authenticate = async (req, res, next) => {
       });
     }
 
+    if (user.employee && user.employee.status !== 'active') {
+      return res.status(401).json({
+        success: false,
+        message: 'Your employee record is inactive. Please contact the administrator.',
+        code: 'EMPLOYEE_INACTIVE',
+      });
+    }
+
     // req.hierarchyRank / req.userRoleName below are ALWAYS derived from the
     // PRIMARY role only (user.role) — the sole source of truth for
     // hierarchy/scoping decisions (resolveCompany, requireAdmin, etc.).

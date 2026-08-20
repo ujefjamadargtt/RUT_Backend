@@ -70,6 +70,8 @@ const EmployeeWorkLog        = require('./EmployeeWorkLog')(sequelize);
 const PasswordResetOtp       = require('./PasswordResetOtp')(sequelize);
 const PasswordResetHistory   = require('./PasswordResetHistory')(sequelize);
 const UserAdditionalRole     = require('./UserAdditionalRole')(sequelize);
+const CostBudget             = require('./CostBudget')(sequelize);
+const ResourceBudget         = require('./ResourceBudget')(sequelize);
 
 // ---------------------------------------------------------------------------
 // Associations
@@ -362,6 +364,22 @@ PasswordResetHistory.belongsTo(Employee, { foreignKey: 'employee_id', as: 'emplo
 PasswordResetHistory.belongsTo(Company, { foreignKey: 'company_id', as: 'company' });
 EmployeeWorkLog.belongsTo(Company, { foreignKey: 'company_id', as: 'company' });
 
+// Cost Budget Master — one row per (service_po_id, month, year), see
+// database/migrations/20260858_create_cost_budget_master.sql. Isolated from
+// ServicePOMonthlyBudget above (kept unchanged) per this feature's isolation
+// requirement.
+ServicePO.hasMany(CostBudget, { foreignKey: 'service_po_id', as: 'costBudgets' });
+CostBudget.belongsTo(ServicePO, { foreignKey: 'service_po_id', as: 'servicePO' });
+CostBudget.belongsTo(Company, { foreignKey: 'company_id', as: 'company' });
+
+// Resource Budget Master — one row per (emp_id, service_po_id, month, year),
+// see database/migrations/20260859_create_resource_budget_master.sql.
+Employee.hasMany(ResourceBudget, { foreignKey: 'emp_id', as: 'resourceBudgets' });
+ResourceBudget.belongsTo(Employee, { foreignKey: 'emp_id', as: 'employee' });
+ServicePO.hasMany(ResourceBudget, { foreignKey: 'service_po_id', as: 'resourceBudgets' });
+ResourceBudget.belongsTo(ServicePO, { foreignKey: 'service_po_id', as: 'servicePO' });
+ResourceBudget.belongsTo(Company, { foreignKey: 'company_id', as: 'company' });
+
 // ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
@@ -406,4 +424,6 @@ module.exports = {
   PasswordResetOtp,
   PasswordResetHistory,
   UserAdditionalRole,
+  CostBudget,
+  ResourceBudget,
 };

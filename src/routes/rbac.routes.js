@@ -71,7 +71,6 @@ const rbacController = require('../controllers/rbacController');
 router.post(
   '/forms',
   authenticate,
-  requirePlatformAdmin,
   validate(formsForRolesSchema),
   rbacController.formsForRoles
 );

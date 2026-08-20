@@ -812,9 +812,8 @@ async function getAnalyticsDashboard(query = {}, companyId) {
   // those months ARE published, instead of blocking the whole window because
   // one sibling month isn't. globalTotalEmployees/globalActiveEmployees/
   // globalTotalClients/globalActivePOs/globalClosedPOs (all-time headcounts)
-  // and totalRevenue (PO-value based, not timesheet-derived — see
-  // getTotalRevenue) are unaffected either way, matching /dashboard/stats'
-  // existing semantics.
+  // and totalBudgetCost (cost_budget_master-based, not timesheet-derived —
+  // see getTotalBudgetCost) are unaffected either way.
   const [
     tilesRow,
     trendRows,
@@ -827,7 +826,7 @@ async function getAnalyticsDashboard(query = {}, companyId) {
     globalTotalClients,
     globalActivePOs,
     globalClosedPOs,
-    totalRevenue,
+    totalBudgetCost,
     capacityUtilisationPct,
     employeeCountByCategoryRows,
     topPOsRows,
@@ -846,7 +845,11 @@ async function getAnalyticsDashboard(query = {}, companyId) {
     dashboardRepo.getTotalClients(companyId),
     dashboardRepo.getActivePOs(companyId),
     dashboardRepo.getClosedPOs(companyId),
-    dashboardRepo.getTotalRevenue({
+    // financials.total_po_value_fiscal_year now sources from
+    // cost_budget_master.invoice_amount (Budget Cost) via getTotalBudgetCost(),
+    // not service_pos.po_value. getTotalRevenue() (SUM(po_value)) is left
+    // for /dashboard/stats's total_po_value_current_year, unaffected by this.
+    dashboardRepo.getTotalBudgetCost({
       ...scopedFilters,
       serviceTypeId,
       serviceCategoryId,
@@ -1004,8 +1007,10 @@ async function getAnalyticsDashboard(query = {}, companyId) {
     },
 
     // ── Financials (scoped to the resolved period + filters, via scopedFilters) ──
+    // total_po_value_fiscal_year now sources from cost_budget_master.invoice_amount
+    // (Budget Cost), not service_pos.po_value — see getTotalBudgetCost() above.
     financials: {
-      total_po_value_fiscal_year: round2(totalRevenue),
+      total_po_value_fiscal_year: round2(totalBudgetCost),
     },
 
     tiles: {
@@ -1253,6 +1258,85 @@ async function buildProjectWiseAnalytics(filters, months) {
 }
 
 /**
+ * NEW analytics (additive, not a replacement of any existing report):
+ * Budget Cost (cost_budget_master.invoice_amount) vs Actual Billed Amount
+ * (service_po_monthly_budgets.billed_amount) comparison, built from
+ * dashboardRepo.getBudgetVsBilled()'s flat per-(Service PO, month, year)
+ * rows. Variance = Billed Amount - Budget Cost. Variance % = (Variance /
+ * Budget Cost) x 100, returned as `null` (not 0 or Infinity) when Budget
+ * Cost is 0 — a percentage of a zero budget is undefined, not zero.
+ *
+ * @param {object[]} rows - dashboardRepo.getBudgetVsBilled() rows: { service_po_id, service_po_code, service_po_name, client_name, year, month, budget_cost, billed_amount }
+ * @returns {{
+ *   monthly: { month: string, budget_cost: number, billed_amount: number, variance: number, variance_pct: number|null }[],
+ *   by_service_po: { service_po_id: number, service_po_code: string, service_po_name: string, client_name: string, budget_cost: number, billed_amount: number, variance: number, variance_pct: number|null }[],
+ *   summary: { total_budget_cost: number, total_billed_amount: number, total_variance: number, total_variance_pct: number|null },
+ *   over_budget_service_pos: object[],
+ *   under_budget_service_pos: object[],
+ * }}
+ */
+function buildBudgetVsBilledAnalytics(rows) {
+  const variancePct = (budget, variance) => (budget > 0 ? round2((variance / budget) * 100) : null);
+
+  // ── A. Monthly Budget vs Billed ──────────────────────────────────────
+  const monthlyMap = new Map();
+  for (const row of rows) {
+    const key = `${row.year}-${row.month}`;
+    if (!monthlyMap.has(key)) {
+      monthlyMap.set(key, { year: row.year, month: row.month, budget_cost: 0, billed_amount: 0 });
+    }
+    const bucket = monthlyMap.get(key);
+    bucket.budget_cost = round2(bucket.budget_cost + (parseFloat(row.budget_cost) || 0));
+    bucket.billed_amount = round2(bucket.billed_amount + (parseFloat(row.billed_amount) || 0));
+  }
+  const monthly = Array.from(monthlyMap.values())
+    .sort((a, b) => (a.year - b.year) || (a.month - b.month))
+    .map(({ year, month, budget_cost, billed_amount }) => {
+      const variance = round2(billed_amount - budget_cost);
+      return { month: monthLabel(year, month), budget_cost, billed_amount, variance, variance_pct: variancePct(budget_cost, variance) };
+    });
+
+  // ── B. Service PO Budget vs Billed ───────────────────────────────────
+  const poMap = new Map();
+  for (const row of rows) {
+    if (!poMap.has(row.service_po_id)) {
+      poMap.set(row.service_po_id, {
+        service_po_id: row.service_po_id,
+        service_po_code: row.service_po_code,
+        service_po_name: row.service_po_name,
+        client_name: row.client_name,
+        budget_cost: 0,
+        billed_amount: 0,
+      });
+    }
+    const bucket = poMap.get(row.service_po_id);
+    bucket.budget_cost = round2(bucket.budget_cost + (parseFloat(row.budget_cost) || 0));
+    bucket.billed_amount = round2(bucket.billed_amount + (parseFloat(row.billed_amount) || 0));
+  }
+  const by_service_po = Array.from(poMap.values()).map((po) => {
+    const variance = round2(po.billed_amount - po.budget_cost);
+    return { ...po, variance, variance_pct: variancePct(po.budget_cost, variance) };
+  });
+
+  // ── C. Overall Cost Summary ──────────────────────────────────────────
+  const totalBudgetCost = round2(by_service_po.reduce((sum, po) => sum + po.budget_cost, 0));
+  const totalBilledAmount = round2(by_service_po.reduce((sum, po) => sum + po.billed_amount, 0));
+  const totalVariance = round2(totalBilledAmount - totalBudgetCost);
+  const summary = {
+    total_budget_cost: totalBudgetCost,
+    total_billed_amount: totalBilledAmount,
+    total_variance: totalVariance,
+    total_variance_pct: variancePct(totalBudgetCost, totalVariance),
+  };
+
+  // ── D/E. Over-Budget / Under-Budget Service POs ──────────────────────
+  const over_budget_service_pos = by_service_po.filter((po) => po.billed_amount > po.budget_cost);
+  const under_budget_service_pos = by_service_po.filter((po) => po.billed_amount < po.budget_cost);
+
+  return { monthly, by_service_po, summary, over_budget_service_pos, under_budget_service_pos };
+}
+
+/**
  * Client Wise Cost Analytics: total hours and total cost per client across
  * the ENTIRE dataset, sorted by total cost descending (already sorted by the
  * repository query). Takes no filters and applies none — fiscal year,
@@ -1317,7 +1401,13 @@ async function buildTopClientsByCost(pagination, hoursSource, companyId) {
  * Analytics2: Monthly Resource Utilization Percentage + Cost Trend by Type +
  * Client Wise Cost Analytics + Top Clients by Cost + Client x Category Cost
  * Matrix + Client Wise Analytics + Leave Hours Trend + No Work Trend +
- * Project Wise Analytics. Nine separate reports sharing one route/response.
+ * Project Wise Analytics + Budget vs Billed. Ten separate reports sharing
+ * one route/response — as of the Invoice Master cost migration, every
+ * "cost"/"billed amount" figure among the first nine now sources from
+ * service_po_monthly_budgets.billed_amount (Invoice Master) instead of
+ * monthly_costs (see the "NEW IMPLEMENTATION" banner in
+ * dashboardRepository.js); the tenth (budget_vs_billed) is new and
+ * additionally reads cost_budget_master.invoice_amount as "Budget Cost".
  *
  * Filter behavior falls into three groups:
  * - Period-scoped (monthly_resource_utilization, cost_trend_by_type,
@@ -1356,6 +1446,12 @@ async function buildTopClientsByCost(pagination, hoursSource, companyId) {
  * - project_wise_analytics: one row per Service PO for the resolved period —
  *   client, service-type category (dynamic), total cost, and a month-by-
  *   month cost breakdown using the same month list as cost_trend_by_type.
+ * - budget_vs_billed: NEW — Budget Cost (cost_budget_master.invoice_amount)
+ *   vs Actual Billed Amount (service_po_monthly_budgets.billed_amount) for
+ *   the resolved period, scoped by clientId/poId/serviceTypeId (employeeId
+ *   does not apply — both source tables are Service-PO-level, never
+ *   per-employee). See buildBudgetVsBilledAnalytics() for the monthly/
+ *   per-Service-PO/summary/over-budget/under-budget breakdown.
  *
  * @param {object} query - {
  *   fiscalYear, quarter, month, year, startDate, endDate, employeeId,
@@ -1370,7 +1466,8 @@ async function buildTopClientsByCost(pagination, hoursSource, companyId) {
  *   client_wise_analytics: object[],
  *   leave_hours_trend: { month: string, leave_hours: number }[],
  *   no_work_trend: { month: string, no_work_hours: number }[],
- *   project_wise_analytics: { service_po_id: number, project_name: string, client_name: string, category_name: string, total_cost: number, monthly_cost_breakdown: { month: string, cost: number }[] }[]
+ *   project_wise_analytics: { service_po_id: number, project_name: string, client_name: string, category_name: string, total_cost: number, monthly_cost_breakdown: { month: string, cost: number }[] }[],
+ *   budget_vs_billed: { monthly: object[], by_service_po: object[], summary: object, over_budget_service_pos: object[], under_budget_service_pos: object[] }
  * }>}
  */
 async function getMonthlyResourceUtilization(query = {}, companyId) {
@@ -1442,6 +1539,7 @@ async function getMonthlyResourceUtilization(query = {}, companyId) {
     leaveHoursTrend,
     noWorkTrend,
     projectWiseAnalytics,
+    budgetVsBilledRows,
   ] = await Promise.all([
     dashboardRepo.getMonthlyBillableUtilization(filters),
     buildCostTrendByType(costTrendFilters, months, categoryNames),
@@ -1452,6 +1550,10 @@ async function getMonthlyResourceUtilization(query = {}, companyId) {
     buildLeaveHoursTrend(costTrendFilters, months),
     buildNoWorkTrend(costTrendFilters, months),
     buildProjectWiseAnalytics(costTrendFilters, months),
+    // NEW — Budget Cost (cost_budget_master) vs Actual Billed Amount
+    // (Invoice Master) comparison. Additive only; every report above is
+    // unaffected by this addition.
+    dashboardRepo.getBudgetVsBilled(costTrendFilters),
   ]);
 
   const monthlyResourceUtilization = utilizationRows.map((row) => {
@@ -1475,6 +1577,8 @@ async function getMonthlyResourceUtilization(query = {}, companyId) {
     leave_hours_trend: leaveHoursTrend,
     no_work_trend: noWorkTrend,
     project_wise_analytics: projectWiseAnalytics,
+    // NEW — additive field, see buildBudgetVsBilledAnalytics().
+    budget_vs_billed: buildBudgetVsBilledAnalytics(budgetVsBilledRows),
   };
 }
 

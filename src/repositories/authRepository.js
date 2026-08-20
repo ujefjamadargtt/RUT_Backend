@@ -171,6 +171,12 @@ const SESSION_USER_INCLUDE = [
         attributes: ['id', 'is_original_data_visible'],
         required: false,
       },
+      {
+        model: Employee,
+        as: 'employee',
+        attributes: ['id', 'status', 'is_deleted'],
+        required: false,
+      },
     ],
   },
 ];

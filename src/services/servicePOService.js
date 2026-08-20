@@ -8,7 +8,6 @@ const servicePOHierarchyRepository = require('../repositories/servicePOHierarchy
 const timesheetRepository = require('../repositories/timesheetRepository');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
 const { Employee } = require('../models');
-const { generatePOCode } = require('../helpers/codeGenerator');
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
 const logger = require('../utils/logger');
@@ -178,29 +177,16 @@ const create = async (data, userId, req) => {
     throw err;
   }
 
-  // Use the caller-supplied code if provided; otherwise auto-generate one —
-  // uniqueness is scoped to this company (uq_service_pos_company_code)
-  let service_po_code = data.service_po_code || null;
+  // The PO number is always supplied by the frontend now (required on
+  // createServicePOSchema) — never auto-generated. Only uniqueness is
+  // enforced here; scoped to this company (uq_service_pos_company_code).
+  const service_po_code = data.service_po_code;
 
-  if (!service_po_code) {
-    service_po_code = generatePOCode();
-    let attempts = 0;
-    while (await servicePORepository.findByCode(service_po_code, companyId)) {
-      if (attempts >= 5) {
-        const err = new Error('Failed to generate a unique PO code. Please try again.');
-        err.statusCode = 500;
-        throw err;
-      }
-      service_po_code = generatePOCode();
-      attempts++;
-    }
-  } else {
-    const existing = await servicePORepository.findByCode(service_po_code, companyId);
-    if (existing) {
-      const err = new Error(`Service PO code "${service_po_code}" already exists.`);
-      err.statusCode = 409;
-      throw err;
-    }
+  const existing = await servicePORepository.findByCode(service_po_code, companyId);
+  if (existing) {
+    const err = new Error(`Service PO code "${service_po_code}" already exists.`);
+    err.statusCode = 409;
+    throw err;
   }
 
   const payload = {

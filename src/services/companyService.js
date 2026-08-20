@@ -4,11 +4,15 @@ const { sequelize, DefaultCategory, DefaultType } = require('../models');
 const companyRepository = require('../repositories/companyRepository');
 const userRepository = require('../repositories/userRepository');
 const roleRepository = require('../repositories/roleRepository');
+const employeeRepository = require('../repositories/employeeRepository');
+const userAdditionalRoleRepository = require('../repositories/userAdditionalRoleRepository');
 const serviceCategoryRepository = require('../repositories/serviceCategoryRepository');
 const serviceTypeRepository = require('../repositories/serviceTypeRepository');
 const companyCategoryRepository = require('../repositories/companyCategoryRepository');
 const companyTypeRepository = require('../repositories/companyTypeRepository');
 const { createAuditLog } = require('../middlewares/auditLog');
+const { generateTemporaryPassword } = require('../utils/password');
+const logger = require('../utils/logger');
 
 /**
  * report_bucket_key isn't part of the default_categories master table (see
@@ -50,16 +54,53 @@ const getById = async (id, entityIds) => {
 };
 
 /**
- * Create a company and its first BU Admin user in one transaction, under
- * one of the calling Entity Admin's own owned Entities.
- * @param {object} data - { entity_id, company_code, company_name, admin_email, admin_password }
+ * Create a company, its first BU Admin, and that BU Admin's linked Employee
+ * record — all in one transaction, under one of the calling Entity Admin's
+ * own owned Entities.
+ *
+ * The BU Admin is an Employee from the beginning (not a User created first
+ * and an Employee bolted on later): one Employee row, one User row (with
+ * `employee_id` pointing at it), and that single User holds TWO roles —
+ * `BU Admin` as its PRIMARY role (role_id — unchanged from before, so every
+ * existing BU-Admin-scoped permission/route check keeps working unmodified)
+ * plus `Employee` as an ADDITIONAL role (user_additional_roles — the same
+ * mechanism employeeService.js's Manager-capability check and userService.js's
+ * multi-role user creation already use — see
+ * database/migrations/20260850_add_user_additional_roles.sql). Login,
+ * capability resolution (req.capabilities), and role serialisation all
+ * already union primary + additional roles, so no auth/login code changes
+ * were needed for this user to resolve as both BU Admin and Employee.
+ *
+ * @param {object} data - { company: { entity_id, company_code, company_name, is_original_data_visible? },
+ *   admin: { admin_email, admin_password }, employee: { employee_code, full_name, designation?, etc. —
+ *   see employeeValidation.createEmployeeSchema, reused verbatim by createCompanySchema } }
  * @param {number} actorId - the Entity Admin creating this company
  * @param {string} ipAddress
  * @param {number[]} entityIds - the calling Entity Admin's own owned Entities (req.entityIds)
- * @returns {Promise<{ company: Company, admin: User }>}
+ * @returns {Promise<{ company: Company, employee: object, admin: object, temporaryPassword?: string }>}
  */
 const createWithAdmin = async (data, actorId, ipAddress = null, entityIds = []) => {
-  const { entity_id, company_code, company_name, admin_email, admin_password, is_original_data_visible } = data;
+  const { entity_id, company_code, company_name, is_original_data_visible } = data.company;
+  const { admin_email: email, admin_password: password } = data.admin;
+  // employee.email is present because the frontend reuses the Employee
+  // creation form component wholesale — the actual login identity is
+  // admin.admin_email/admin.admin_password; employee.email is only checked
+  // for consistency, never used to create the User (see below).
+  // is_timesheet_approval_required is stripped and force-set to false below
+  // — a BU Admin's own timesheets are auto-published, never held for
+  // approval (unlike a normal Employee, whose approval-required default
+  // stays true — see employeeService.create()); not a choice the creation
+  // form gets to override.
+  const {
+    email: employeeEmail,
+    password: employeePassword,
+    is_timesheet_approval_required: _requestedApprovalRequired,
+    ...employeeFields
+  } = data.employee;
+
+  if (employeeEmail && employeeEmail.toLowerCase() !== email.toLowerCase()) {
+    fail(`Employee email "${employeeEmail}" must match Admin email "${email}".`, 400);
+  }
 
   // "Entity Admin cannot access Entities belonging to another Entity
   // Admin" — enforced here before anything else runs.
@@ -72,28 +113,53 @@ const createWithAdmin = async (data, actorId, ipAddress = null, entityIds = []) 
     fail(`Company code "${company_code}" already exists.`, 409);
   }
 
-  const existingUser = await userRepository.findByEmail(admin_email);
+  const existingUser = await userRepository.findByEmail(email);
   if (existingUser) {
-    fail(`A user with email "${admin_email}" already exists.`, 409);
+    fail(`A user with email "${email}" already exists.`, 409);
   }
 
-  const companyAdminRole = await roleRepository.findByName('BU Admin');
+  // No employee_code duplicate check is needed here — employee_code
+  // uniqueness is scoped per-company (uq_employees_company_code) and this
+  // Employee is, by construction, the very first one in a Company that
+  // doesn't exist yet.
+
+  const [companyAdminRole, employeeRole] = await Promise.all([
+    roleRepository.findByName('BU Admin'),
+    roleRepository.findByName('Employee'),
+  ]);
   if (!companyAdminRole) {
     fail('The "BU Admin" role is not seeded. Run database/migrations/20260729_seed_platform_roles.sql and 20260807_rename_company_admin_to_bu_admin.sql first.', 500);
   }
+  if (!employeeRole) {
+    fail('The "Employee" role is not seeded.', 500);
+  }
 
-  let company, admin;
+  const temporaryPassword = password || generateTemporaryPassword();
+
+  let company, employee, admin;
   await sequelize.transaction(async (transaction) => {
     company = await companyRepository.create(
       { entity_id, company_code, company_name, is_original_data_visible, created_by: actorId, updated_by: actorId },
       { transaction }
     );
 
+    employee = await employeeRepository.create(
+      {
+        ...employeeFields,
+        is_timesheet_approval_required: false,
+        company_id: company.id,
+        created_by: actorId,
+        updated_by: actorId,
+      },
+      { transaction }
+    );
+
     admin = await userRepository.create(
       {
-        email: admin_email,
-        password: admin_password,
+        email,
+        password: temporaryPassword,
         role_id: companyAdminRole.id,
+        employee_id: employee.id,
         company_id: company.id,
         status: 'active',
         created_by: actorId,
@@ -101,6 +167,10 @@ const createWithAdmin = async (data, actorId, ipAddress = null, entityIds = []) 
       },
       { transaction }
     );
+
+    // The BU Admin's second role — Employee — granted additively so the
+    // same User resolves as both (see this function's doc comment above).
+    await userAdditionalRoleRepository.replaceForUser(admin.id, [employeeRole.id], actorId, transaction);
 
     // Single master copy of the default category/type list now lives in
     // default_categories/default_types (see database/migrations/
@@ -179,10 +249,43 @@ const createWithAdmin = async (data, actorId, ipAddress = null, entityIds = []) 
 
   await createAuditLog(actorId, 'CREATE', 'companies', company.id, null, company.toJSON(), ipAddress);
 
-  const adminSummary = { id: admin.id, email: admin.email, role_id: admin.role_id, company_id: admin.company_id };
+  await createAuditLog(
+    actorId,
+    'CREATE',
+    'employees',
+    employee.id,
+    null,
+    { id: employee.id, employee_code: employee.employee_code, company_id: employee.company_id, linked_user_id: admin.id },
+    ipAddress
+  );
+
+  const adminSummary = {
+    id: admin.id,
+    email: admin.email,
+    employee_id: employee.id,
+    company_id: admin.company_id,
+    role_id: admin.role_id,
+    roles: ['BU Admin', 'Employee'],
+  };
   await createAuditLog(actorId, 'CREATE', 'users', admin.id, null, adminSummary, ipAddress);
 
-  return { company, admin: adminSummary };
+  logger.info('BU Admin created with linked Employee record and dual role assignment', {
+    companyId: company.id,
+    employeeId: employee.id,
+    userId: admin.id,
+    createdBy: actorId,
+  });
+
+  const employeeSummary = { id: employee.id, employee_code: employee.employee_code, full_name: employee.full_name, email };
+
+  const response = { company, employee: employeeSummary, admin: adminSummary };
+  // Only surface the plaintext password when we generated it — if the
+  // Entity Admin supplied their own, they already know it.
+  if (!password) {
+    response.temporaryPassword = temporaryPassword;
+  }
+
+  return response;
 };
 
 const update = async (id, data, actorId, ipAddress = null, entityIds = []) => {

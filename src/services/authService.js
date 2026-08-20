@@ -156,6 +156,15 @@ async function login(email, password, ipAddress, userAgent) {
     throw err;
   }
 
+  if (user.employee && (user.employee.status !== 'active' || user.employee.is_deleted)) {
+    logger.warn('Login attempt on inactive employee record', { userId: user.id, employeeId: user.employee.id });
+    const err = new Error('Your employee record is inactive. Please contact the administrator.');
+    err.statusCode = 403;
+    err.code = 'EMPLOYEE_INACTIVE';
+    err.isOperational = true;
+    throw err;
+  }
+
   const isPasswordValid = await user.validatePassword(password);
 
   if (!isPasswordValid) {
@@ -351,6 +360,26 @@ async function refreshToken(refreshToken, ipAddress, userAgent) {
     const err = new Error('Account is inactive. Please contact the administrator.');
     err.statusCode = 403;
     err.code = 'ACCOUNT_INACTIVE';
+    err.isOperational = true;
+    throw err;
+  }
+
+  if (!user.role || user.role.status !== 'active') {
+    logger.warn('Token refresh for account with no active role', { userId: decoded.id });
+    await authRepository.revokeSessionByJti(decoded.jti);
+    const err = new Error('No active role is assigned to your account. Please contact the administrator.');
+    err.statusCode = 403;
+    err.code = 'ROLE_INACTIVE';
+    err.isOperational = true;
+    throw err;
+  }
+
+  if (user.employee && (user.employee.status !== 'active' || user.employee.is_deleted)) {
+    logger.warn('Token refresh for inactive employee record', { userId: decoded.id, employeeId: user.employee.id });
+    await authRepository.revokeSessionByJti(decoded.jti);
+    const err = new Error('Your employee record is inactive. Please contact the administrator.');
+    err.statusCode = 403;
+    err.code = 'EMPLOYEE_INACTIVE';
     err.isOperational = true;
     throw err;
   }

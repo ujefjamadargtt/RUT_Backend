@@ -152,8 +152,12 @@ router.get(
  *       Upserts on the (service_po_id, month, year) unique constraint — a
  *       second call for the same Service PO + month/year updates the
  *       existing row instead of creating a duplicate. Requires the
- *       servicepo.manage_future_budget capability. Editing after the
- *       deadline is allowed; the response still reports deadline status.
+ *       servicepo.manage_future_budget capability. A given month is only
+ *       writable from the 1st of that month through the 7th of the
+ *       FOLLOWING month, inclusive (e.g. August is writable 01-Aug through
+ *       07-Sep; 400 outside that window) — the response still separately
+ *       reports the (informational, non-blocking) deadline status for
+ *       data-completeness tracking.
  *     tags: [ServicePOMonthlyBudgets]
  *     security:
  *       - bearerAuth: []
@@ -175,6 +179,8 @@ router.get(
  *     responses:
  *       200:
  *         description: Monthly budget record saved (created or updated)
+ *       400:
+ *         description: month/year is outside its allowed window (1st of the month through the 7th of the following month)
  *       404:
  *         description: Service PO not found
  *       403:

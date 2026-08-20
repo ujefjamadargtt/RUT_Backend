@@ -342,6 +342,76 @@ async function getTotalRevenue(filters = {}) {
 }
 
 /**
+ * Total Budget Cost for the resolved period + filters, from
+ * cost_budget_master.invoice_amount — used by getAnalyticsDashboard() (the
+ * /analytics route) for financials.total_po_value_fiscal_year, replacing
+ * getTotalRevenue()'s SUM(service_pos.po_value). getTotalRevenue() itself is
+ * intentionally left untouched above: /dashboard/stats still calls it for
+ * financials.total_po_value_current_year, which is out of scope for this
+ * change.
+ *
+ * Only 'active' cost_budget_master rows count (a deactivated budget entry
+ * is treated the same as "no budget"). startDate/endDate are matched
+ * against cost_budget_master's own month/year columns via periodKey() (see
+ * the "NEW IMPLEMENTATION" block below) — a Service PO's start_date/end_date
+ * (what getTotalRevenue() uses) is unrelated to which months actually have a
+ * budget entry, so budget-year matching is intentionally month/year-exact
+ * instead.
+ *
+ * @param {object} filters - { startDate, endDate, year, employeeId, clientId, poId, serviceTypeId, serviceCategoryId, companyId }
+ * @returns {Promise<number>}
+ */
+async function getTotalBudgetCost(filters = {}) {
+  const { startDate, endDate, year, employeeId, clientId, poId, serviceTypeId, serviceCategoryId, companyId } = filters;
+
+  const conditions = ["cbm.status = 'active'", 'sp.company_id = :companyId'];
+  const replacements = { companyId };
+
+  if (startDate && endDate) {
+    replacements.startPeriodKey = periodKey(startDate);
+    replacements.endPeriodKey = periodKey(endDate);
+    conditions.push('(cbm.year * 12 + cbm.month) BETWEEN :startPeriodKey AND :endPeriodKey');
+  } else if (year) {
+    conditions.push('cbm.year = :year');
+    replacements.year = year;
+  }
+
+  if (clientId) {
+    conditions.push('sp.client_id = :clientId');
+    replacements.clientId = clientId;
+  }
+  if (poId) {
+    conditions.push('sp.id = :poId');
+    replacements.poId = poId;
+  }
+  if (serviceTypeId) {
+    conditions.push('st.id = :serviceTypeId');
+    replacements.serviceTypeId = serviceTypeId;
+  }
+  if (serviceCategoryId) {
+    conditions.push('sc.id = :serviceCategoryId');
+    replacements.serviceCategoryId = serviceCategoryId;
+  }
+  if (employeeId) {
+    conditions.push(
+      'EXISTS (SELECT 1 FROM timesheets t WHERE t.service_po_id = sp.id AND t.employee_id = :employeeId)'
+    );
+    replacements.employeeId = employeeId;
+  }
+
+  const [result] = await sequelize.query(
+    `SELECT COALESCE(SUM(cbm.invoice_amount), 0) AS total_budget_cost
+     FROM cost_budget_master cbm
+     INNER JOIN service_pos sp        ON sp.id = cbm.service_po_id
+     INNER JOIN service_types st      ON st.id = sp.service_type_id
+     LEFT  JOIN service_categories sc ON sc.id = st.service_category_id
+     WHERE ${conditions.join(' AND ')}`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+  return parseFloat(result.total_budget_cost) || 0;
+}
+
+/**
  * Recent timesheet activity — last 5 distinct employees who logged hours.
  * Used by dashboard to show a live "activity feed".
  *
@@ -1108,6 +1178,16 @@ function buildAnalyticsFilters(filters, replacements) {
   return conditions.join(' AND ');
 }
 
+// =============================================================================
+// OLD IMPLEMENTATION — WITH MONTHLY COST
+// BACKUP / REFERENCE ONLY — DO NOT MODIFY
+// Cost-bearing Dashboard queries as they were before Monthly Cost / Actual
+// Billed Amount moved to Invoice Master (service_po_monthly_budgets.billed_amount).
+// Every function below computed "cost" as hours_logged x monthly_costs.total_cost
+// (an employee-level cost rate), joined via mc.employee_id + mc.month_year.
+// Kept verbatim, unused by production code, purely for reference/rollback.
+// =============================================================================
+
 /**
  * Top-level analytics tiles: total hours, total cost, billable hours (for
  * utilisation %), and distinct counts of employees/clients/service POs with
@@ -1116,7 +1196,7 @@ function buildAnalyticsFilters(filters, replacements) {
  * @param {object} filters - { startDate, endDate, employeeId, clientId, poId }
  * @returns {Promise<object>} single row of aggregates
  */
-async function getAnalyticsTiles(filters) {
+async function getAnalyticsTiles_oldWithMonthlyCost(filters) {
   const replacements = {};
   const whereClause = buildAnalyticsFilters(filters, replacements);
   // hoursSource = 'O' -> original hours_logged. Anything else/default
@@ -1416,7 +1496,7 @@ async function getMonthlyBillableUtilization(filters) {
  * @param {object} filters - { startDate, endDate, employeeId, clientId, poId, serviceTypeId }
  * @returns {Promise<object[]>} rows: { year, month, category_name, cost }
  */
-async function getCostTrendByType(filters) {
+async function getCostTrendByType_oldWithMonthlyCost(filters) {
   const replacements = {};
   const whereClause = buildAnalyticsFilters(filters, replacements);
   // hoursSource = 'O' -> original hours_logged. Anything else/default
@@ -1461,7 +1541,7 @@ async function getCostTrendByType(filters) {
  *
  * @returns {Promise<object[]>} rows: { client_id, client_name, total_hours, total_cost }
  */
-async function getClientWiseCostAnalytics(hoursSource, roleId, companyId) {
+async function getClientWiseCostAnalytics_oldWithMonthlyCost(hoursSource, roleId, companyId) {
   // hoursSource = 'O' -> original hours_logged. Anything else/default
   // (including no roleId, or roleId != 5) -> modified_hours. roleId plays no
   // part in this selection — only hoursSource does.
@@ -1502,7 +1582,7 @@ async function getClientWiseCostAnalytics(hoursSource, roleId, companyId) {
  *
  * @returns {Promise<object[]>} rows: { client_id, client_name, category_name, cost }
  */
-async function getClientCategoryCostMatrix(hoursSource, roleId, companyId) {
+async function getClientCategoryCostMatrix_oldWithMonthlyCost(hoursSource, roleId, companyId) {
   // hoursSource = 'O' -> original hours_logged. Anything else/default
   // (including no roleId, or roleId != 5) -> modified_hours. roleId plays no
   // part in this selection — only hoursSource does.
@@ -1546,7 +1626,7 @@ async function getClientCategoryCostMatrix(hoursSource, roleId, companyId) {
  * @param {object} filters - { startDate, endDate, employeeId, clientId, poId, serviceTypeId }
  * @returns {Promise<object[]>} rows: { client_id, client_name, total_hours, total_cost, total_projects }
  */
-async function getClientWiseAnalytics(filters) {
+async function getClientWiseAnalytics_oldWithMonthlyCost(filters) {
   const replacements = {};
   const whereClause = buildAnalyticsFilters(filters, replacements);
   // hoursSource = 'O' -> original hours_logged. Anything else/default
@@ -1670,7 +1750,7 @@ async function getNoWorkTrend(filters) {
  * @param {object} filters - { startDate, endDate, employeeId, clientId, poId, serviceTypeId }
  * @returns {Promise<object[]>} rows: { service_po_id, project_name, client_name, category_name, year, month, cost }
  */
-async function getProjectWiseAnalytics(filters) {
+async function getProjectWiseAnalytics_oldWithMonthlyCost(filters) {
   const replacements = {};
   const whereClause = buildAnalyticsFilters(filters, replacements);
   // hoursSource = 'O' -> original hours_logged. Anything else/default
@@ -1699,6 +1779,490 @@ async function getProjectWiseAnalytics(filters) {
       AND mc.month_year = TO_CHAR(t.timesheet_date, 'YYYY-MM')
      WHERE ${whereClause}
      GROUP BY sp.id, sp.service_po_name, c.client_name, category_name, year, month
+     ORDER BY sp.id, year, month`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+}
+
+// =============================================================================
+// NEW IMPLEMENTATION — INVOICE MASTER
+// ACTIVE IMPLEMENTATION
+// "Monthly Cost" / "Actual Billed Amount" now comes from Invoice Master
+// (service_po_monthly_budgets.billed_amount) — a per-Service-PO-per-month
+// figure — instead of monthly_costs (an employee-level hours x rate figure).
+// "PO Value / Budget Cost" is unrelated and untouched: getTotalRevenue()
+// above still reads service_pos.po_value; the NEW getBudgetVsBilled() below
+// additionally reads cost_budget_master.invoice_amount for the new
+// Budget-vs-Billed comparison analytics only.
+//
+// Every hours-only figure (total_hours, billable_hours, active/inactive
+// counts, total_projects) is left exactly as it was — only the "cost"/
+// "billed amount" expression moved off monthly_costs. Where a function's
+// response shape mixes hours and cost (getAnalyticsTiles, getClientWiseCostAnalytics,
+// getClientWiseAnalytics), the hours side still queries timesheets unchanged
+// and is merged in JS with a separate Invoice-Master cost query — this keeps
+// the hours calculation completely untouched while swapping only the cost
+// source, and callers (dashboardService.js's build* helpers) see the exact
+// same row shape as before, so no caller needed to change.
+// =============================================================================
+
+/**
+ * Convert a "YYYY-MM-DD" date string into a single comparable integer
+ * (year*12 + month), so a date-range filter (startDate/endDate) can be
+ * compared against service_po_monthly_budgets'/cost_budget_master's separate
+ * month/year INT columns without constructing a synthetic date. Parsed via
+ * UTC accessors so a date-only string is never shifted a day backward by a
+ * local timezone offset.
+ *
+ * @param {string} dateStr - "YYYY-MM-DD"
+ * @returns {number}
+ */
+function periodKey(dateStr) {
+  const d = new Date(dateStr);
+  return d.getUTCFullYear() * 12 + (d.getUTCMonth() + 1);
+}
+
+/**
+ * Filter builder for cost queries sourced from service_po_monthly_budgets
+ * (Invoice Master) instead of timesheets — mirrors buildAnalyticsFilters()'s
+ * filter set (startDate/endDate/employeeId/clientId/poId/serviceTypeId/
+ * companyId) so every existing Analytics Dashboard filter keeps working, but
+ * expressed against sp/st/spmb columns since there is no `timesheets t`
+ * table in these queries. startDate/endDate (an arbitrary date range) are
+ * converted to an inclusive (year*12+month) comparison against
+ * spmb.year/spmb.month via periodKey(), since Invoice Master only stores
+ * whole calendar months, never a specific day — do NOT combine year and
+ * month into a synthetic date instead, that would misalign against a
+ * startDate/endDate that falls mid-month.
+ *
+ * employeeId has no direct equivalent on Invoice Master — billed_amount is
+ * a whole-Service-PO figure, never split per employee. When employeeId is
+ * given, this narrows to Service POs that employee actually logged hours
+ * against in the period (via an EXISTS against timesheets), while still
+ * summing that PO's FULL billed_amount rather than inventing a per-employee
+ * share of it. This is a deliberate, documented interpretation of an
+ * otherwise-meaningless filter combination, not an oversight.
+ *
+ * @param {object} filters - { startDate, endDate, employeeId, clientId, poId, serviceTypeId, companyId }
+ * @param {object} replacements - mutated in place with the bind values this clause needs
+ * @returns {string} SQL WHERE clause (without the WHERE keyword) — assumes aliases sp/st/spmb are joined
+ */
+function buildInvoiceMasterFilters(filters, replacements) {
+  const { startDate, endDate, employeeId, clientId, poId, serviceTypeId, companyId } = filters;
+
+  const conditions = ['sp.company_id = :companyId'];
+  replacements.companyId = companyId;
+
+  replacements.startPeriodKey = periodKey(startDate);
+  replacements.endPeriodKey = periodKey(endDate);
+  conditions.push('(spmb.year * 12 + spmb.month) BETWEEN :startPeriodKey AND :endPeriodKey');
+
+  if (clientId) {
+    conditions.push('sp.client_id = :clientId');
+    replacements.clientId = clientId;
+  }
+  if (poId) {
+    conditions.push('sp.id = :poId');
+    replacements.poId = poId;
+  }
+  if (serviceTypeId) {
+    conditions.push('st.id = :serviceTypeId');
+    replacements.serviceTypeId = serviceTypeId;
+  }
+  if (employeeId) {
+    conditions.push(
+      'EXISTS (SELECT 1 FROM timesheets et WHERE et.service_po_id = sp.id AND et.employee_id = :employeeId ' +
+      'AND et.timesheet_date >= :empStartDate AND et.timesheet_date <= :empEndDate)'
+    );
+    replacements.employeeId = employeeId;
+    replacements.empStartDate = startDate;
+    replacements.empEndDate = endDate;
+  }
+
+  return conditions.join(' AND ');
+}
+
+/**
+ * Top-level analytics tiles — same as getAnalyticsTiles_oldWithMonthlyCost()
+ * for every hours/count figure (unchanged query against timesheets), but
+ * total_cost is now a separate query summing service_po_monthly_budgets.billed_amount
+ * (Invoice Master) instead of hours x monthly_costs.total_cost / 176.
+ *
+ * @param {object} filters - { startDate, endDate, employeeId, clientId, poId }
+ * @returns {Promise<object>} single row of aggregates
+ */
+async function getAnalyticsTiles(filters) {
+  const replacements = {};
+  const whereClause = buildAnalyticsFilters(filters, replacements);
+  const hoursCol = (filters.hoursSource === 'O')
+    ? 't.hours_logged'
+    : 'COALESCE(t.modified_hours, t.hours_logged)';
+
+  const [result] = await sequelize.query(
+    `SELECT
+        COALESCE(SUM(${hoursCol}), 0) AS total_hours,
+
+        COALESCE(
+          SUM(
+            CASE
+              WHEN sp.is_billable THEN ${hoursCol}
+            END
+          ), 0
+        ) AS billable_hours,
+
+        -- Employee Counts
+        COUNT(DISTINCT CASE WHEN e.status = 'active' AND e.is_deleted = 'f' THEN e.id END) AS active_employees,
+        COUNT(DISTINCT CASE WHEN e.status = 'inactive' THEN e.id END) AS inactive_employees,
+
+        -- Client Counts
+        COUNT(DISTINCT CASE WHEN c.status = 'active' THEN c.id END) AS active_clients,
+        COUNT(DISTINCT CASE WHEN c.status = 'inactive' THEN c.id END) AS inactive_clients,
+
+        -- Service PO Counts
+        COUNT(DISTINCT CASE WHEN sp.status IN('in-progress', 'on-hold') AND sp.is_deleted = 'f' THEN sp.id END) AS active_service_pos,
+        COUNT(DISTINCT CASE WHEN sp.status = 'inactive' THEN sp.id END) AS inactive_service_pos
+
+     FROM timesheets t
+     INNER JOIN service_pos sp
+       ON sp.id = t.service_po_id
+
+     INNER JOIN employees e
+       ON e.id = t.employee_id
+
+     INNER JOIN clients c
+       ON c.id = sp.client_id
+
+     WHERE ${whereClause}`,
+    {
+      replacements,
+      type: QueryTypes.SELECT,
+    }
+  );
+
+  const costReplacements = {};
+  const costWhereClause = buildInvoiceMasterFilters(filters, costReplacements);
+  const [costResult] = await sequelize.query(
+    `SELECT COALESCE(SUM(spmb.billed_amount), 0) AS total_cost
+     FROM service_po_monthly_budgets spmb
+     INNER JOIN service_pos sp   ON sp.id = spmb.service_po_id
+     INNER JOIN service_types st ON st.id = sp.service_type_id
+     WHERE ${costWhereClause}`,
+    { replacements: costReplacements, type: QueryTypes.SELECT }
+  );
+
+  return { ...result, total_cost: costResult.total_cost };
+}
+
+/**
+ * Cost Trend by Type — same shape as getCostTrendByType_oldWithMonthlyCost()
+ * ({ year, month, category_name, cost }), but cost now sums
+ * service_po_monthly_budgets.billed_amount (Invoice Master) per (month,
+ * category) instead of hours x monthly_costs.total_cost. No timesheets join
+ * at all — Invoice Master rows are already at the (Service PO, month, year)
+ * granularity, so no aggregation-inflation risk.
+ *
+ * @param {object} filters - { startDate, endDate, employeeId, clientId, poId, serviceTypeId, companyId }
+ * @returns {Promise<object[]>} rows: { year, month, category_name, cost }
+ */
+async function getCostTrendByType(filters) {
+  const replacements = {};
+  const whereClause = buildInvoiceMasterFilters(filters, replacements);
+
+  return sequelize.query(
+    `SELECT
+       spmb.year,
+       spmb.month,
+       COALESCE(sc.name, 'Uncategorized') AS category_name,
+       ROUND(COALESCE(SUM(spmb.billed_amount), 0)::NUMERIC, 2) AS cost
+     FROM service_po_monthly_budgets spmb
+     INNER JOIN service_pos sp        ON sp.id = spmb.service_po_id
+     INNER JOIN service_types st      ON st.id = sp.service_type_id
+     LEFT  JOIN service_categories sc ON sc.id = st.service_category_id
+     WHERE ${whereClause}
+     GROUP BY spmb.year, spmb.month, category_name
+     ORDER BY spmb.year, spmb.month, category_name`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+}
+
+/**
+ * Client Wise Cost Analytics — same shape as
+ * getClientWiseCostAnalytics_oldWithMonthlyCost() ({ client_id, client_name,
+ * total_hours, total_cost }), entire dataset, unfiltered (no period/filters,
+ * matching the old function's own documented scope). total_hours is still
+ * queried from timesheets, unchanged; total_cost now sums
+ * service_po_monthly_budgets.billed_amount per client instead of hours x
+ * monthly_costs.total_cost. The two are run as separate queries and merged
+ * by client_id here, so a client with cost but no hours (or vice versa)
+ * still appears instead of being dropped by an inner join.
+ *
+ * @returns {Promise<object[]>} rows: { client_id, client_name, total_hours, total_cost }
+ */
+async function getClientWiseCostAnalytics(hoursSource, roleId, companyId) {
+  const hoursCol = (hoursSource === 'O')
+    ? 't.hours_logged'
+    : 'COALESCE(t.modified_hours, t.hours_logged)';
+
+  const hoursRows = await sequelize.query(
+    `SELECT
+       c.id AS client_id,
+       c.client_name,
+       ROUND(SUM(${hoursCol})::NUMERIC, 2) AS total_hours
+     FROM timesheets t
+     INNER JOIN service_pos sp ON sp.id = t.service_po_id
+     INNER JOIN clients c      ON c.id  = sp.client_id
+     WHERE t.company_id = :companyId
+     GROUP BY c.id, c.client_name`,
+    { replacements: { companyId }, type: QueryTypes.SELECT }
+  );
+
+  const costRows = await sequelize.query(
+    `SELECT
+       c.id AS client_id,
+       c.client_name,
+       ROUND(COALESCE(SUM(spmb.billed_amount), 0)::NUMERIC, 2) AS total_cost
+     FROM service_po_monthly_budgets spmb
+     INNER JOIN service_pos sp ON sp.id = spmb.service_po_id
+     INNER JOIN clients c      ON c.id  = sp.client_id
+     WHERE sp.company_id = :companyId
+     GROUP BY c.id, c.client_name`,
+    { replacements: { companyId }, type: QueryTypes.SELECT }
+  );
+
+  const clientMap = new Map();
+  for (const row of hoursRows) {
+    clientMap.set(row.client_id, {
+      client_id: row.client_id,
+      client_name: row.client_name,
+      total_hours: row.total_hours,
+      total_cost: 0,
+    });
+  }
+  for (const row of costRows) {
+    if (!clientMap.has(row.client_id)) {
+      clientMap.set(row.client_id, {
+        client_id: row.client_id,
+        client_name: row.client_name,
+        total_hours: 0,
+        total_cost: row.total_cost,
+      });
+    } else {
+      clientMap.get(row.client_id).total_cost = row.total_cost;
+    }
+  }
+
+  return Array.from(clientMap.values()).sort((a, b) => parseFloat(b.total_cost) - parseFloat(a.total_cost));
+}
+
+/**
+ * Client x Category Cost Matrix — same shape as
+ * getClientCategoryCostMatrix_oldWithMonthlyCost() ({ client_id, client_name,
+ * category_name, cost }), entire dataset, unfiltered. cost now sums
+ * service_po_monthly_budgets.billed_amount (Invoice Master) per (client,
+ * category) instead of hours x monthly_costs.total_cost. No hours in this
+ * response shape, so no merge needed — a single query suffices.
+ *
+ * @returns {Promise<object[]>} rows: { client_id, client_name, category_name, cost }
+ */
+async function getClientCategoryCostMatrix(hoursSource, roleId, companyId) {
+  return sequelize.query(
+    `SELECT
+       c.id AS client_id,
+       c.client_name,
+       COALESCE(sc.name, 'Uncategorized') AS category_name,
+       ROUND(COALESCE(SUM(spmb.billed_amount), 0)::NUMERIC, 2) AS cost
+     FROM service_po_monthly_budgets spmb
+     INNER JOIN service_pos sp        ON sp.id = spmb.service_po_id
+     INNER JOIN clients c             ON c.id  = sp.client_id
+     INNER JOIN service_types st      ON st.id = sp.service_type_id
+     LEFT  JOIN service_categories sc ON sc.id = st.service_category_id
+     WHERE sp.company_id = :companyId
+     GROUP BY c.id, c.client_name, category_name
+     ORDER BY c.client_name, category_name`,
+    { replacements: { companyId }, type: QueryTypes.SELECT }
+  );
+}
+
+/**
+ * Client Wise Analytics — same shape as getClientWiseAnalytics_oldWithMonthlyCost()
+ * ({ client_id, client_name, total_hours, total_cost, total_projects }), for
+ * the resolved period. total_hours/total_projects are still queried from
+ * timesheets, unchanged; total_cost now sums
+ * service_po_monthly_budgets.billed_amount per client for the same period
+ * instead of hours x monthly_costs.total_cost. The two are run as separate
+ * queries and merged by client_id, so a client with cost but no hours (or
+ * vice versa) in this period still appears.
+ *
+ * @param {object} filters - { startDate, endDate, employeeId, clientId, poId, serviceTypeId, companyId }
+ * @returns {Promise<object[]>} rows: { client_id, client_name, total_hours, total_cost, total_projects }
+ */
+async function getClientWiseAnalytics(filters) {
+  const hoursReplacements = {};
+  const hoursWhereClause = buildAnalyticsFilters(filters, hoursReplacements);
+  const hoursCol = (filters.hoursSource === 'O')
+    ? 't.hours_logged'
+    : 'COALESCE(t.modified_hours, t.hours_logged)';
+
+  const hoursRows = await sequelize.query(
+    `SELECT
+       c.id AS client_id,
+       c.client_name,
+       ROUND(SUM(${hoursCol})::NUMERIC, 2) AS total_hours,
+       COUNT(DISTINCT sp.id) AS total_projects
+     FROM timesheets t
+     INNER JOIN service_pos sp   ON sp.id = t.service_po_id
+     INNER JOIN clients c        ON c.id  = sp.client_id
+     INNER JOIN service_types st ON st.id = sp.service_type_id
+     WHERE ${hoursWhereClause}
+     GROUP BY c.id, c.client_name`,
+    { replacements: hoursReplacements, type: QueryTypes.SELECT }
+  );
+
+  const costReplacements = {};
+  const costWhereClause = buildInvoiceMasterFilters(filters, costReplacements);
+  const costRows = await sequelize.query(
+    `SELECT
+       c.id AS client_id,
+       c.client_name,
+       ROUND(COALESCE(SUM(spmb.billed_amount), 0)::NUMERIC, 2) AS total_cost
+     FROM service_po_monthly_budgets spmb
+     INNER JOIN service_pos sp   ON sp.id = spmb.service_po_id
+     INNER JOIN clients c        ON c.id  = sp.client_id
+     INNER JOIN service_types st ON st.id = sp.service_type_id
+     WHERE ${costWhereClause}
+     GROUP BY c.id, c.client_name`,
+    { replacements: costReplacements, type: QueryTypes.SELECT }
+  );
+
+  const clientMap = new Map();
+  for (const row of hoursRows) {
+    clientMap.set(row.client_id, {
+      client_id: row.client_id,
+      client_name: row.client_name,
+      total_hours: row.total_hours,
+      total_projects: row.total_projects,
+      total_cost: 0,
+    });
+  }
+  for (const row of costRows) {
+    if (!clientMap.has(row.client_id)) {
+      clientMap.set(row.client_id, {
+        client_id: row.client_id,
+        client_name: row.client_name,
+        total_hours: 0,
+        total_projects: 0,
+        total_cost: row.total_cost,
+      });
+    } else {
+      clientMap.get(row.client_id).total_cost = row.total_cost;
+    }
+  }
+
+  return Array.from(clientMap.values());
+}
+
+/**
+ * Project Wise Analytics — same shape as getProjectWiseAnalytics_oldWithMonthlyCost()
+ * ({ service_po_id, project_name, client_name, category_name, year, month,
+ * cost }), for the resolved period, but cost now comes directly from
+ * service_po_monthly_budgets.billed_amount (Invoice Master) instead of hours
+ * x monthly_costs.total_cost. No hours in this response shape and Invoice
+ * Master is already unique per (service_po_id, month, year), so this needs
+ * no GROUP BY/SUM at all — one Invoice Master row IS one output row,
+ * eliminating any risk of duplicate-row inflation.
+ *
+ * @param {object} filters - { startDate, endDate, employeeId, clientId, poId, serviceTypeId, companyId }
+ * @returns {Promise<object[]>} rows: { service_po_id, project_name, client_name, category_name, year, month, cost }
+ */
+async function getProjectWiseAnalytics(filters) {
+  const replacements = {};
+  const whereClause = buildInvoiceMasterFilters(filters, replacements);
+
+  return sequelize.query(
+    `SELECT
+       sp.id AS service_po_id,
+       sp.service_po_name AS project_name,
+       c.client_name,
+       COALESCE(sc.name, 'Uncategorized') AS category_name,
+       spmb.year,
+       spmb.month,
+       ROUND(COALESCE(spmb.billed_amount, 0)::NUMERIC, 2) AS cost
+     FROM service_po_monthly_budgets spmb
+     INNER JOIN service_pos sp        ON sp.id = spmb.service_po_id
+     INNER JOIN clients c             ON c.id  = sp.client_id
+     INNER JOIN service_types st      ON st.id = sp.service_type_id
+     LEFT  JOIN service_categories sc ON sc.id = st.service_category_id
+     WHERE ${whereClause}
+     ORDER BY sp.id, spmb.year, spmb.month`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+}
+
+/**
+ * NEW analytics (not a replacement of any old function): Budget Cost
+ * (cost_budget_master.invoice_amount) vs Actual Billed Amount
+ * (service_po_monthly_budgets.billed_amount), one row per (service_po_id,
+ * month, year) present in EITHER table for the resolved period/filters — a
+ * FULL OUTER JOIN on the shared (service_po_id, month, year) key so a
+ * Service PO with only a budget entered, or only an invoice/billed entry,
+ * still appears (0 on whichever side has no data) instead of being silently
+ * dropped. Only 'active' cost_budget_master rows count as budget — a
+ * deactivated budget entry is treated the same as "no budget". Both tables
+ * are already unique on (service_po_id, month, year), so this is a strict
+ * 1:1 join — no aggregation/fan-out risk of inflating totals.
+ *
+ * employeeId has no meaning here (both tables are Service-PO-level, never
+ * per-employee) and is intentionally NOT applied — every other filter
+ * (period, clientId, poId, serviceTypeId, company scope) behaves the same
+ * as buildInvoiceMasterFilters().
+ *
+ * @param {object} filters - { startDate, endDate, clientId, poId, serviceTypeId, companyId }
+ * @returns {Promise<object[]>} rows: { service_po_id, service_po_code, service_po_name, client_id, client_name, year, month, budget_cost, billed_amount }
+ */
+async function getBudgetVsBilled(filters) {
+  const { startDate, endDate, clientId, poId, serviceTypeId, companyId } = filters;
+  const replacements = { companyId };
+  const conditions = ['sp.company_id = :companyId', "(cbm.id IS NULL OR cbm.status = 'active')"];
+
+  replacements.startPeriodKey = periodKey(startDate);
+  replacements.endPeriodKey = periodKey(endDate);
+  conditions.push(
+    '(COALESCE(cbm.year, spmb.year) * 12 + COALESCE(cbm.month, spmb.month)) BETWEEN :startPeriodKey AND :endPeriodKey'
+  );
+
+  if (clientId) {
+    conditions.push('sp.client_id = :clientId');
+    replacements.clientId = clientId;
+  }
+  if (poId) {
+    conditions.push('sp.id = :poId');
+    replacements.poId = poId;
+  }
+  if (serviceTypeId) {
+    conditions.push('st.id = :serviceTypeId');
+    replacements.serviceTypeId = serviceTypeId;
+  }
+
+  return sequelize.query(
+    `SELECT
+       COALESCE(cbm.service_po_id, spmb.service_po_id) AS service_po_id,
+       sp.service_po_code,
+       sp.service_po_name,
+       sp.client_id,
+       c.client_name,
+       COALESCE(cbm.year, spmb.year)   AS year,
+       COALESCE(cbm.month, spmb.month) AS month,
+       ROUND(COALESCE(cbm.invoice_amount, 0)::NUMERIC, 2) AS budget_cost,
+       ROUND(COALESCE(spmb.billed_amount, 0)::NUMERIC, 2) AS billed_amount
+     FROM cost_budget_master cbm
+     FULL OUTER JOIN service_po_monthly_budgets spmb
+       ON spmb.service_po_id = cbm.service_po_id
+      AND spmb.month = cbm.month
+      AND spmb.year = cbm.year
+     INNER JOIN service_pos sp   ON sp.id = COALESCE(cbm.service_po_id, spmb.service_po_id)
+     INNER JOIN service_types st ON st.id = sp.service_type_id
+     INNER JOIN clients c        ON c.id  = sp.client_id
+     WHERE ${conditions.join(' AND ')}
      ORDER BY sp.id, year, month`,
     { replacements, type: QueryTypes.SELECT }
   );
@@ -1828,6 +2392,7 @@ module.exports = {
   getOverallUtilisation,
   getOverallUtilisationForPeriod,
   getTotalRevenue,
+  getTotalBudgetCost,
   getRecentTimesheetActivity,
   getRecentTimesheetActivityForPeriod,
   getTopPOsByHours,
@@ -1844,4 +2409,14 @@ module.exports = {
   getLeaveHoursTrend,
   getNoWorkTrend,
   getProjectWiseAnalytics,
+  getBudgetVsBilled,
+
+  // Old (monthly_costs-based) cost implementations — backup/reference only,
+  // NOT called by production code. See "OLD IMPLEMENTATION" banner above.
+  getAnalyticsTiles_oldWithMonthlyCost,
+  getCostTrendByType_oldWithMonthlyCost,
+  getClientWiseCostAnalytics_oldWithMonthlyCost,
+  getClientCategoryCostMatrix_oldWithMonthlyCost,
+  getClientWiseAnalytics_oldWithMonthlyCost,
+  getProjectWiseAnalytics_oldWithMonthlyCost,
 };

@@ -9,7 +9,8 @@
  *     across every Company under the calling Entity Admin's owned
  *     Entities. Cannot create Managers, Employees, Head Managers, or BU HR
  *     Heads — creating a BU Admin happens via POST /api/v1/companies
- *     (creates the Company + its first BU Admin together).
+ *     (creates the Company + its first BU Admin, together with that BU
+ *     Admin's own linked Employee record, in one transaction).
  */
 
 const express = require('express');

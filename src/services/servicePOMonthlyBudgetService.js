@@ -7,7 +7,7 @@ const managerServicePOMappingRepository = require('../repositories/managerServic
 const employeeServicePOMappingRepository = require('../repositories/employeeServicePOMappingRepository');
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
 const dateHelper = require('../helpers/dateHelper');
-const { getDeadlineInfo } = require('../config/servicePOMonthlyBudget.config');
+const { getDeadlineInfo, assertWithinEditWindow } = require('../config/servicePOMonthlyBudget.config');
 const logger = require('../utils/logger');
 
 /**
@@ -254,11 +254,16 @@ const getCurrentMonth = async (companyId, userId, roleName, employeeId) => {
  * for one Service PO + month/year, per the unique constraint on
  * (service_po_id, month, year).
  *
- * Editing after the deadline is ALLOWED (not blocked) — the deadline is a
- * data-completeness target for the Service PO Manager, not a hard cutoff;
- * the response still reports deadline_passed so the caller/UI can warn the
- * user. Centralizing this policy here means switching to a hard block later
- * is a one-place change (see getDeadlineInfo's doc comment).
+ * Two independent rules from servicePOMonthlyBudget.config.js apply here:
+ *   - assertWithinEditWindow(): a HARD gate — this record's month is
+ *     writable from the 1st of that month through the 7th of the
+ *     FOLLOWING month (inclusive); outside that window the write is
+ *     rejected with 400.
+ *   - getDeadlineInfo(): informational only, unaffected by the above — a
+ *     data-completeness target (default 10th of the month) purely for the
+ *     response's deadline/days_remaining/deadline_passed fields, so the
+ *     caller/UI can still warn the user even on a write that already passed
+ *     assertWithinEditWindow().
  *
  * @param {object} data - { service_po_id, month, year, invoice_amount, invoice_description, billed_amount, billed_remark }
  * @param {number} userId
@@ -268,6 +273,8 @@ const getCurrentMonth = async (companyId, userId, roleName, employeeId) => {
 const upsert = async (data, userId, req) => {
   const companyId = req.companyId;
   const { service_po_id, month, year } = data;
+
+  assertWithinEditWindow(month, year);
 
   await assertServicePOExists(service_po_id, companyId);
 

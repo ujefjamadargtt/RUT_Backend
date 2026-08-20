@@ -36,7 +36,44 @@ function getDeadlineInfo(month, year) {
   };
 }
 
+/**
+ * Edit-window rule: a Service PO Monthly Budget (Invoice Amount / Billed
+ * Amount) record for a given month is writable starting the 1st day of
+ * THAT month, through the 7th day of the FOLLOWING month (inclusive) —
+ * e.g. August data is writable 01-Aug through 07-Sep; it locks starting
+ * 08-Sep. A month that hasn't started yet is also rejected (its window
+ * hasn't opened). Works across a year boundary (December's window runs
+ * into January) since the lock date is computed as "start of month + 1
+ * month, day 7", never hardcoded. Both create and update go through the
+ * single upsert() service function, so this one check covers both.
+ *
+ * Supersedes the previous rule (previous-calendar-month only, until the
+ * 7th of the current month) — there is only ever one Invoice Master date
+ * rule active at a time.
+ *
+ * @param {number} month - 1-based month being written
+ * @param {number} year
+ * @throws {Error} statusCode 400 when outside the allowed window
+ */
+function assertWithinEditWindow(month, year) {
+  const today = moment.tz(DEFAULT_TZ).startOf('day');
+  const start = moment.tz({ year, month: month - 1, day: 1 }, DEFAULT_TZ).startOf('day');
+  const lockDate = start.clone().add(1, 'month').date(7).startOf('day');
+
+  const isAllowed = today.isSameOrAfter(start) && today.isSameOrBefore(lockDate);
+
+  if (!isAllowed) {
+    const err = new Error(
+      `Invoice Master data for ${start.format('MMMM YYYY')} can only be added or modified from ` +
+      `${start.format('DD-MMM-YYYY')} to ${lockDate.format('DD-MMM-YYYY')}.`
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+}
+
 module.exports = {
   DEADLINE_DAY,
   getDeadlineInfo,
+  assertWithinEditWindow,
 };
