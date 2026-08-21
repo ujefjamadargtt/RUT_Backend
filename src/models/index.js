@@ -72,6 +72,7 @@ const PasswordResetHistory   = require('./PasswordResetHistory')(sequelize);
 const UserAdditionalRole     = require('./UserAdditionalRole')(sequelize);
 const CostBudget             = require('./CostBudget')(sequelize);
 const ResourceBudget         = require('./ResourceBudget')(sequelize);
+const BuHeadCompanyMapping   = require('./BuHeadCompanyMapping')(sequelize);
 
 // ---------------------------------------------------------------------------
 // Associations
@@ -121,6 +122,16 @@ Entity.belongsTo(User, { foreignKey: 'entity_admin_user_id', as: 'entityAdmin' }
 User.hasMany(Entity, { foreignKey: 'entity_admin_user_id', as: 'ownedEntities' });
 Entity.hasMany(Company, { foreignKey: 'entity_id', as: 'companies' });
 Company.belongsTo(Entity, { foreignKey: 'entity_id', as: 'entity' });
+
+// BU Head <-> Company (many-to-many via bu_head_company_mappings) — a BU
+// Head User may be mapped to several Companies, and a Company may have more
+// than one BU Head. See database/migrations/
+// 20260863_create_bu_head_company_mappings.sql and resolveCompany.js (which
+// verifies the request-selected Company against this same mapping).
+User.hasMany(BuHeadCompanyMapping, { foreignKey: 'bu_head_user_id', as: 'buHeadCompanyMappings' });
+BuHeadCompanyMapping.belongsTo(User, { foreignKey: 'bu_head_user_id', as: 'buHead' });
+Company.hasMany(BuHeadCompanyMapping, { foreignKey: 'company_id', as: 'buHeadMappings' });
+BuHeadCompanyMapping.belongsTo(Company, { foreignKey: 'company_id', as: 'company' });
 
 // Role <-> User: users.role_id is the sole PRIMARY role and the sole
 // source of truth for hierarchy rank / company-entity scoping / the
@@ -426,4 +437,5 @@ module.exports = {
   UserAdditionalRole,
   CostBudget,
   ResourceBudget,
+  BuHeadCompanyMapping,
 };

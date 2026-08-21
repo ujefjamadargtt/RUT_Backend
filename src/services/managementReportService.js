@@ -27,6 +27,27 @@ function requireMonthYear(filters) {
   }
 }
 
+/**
+ * Case-insensitive query-param lookup — some frontend callers send a
+ * threshold param in a different case than the one this API documents
+ * (e.g. `benchthresholdhours` instead of `benchThresholdHours`). Express's
+ * req.query keys are exact-match only, so `query.benchThresholdHours` was
+ * silently undefined whenever the caller sent the lowercase form, and the
+ * report fell back to its default threshold instead of the one actually
+ * requested. This does not rename or add any parameter — it just lets the
+ * one documented name be read regardless of the casing it arrives in.
+ *
+ * @param {object} query
+ * @param {string} name - the documented/canonical param name
+ * @returns {*} the raw value, or undefined if not present in any casing
+ */
+function getParamCaseInsensitive(query, name) {
+  if (query[name] !== undefined) return query[name];
+  const lowerName = name.toLowerCase();
+  const key = Object.keys(query).find((k) => k.toLowerCase() === lowerName);
+  return key !== undefined ? query[key] : undefined;
+}
+
 function parseCommonFilters(query) {
   return {
     search: query.search ? String(query.search).trim() : undefined,
@@ -128,17 +149,31 @@ async function getResourceStaffingPlanAccuracy(query, companyId) {
   requireMonthYear(filters);
 
   const employeeId = query.employeeId ? parseInt(query.employeeId, 10) : undefined;
-  const varianceThresholdPct = query.varianceThresholdPct ? parseFloat(query.varianceThresholdPct) : 20;
 
-  logger.info('ManagementReport: getResourceStaffingPlanAccuracy', { filters, page, limit });
+  // A raw value present (including 0) means the caller explicitly asked to
+  // filter by it — apply it at the SQL level, before pagination, so
+  // `meta.total`/the returned page both reflect the filtered set. Absent
+  // entirely, behavior is unchanged from before this fix: every row is
+  // returned, each merely annotated with `at_risk` computed against the
+  // display default of 20%.
+  const rawVarianceThresholdPct = getParamCaseInsensitive(query, 'varianceThresholdPct');
+  const varianceThresholdPctFilter = rawVarianceThresholdPct !== undefined && rawVarianceThresholdPct !== ''
+    ? parseFloat(rawVarianceThresholdPct)
+    : undefined;
+  const varianceThresholdPctForFlag = varianceThresholdPctFilter !== undefined ? varianceThresholdPctFilter : 20;
+
+  logger.info('ManagementReport: getResourceStaffingPlanAccuracy', { filters, varianceThresholdPctFilter, page, limit });
 
   const { rows, count } = await managementReportRepo.getResourceStaffingPlanAccuracy({
-    ...filters, employeeId, limit, offset, companyId,
+    ...filters, employeeId, varianceThresholdPct: varianceThresholdPctFilter, limit, offset, companyId,
   });
 
+  // Same "at risk" formula the filter itself now applies in SQL (absolute
+  // variance %, >= threshold) — kept here only to annotate each already-
+  // filtered row for display, never to re-filter.
   const enriched = rows.map((r) => ({
     ...r,
-    at_risk: r.variance_pct !== null && Math.abs(parseFloat(r.variance_pct)) >= varianceThresholdPct,
+    at_risk: r.variance_pct !== null && Math.abs(parseFloat(r.variance_pct)) >= varianceThresholdPctForFlag,
   }));
 
   const meta = getPaginationMeta(count, page, limit);
@@ -155,7 +190,8 @@ async function getResourceStaffingPlanAccuracy(query, companyId) {
       total_planned_hours: round2(totals.planned),
       total_actual_hours: round2(totals.actual),
       total_variance_hours: round2(totals.actual - totals.planned),
-      variance_threshold_pct_used: varianceThresholdPct,
+      variance_threshold_pct_used: varianceThresholdPctForFlag,
+      variance_threshold_filter_applied: varianceThresholdPctFilter !== undefined,
     },
   };
 }
@@ -247,9 +283,15 @@ async function getEmployeeCapacityForecast(query, companyId) {
 
   const employeeId = query.employeeId ? parseInt(query.employeeId, 10) : undefined;
   const designation = query.designation ? String(query.designation).trim() : undefined;
-  const benchThresholdHours = query.benchThresholdHours;
+  // Frontend sends this as `benchthresholdhours` (all lowercase); reading it
+  // case-insensitively is what actually lets the requested value reach the
+  // query at all — see getParamCaseInsensitive's doc comment.
+  const rawBenchThresholdHours = getParamCaseInsensitive(query, 'benchThresholdHours');
+  const benchThresholdHours = rawBenchThresholdHours !== undefined && rawBenchThresholdHours !== ''
+    ? rawBenchThresholdHours
+    : undefined;
 
-  logger.info('ManagementReport: getEmployeeCapacityForecast', { filters, page, limit });
+  logger.info('ManagementReport: getEmployeeCapacityForecast', { filters, benchThresholdHours, page, limit });
 
   const { rows, count } = await managementReportRepo.getEmployeeCapacityForecast({
     ...filters, employeeId, designation, benchThresholdHours, limit, offset, companyId,
@@ -319,14 +361,33 @@ async function getServicePOTimelineRisk(query, companyId) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
 
-  const asOfDate = query.asOfDate ? new Date(query.asOfDate) : new Date();
-  const clientId = query.clientId ? parseInt(query.clientId, 10) : undefined;
-  const poId = query.poId ? parseInt(query.poId, 10) : undefined;
+  // This report's own 5 documented filters (asOfDate/status/clientId/poId/
+  // search) were read with exact-case `query.X` lookups — silently
+  // undefined whenever the caller sent a different casing (e.g.
+  // `clientid`/`poid`/`asofdate`), the same class of bug already confirmed
+  // for `benchThresholdHours` in getEmployeeCapacityForecast (that
+  // frontend integration sends multi-word params in one lowercase run).
+  // Reading case-insensitively here fixes it without touching
+  // parseCommonFilters, which every other report also depends on.
+  const rawAsOfDate = getParamCaseInsensitive(query, 'asOfDate');
+  const asOfDate = rawAsOfDate ? new Date(rawAsOfDate) : new Date();
 
-  logger.info('ManagementReport: getServicePOTimelineRisk', { filters, asOfDate, page, limit });
+  const rawClientId = getParamCaseInsensitive(query, 'clientId');
+  const clientId = rawClientId ? parseInt(rawClientId, 10) : undefined;
+
+  const rawPoId = getParamCaseInsensitive(query, 'poId');
+  const poId = rawPoId ? parseInt(rawPoId, 10) : undefined;
+
+  const rawStatus = getParamCaseInsensitive(query, 'status');
+  const status = rawStatus || undefined;
+
+  const rawSearch = getParamCaseInsensitive(query, 'search');
+  const search = rawSearch ? String(rawSearch).trim() : undefined;
+
+  logger.info('ManagementReport: getServicePOTimelineRisk', { clientId, poId, status, search, asOfDate, page, limit });
 
   const { rows, count } = await managementReportRepo.getServicePOTimelineRiskRaw({
-    ...filters, clientId, poId, limit, offset, companyId,
+    ...filters, clientId, poId, status, search, limit, offset, companyId,
   });
 
   const enriched = rows.map((r) => computeTimelineRisk(r, asOfDate));

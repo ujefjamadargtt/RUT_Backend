@@ -119,10 +119,53 @@ const timesheetApprovalStatusQuerySchema = Joi.object({
     return value;
   }, 'exactly-one-period-mode');
 
+/**
+ * GET /employee-reports/work-log-time — exactly one of {startDate & endDate}
+ * or {month & year} (no single-date mode, unlike /daily — this report is
+ * always a range). employee_id (Manager-team scope), service_po_id, and
+ * project_id are all optional plain filters — service_po_id/project_id are
+ * NOT restricted to "one of the two, never both" here (unlike
+ * projectHoursReportQuerySchema) since either can legitimately narrow a
+ * multi-employee result set together.
+ */
+const workLogTimeReportQuerySchema = Joi.object({
+  employee_id: Joi.number().integer().positive().optional(),
+  service_po_id: Joi.number().integer().positive().optional(),
+  project_id: Joi.number().integer().positive().optional(),
+  startDate: Joi.date().iso().optional(),
+  endDate: Joi.date().iso().min(Joi.ref('startDate')).optional().messages({
+    'date.min': 'endDate must be on or after startDate.',
+  }),
+  month: Joi.number().integer().min(1).max(12).optional(),
+  year: Joi.number().integer().min(2000).optional(),
+  format: formatField,
+})
+  .custom((value, helpers) => {
+    const hasRange = !!value.startDate && !!value.endDate;
+    const hasMonth = !!value.month && !!value.year;
+    const modesGiven = [hasRange, hasMonth].filter(Boolean).length;
+
+    if (modesGiven === 0) {
+      return helpers.message('Provide either startDate & endDate, or month & year.');
+    }
+    if (modesGiven > 1) {
+      return helpers.message('Provide only one of: startDate & endDate, or month & year — not both.');
+    }
+    if ((value.month && !value.year) || (!value.month && value.year)) {
+      return helpers.message('month and year must be provided together.');
+    }
+    if ((value.startDate && !value.endDate) || (!value.startDate && value.endDate)) {
+      return helpers.message('startDate and endDate must be provided together.');
+    }
+
+    return value;
+  }, 'exactly-one-period-mode');
+
 module.exports = {
   dailyReportQuerySchema,
   monthlyReportQuerySchema,
   rangeReportQuerySchema,
   projectHoursReportQuerySchema,
   timesheetApprovalStatusQuerySchema,
+  workLogTimeReportQuerySchema,
 };

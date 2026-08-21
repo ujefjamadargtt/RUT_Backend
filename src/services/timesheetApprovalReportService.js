@@ -364,4 +364,10 @@ const getReport = async (userId, ownEmployeeId, companyId, query) => {
   return { data };
 };
 
-module.exports = { getReport };
+module.exports = {
+  getReport,
+  // Exported for reuse by workLogTimeReportService.js — same data-driven
+  // Manager-team scoping (manager_employee_mappings), so the two reports
+  // never diverge on "who can see whose work logs."
+  resolveEmployeeScope,
+};

@@ -94,6 +94,31 @@ module.exports = (sequelize) => {
           isDate: { msg: 'Work date must be a valid date.' },
         },
       },
+      // Optional time-of-day pair within work_date (no date component is
+      // stored here — work_date already represents the date). Nullable so
+      // every pre-existing row (and any non-time-based entry) keeps working
+      // unchanged; `hours` remains the source of truth for those. When both
+      // are present, employeeTimesheetService.js always (re)computes `hours`
+      // from them server-side — see resolveHoursAndTimes() — never trusting
+      // a caller-supplied hours value alongside a time pair. The isAfterStartTime
+      // check here is a defense-in-depth backstop (mirrors the DB CHECK
+      // constraint); the service layer's calculateHoursFromTimes() is the
+      // authoritative validation.
+      start_time: {
+        type: DataTypes.TIME,
+        allowNull: true,
+      },
+      end_time: {
+        type: DataTypes.TIME,
+        allowNull: true,
+        validate: {
+          isAfterStartTime(value) {
+            if (value && this.start_time && value <= this.start_time) {
+              throw new Error('End time must be greater than start time.');
+            }
+          },
+        },
+      },
       hours: {
         type: DataTypes.DECIMAL(6, 2),
         allowNull: false,

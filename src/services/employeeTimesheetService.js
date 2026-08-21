@@ -8,6 +8,7 @@ const employeeServicePOMappingRepository = require('../repositories/employeeServ
 const servicePOHierarchyRepository = require('../repositories/servicePOHierarchyRepository');
 const servicePOHierarchyDTO = require('../dtos/servicePOHierarchyDTO');
 const dateHelper = require('../helpers/dateHelper');
+const { calculateHoursFromTimes } = require('../helpers/workLogTimeHelper');
 const logger = require('../utils/logger');
 
 /**
@@ -129,6 +130,40 @@ async function resolveHierarchyNode(hierarchyNodeId, servicePOId) {
 }
 
 /**
+ * Resolve the authoritative hours + start_time/end_time for one CREATE line,
+ * given whatever mix of hours/start_time/end_time the caller supplied. When
+ * BOTH start_time and end_time are given, hours is ALWAYS recalculated from
+ * them server-side — any caller-supplied hours value alongside a time pair
+ * is discarded, never trusted, even if it happens to already be correct.
+ * Supplying only one of start_time/end_time is rejected (Joi's
+ * assertTimePairing already catches this for the create path, but this
+ * function is the authoritative check — see updateEntry()'s own, similar
+ * merge-with-existing logic below for the update path). Neither given at
+ * all is the fully backward-compatible path: hours is used exactly as
+ * supplied, start_time/end_time are stored as null.
+ *
+ * @param {{ hours?: number, start_time?: string|null, end_time?: string|null }} line
+ * @returns {{ hours: number, start_time: string|null, end_time: string|null }}
+ */
+function resolveHoursAndTimes(line) {
+  const startTime = line.start_time || null;
+  const endTime = line.end_time || null;
+
+  if (startTime && !endTime) {
+    throw badRequestError('end_time is required when start_time is provided.');
+  }
+  if (endTime && !startTime) {
+    throw badRequestError('start_time is required when end_time is provided.');
+  }
+
+  if (startTime && endTime) {
+    return { hours: calculateHoursFromTimes(startTime, endTime), start_time: startTime, end_time: endTime };
+  }
+
+  return { hours: line.hours, start_time: null, end_time: null };
+}
+
+/**
  * 12-hours/day cap — sums this employee's work_logs on one date (excluding
  * the row being updated, if any) and rejects if the requested hours would
  * push the day's total over DAILY_HOUR_CAP.
@@ -189,12 +224,19 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
     seenKeys.add(key);
   }
 
+  // Resolve the authoritative hours/start_time/end_time for every line FIRST
+  // — when a line supplies start_time+end_time, this recalculates hours from
+  // them (discarding whatever hours value the line also sent) — see
+  // resolveHoursAndTimes(). The 12-hour/day cap below, and everything
+  // downstream, uses these resolved values, never the raw line.hours.
+  const resolvedTimes = lines.map((line) => resolveHoursAndTimes(line));
+
   // 12-hour/day cap, computed purely from this payload — the old rows for
   // this date are being replaced wholesale, so there is nothing left in the
   // DB to add on top of. assertDailyCap's DB-lookup version still backs
   // updateEntry below, which edits one row in place rather than replacing
   // the whole day.
-  const totalHours = lines.reduce((sum, line) => sum + parseFloat(line.hours), 0);
+  const totalHours = resolvedTimes.reduce((sum, r) => sum + r.hours, 0);
   if (totalHours > DAILY_HOUR_CAP) {
     throw badRequestError(
       `Total hours for ${dateStr} cannot exceed ${DAILY_HOUR_CAP}. This request totals ${Math.round(totalHours * 100) / 100} hours.`
@@ -223,13 +265,15 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
     await employeeWorkLogRepository.deleteByEmployeeAndDate(employeeId, dateStr, companyId, transaction);
 
     return employeeWorkLogRepository.bulkCreate(
-      resolvedLines.map(({ line }) => ({
+      resolvedLines.map(({ line }, i) => ({
         employee_id: employeeId,
         service_po_id: line.service_po_id,
         sub_project_id: line.sub_project_id || null,
         hierarchy_node_id: line.hierarchy_node_id || null,
         work_date: dateStr,
-        hours: line.hours,
+        hours: resolvedTimes[i].hours,
+        start_time: resolvedTimes[i].start_time,
+        end_time: resolvedTimes[i].end_time,
         description: line.description,
         company_id: companyId,
         status: 'pending',
@@ -289,7 +333,26 @@ const updateEntry = async (employeeId, companyId, id, data) => {
   const servicePOId = data.service_po_id ?? existing.service_po_id;
   const subProjectId = data.sub_project_id !== undefined ? data.sub_project_id : existing.sub_project_id;
   const hierarchyNodeId = data.hierarchy_node_id !== undefined ? data.hierarchy_node_id : existing.hierarchy_node_id;
-  const hours = data.hours ?? existing.hours;
+
+  // Effective start_time/end_time after merging this update against the
+  // existing row — a field not present in `data` keeps its existing value,
+  // exactly like every other field above. When the EFFECTIVE pair has both
+  // ends set (whether just-changed or untouched from before), hours is
+  // ALWAYS recalculated from them — a caller-supplied `hours` in `data` is
+  // discarded in that case, never trusted (same rule as create). Only when
+  // the effective record has no time pair at all does `data.hours` (or the
+  // existing hours) apply, preserving old hours-only entries untouched.
+  const startTime = (data.start_time !== undefined ? data.start_time : existing.start_time) || null;
+  const endTime = (data.end_time !== undefined ? data.end_time : existing.end_time) || null;
+
+  if (startTime && !endTime) {
+    throw badRequestError('end_time is required when start_time is provided.');
+  }
+  if (endTime && !startTime) {
+    throw badRequestError('start_time is required when end_time is provided.');
+  }
+
+  const hours = (startTime && endTime) ? calculateHoursFromTimes(startTime, endTime) : (data.hours ?? existing.hours);
   const dateStr = data.timesheet_date ? assertNotFutureDate(data.timesheet_date) : existing.work_date;
   await assertNoMonthlyLogForDate(employeeId, dateStr, companyId);
 
@@ -318,6 +381,8 @@ const updateEntry = async (employeeId, companyId, id, data) => {
     hierarchy_node_id: hierarchyNodeId || null,
     work_date: dateStr,
     hours,
+    start_time: startTime,
+    end_time: endTime,
     description: data.description !== undefined ? data.description : existing.description,
     updated_by: employeeId,
     // Any edit invalidates a prior sync snapshot — revert unconditionally

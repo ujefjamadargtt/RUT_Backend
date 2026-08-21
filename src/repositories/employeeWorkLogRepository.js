@@ -1,7 +1,7 @@
 'use strict';
 
 const { Op, fn, col, literal } = require('sequelize');
-const { EmployeeWorkLog, Employee, ServicePO, SubProject } = require('../models');
+const { EmployeeWorkLog, Employee, ServicePO, SubProject, Project, ServicePOHierarchy } = require('../models');
 
 /**
  * Employee Work Log Repository
@@ -469,6 +469,59 @@ const getReportRows = async ({ employeeId, companyId, startDate, endDate }) => {
 };
 
 /**
+ * Work Log Time Report rows — one row per employee_work_logs entry (never
+ * aggregated, unlike getReportRows()'s callers), with everything the report
+ * needs to map Project (via ServicePO -> Project) and Module (via the
+ * hierarchy node's own name, or its Parent's name when the tagged node is a
+ * CHILD — see workLogTimeReportService.js). Supports multiple employeeIds at
+ * once (Manager/team scope) — see
+ * timesheetApprovalReportService.resolveEmployeeScope, reused by
+ * workLogTimeReportService.js for this report's own scoping. Default sort:
+ * work_date DESC, then start_time ASC (nulls last) for deterministic
+ * same-day ordering.
+ *
+ * @param {object} filters - { employeeIds: number[], companyId, startDate, endDate, servicePOId?, projectId? }
+ * @returns {Promise<EmployeeWorkLog[]>}
+ */
+const getWorkLogTimeReportRows = async ({ employeeIds, companyId, startDate, endDate, servicePOId, projectId }) => {
+  const where = { company_id: companyId, employee_id: { [Op.in]: employeeIds } };
+  if (startDate) where.work_date = { ...where.work_date, [Op.gte]: startDate };
+  if (endDate) where.work_date = { ...where.work_date, [Op.lte]: endDate };
+  if (servicePOId) where.service_po_id = servicePOId;
+
+  return EmployeeWorkLog.findAll({
+    where,
+    include: [
+      { model: Employee, as: 'employee', attributes: ['id', 'employee_code', 'full_name'] },
+      {
+        model: ServicePO,
+        as: 'servicePO',
+        attributes: ['id', 'service_po_code', 'service_po_name', 'project_id'],
+        include: [
+          {
+            model: Project,
+            as: 'project',
+            attributes: ['id', 'project_code', 'project_name'],
+            required: !!projectId,
+            ...(projectId ? { where: { id: projectId } } : {}),
+          },
+        ],
+      },
+      {
+        model: ServicePOHierarchy,
+        as: 'hierarchyNode',
+        attributes: ['id', 'node_name', 'node_type'],
+        required: false,
+        include: [
+          { model: ServicePOHierarchy, as: 'parentNode', attributes: ['id', 'node_name', 'node_type'], required: false },
+        ],
+      },
+    ],
+    order: [['work_date', 'DESC'], ['start_time', 'ASC'], ['id', 'ASC']],
+  });
+};
+
+/**
  * ALL work log rows for one employee/date-range, with full row detail —
  * the source data for the Manager Daily/Monthly approval-summary view
  * (managerSelfServiceService.getApprovalSummary). This is NOT filtered by
@@ -760,6 +813,7 @@ module.exports = {
   markSyncedByTuples,
   revertSyncStatusByImportIds,
   getReportRows,
+  getWorkLogTimeReportRows,
   findForApprovalSummary,
   findForApprovalSummaryByEmployees,
   approveByEmployeeAndDates,

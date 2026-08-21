@@ -1,10 +1,24 @@
 'use strict';
 
 const Joi = require('joi');
+const { TIME_PATTERN } = require('../helpers/workLogTimeHelper');
 
 /**
  * Employee Timesheet Validation Schemas (Employee Self Timesheet module)
  */
+
+// start_time/end_time must be supplied together (or not at all) — chronological
+// ordering (end > start) is deliberately NOT checked here; that's the service
+// layer's job (employeeTimesheetService.resolveHoursAndTimes /
+// workLogTimeHelper.calculateHoursFromTimes), which returns a plain 400 with
+// the exact "End time must be greater than start time." message rather than
+// a 422 VALIDATION_ERROR envelope.
+function assertTimePairing(value, helpers) {
+  if (Boolean(value.start_time) !== Boolean(value.end_time)) {
+    return helpers.message('start_time and end_time must be provided together.');
+  }
+  return value;
+}
 
 /**
  * A single line item within a POST /employee-timesheets/entries REPLACE SAVE
@@ -23,6 +37,15 @@ const dailyEntryLineSchema = Joi.object({
   // are logged against — see servicePOHierarchyService.js. Purely a tag
   // alongside service_po_id, which stays the required/authoritative field.
   hierarchy_node_id: Joi.number().integer().positive().optional().allow(null),
+  // Optional time-of-day pair (24-hour "HH:MM" or "HH:MM:SS"), within the
+  // shared timesheet_date. When both are given, `hours` below is ignored —
+  // the service layer always recalculates it server-side from this pair.
+  start_time: Joi.string().pattern(TIME_PATTERN).optional().allow(null).messages({
+    'string.pattern.base': 'start_time must be in HH:MM (24-hour) format.',
+  }),
+  end_time: Joi.string().pattern(TIME_PATTERN).optional().allow(null).messages({
+    'string.pattern.base': 'end_time must be in HH:MM (24-hour) format.',
+  }),
   hours: Joi.number().positive().max(12).required().messages({
     'any.required': 'Hours is required.',
     'number.base': 'Hours must be a number.',
@@ -34,7 +57,7 @@ const dailyEntryLineSchema = Joi.object({
     'string.min': 'Description cannot be empty.',
     'string.max': 'Description cannot exceed 2000 characters.',
   }),
-});
+}).custom(assertTimePairing, 'start-end-time-pairing');
 
 /**
  * POST /employee-timesheets/entries
@@ -63,6 +86,18 @@ const updateEntrySchema = Joi.object({
   service_po_id: Joi.number().integer().positive().optional(),
   sub_project_id: Joi.number().integer().positive().optional().allow(null),
   hierarchy_node_id: Joi.number().integer().positive().optional().allow(null),
+  // Optional — omitting both leaves the existing entry's start_time/end_time
+  // (and hours) untouched. Supplying one changes JUST that one, merged
+  // against whatever the entry already has — see
+  // employeeTimesheetService.updateEntry()'s effective-start/end-time
+  // resolution. Passing null for both explicitly clears them (reverts to a
+  // plain hours-only entry).
+  start_time: Joi.string().pattern(TIME_PATTERN).optional().allow(null).messages({
+    'string.pattern.base': 'start_time must be in HH:MM (24-hour) format.',
+  }),
+  end_time: Joi.string().pattern(TIME_PATTERN).optional().allow(null).messages({
+    'string.pattern.base': 'end_time must be in HH:MM (24-hour) format.',
+  }),
   hours: Joi.number().positive().max(12).optional().messages({
     'number.positive': 'Hours must be greater than 0.',
     'number.max': 'Hours cannot exceed 12 per day.',

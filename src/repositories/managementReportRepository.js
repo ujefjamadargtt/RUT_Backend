@@ -253,18 +253,30 @@ async function getBudgetedMarginForecast(filters) {
  */
 async function getResourceStaffingPlanAccuracy(filters) {
   const {
-    month, year, employeeId, poId, search,
+    month, year, employeeId, poId, search, varianceThresholdPct,
     sortBy = 'variance', sortOrder = 'DESC', limit, offset, hoursSource, roleId, companyId,
   } = filters;
 
   const hoursCol = (hoursSource === 'O') ? 't.hours_logged' : 'COALESCE(t.modified_hours, t.hours_logged)';
-  const allowedSort = ['e.full_name', 'sp.service_po_name', 'planned_hours', 'actual_hours', 'variance', 'variance_pct'];
+  // Bare output-column names (no `e.`/`sp.` qualifier) — sortBy is applied
+  // in the OUTER wrapping query below (after the threshold filter), where
+  // only the inner SELECT's exposed column names are visible, not its
+  // table aliases.
+  const allowedSort = ['full_name', 'service_po_name', 'planned_hours', 'actual_hours', 'variance', 'variance_pct'];
   const safeSort = allowedSort.includes(sortBy) ? sortBy : 'variance';
   const safeOrder = sortOrder && sortOrder.toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
   const monthNum = parseInt(month, 10);
   const yearNum = parseInt(year, 10);
-  const replacements = { monthNum, yearNum, limit, offset, companyId };
+  // undefined -> no threshold filtering at all (existing behavior: every
+  // row returned, service-layer `at_risk` flag only). A real number
+  // (including 0) -> only rows meeting the threshold are returned, applied
+  // BEFORE pagination (see the wrapping SELECT below), so both the
+  // returned page and the count query's total reflect the filtered set.
+  const varianceThresholdPctValue = varianceThresholdPct !== undefined && varianceThresholdPct !== null
+    ? parseFloat(varianceThresholdPct)
+    : null;
+  const replacements = { monthNum, yearNum, limit, offset, companyId, varianceThresholdPct: varianceThresholdPctValue };
 
   const publishGuard = Number(roleId) === 5
     ? `AND EXISTS (SELECT 1 FROM timesheet_import_history h WHERE h.id = t.timesheet_import_id AND h.is_publish = true)`
@@ -307,38 +319,64 @@ async function getResourceStaffingPlanAccuracy(filters) {
     )
   `;
 
+  // variance_pct is a per-row computed value (no GROUP BY at this level —
+  // `combined` already pre-aggregates planned/actual per emp+PO), so the
+  // threshold is applied with a plain WHERE — but on an OUTER query, since
+  // Postgres can't reference a SELECT-list alias (variance_pct) from the
+  // WHERE clause of the same query it's defined in. Wrapping in a
+  // subquery is what lets both the threshold check AND the ORDER BY below
+  // refer to `variance_pct` by name instead of repeating the CASE
+  // expression. NULL variance_pct (planned_hours = 0) never satisfies a
+  // threshold — same as the service layer's existing `at_risk` formula.
+  const varianceFilterClause = `
+    WHERE :varianceThresholdPct::numeric IS NULL
+       OR (filtered.variance_pct IS NOT NULL AND ABS(filtered.variance_pct) >= :varianceThresholdPct)
+  `;
+
   const dataQuery = `
     ${cteBlock}
-    SELECT
-      e.id                    AS employee_id,
-      e.employee_code,
-      e.full_name,
-      sp.id                   AS service_po_id,
-      sp.service_po_code,
-      sp.service_po_name,
-      combined.planned_hours,
-      combined.actual_hours,
-      ROUND((combined.actual_hours - combined.planned_hours)::numeric, 2) AS variance,
-      CASE
-        WHEN combined.planned_hours > 0
-          THEN ROUND(((combined.actual_hours - combined.planned_hours) / combined.planned_hours * 100)::numeric, 2)
-        ELSE NULL
-      END                       AS variance_pct
-    FROM combined
-    INNER JOIN employees e   ON e.id  = combined.emp_id
-    INNER JOIN service_pos sp ON sp.id = combined.po_id
-    WHERE 1=1 ${employeeFilter} ${poFilter} ${searchFilter}
+    SELECT * FROM (
+      SELECT
+        e.id                    AS employee_id,
+        e.employee_code,
+        e.full_name,
+        sp.id                   AS service_po_id,
+        sp.service_po_code,
+        sp.service_po_name,
+        combined.planned_hours,
+        combined.actual_hours,
+        ROUND((combined.actual_hours - combined.planned_hours)::numeric, 2) AS variance,
+        CASE
+          WHEN combined.planned_hours > 0
+            THEN ROUND(((combined.actual_hours - combined.planned_hours) / combined.planned_hours * 100)::numeric, 2)
+          ELSE NULL
+        END                       AS variance_pct
+      FROM combined
+      INNER JOIN employees e   ON e.id  = combined.emp_id
+      INNER JOIN service_pos sp ON sp.id = combined.po_id
+      WHERE 1=1 ${employeeFilter} ${poFilter} ${searchFilter}
+    ) filtered
+    ${varianceFilterClause}
     ORDER BY ${safeSort} ${safeOrder}
     LIMIT :limit OFFSET :offset
   `;
 
   const countQuery = `
     ${cteBlock}
-    SELECT COUNT(*) AS total
-    FROM combined
-    INNER JOIN employees e   ON e.id  = combined.emp_id
-    INNER JOIN service_pos sp ON sp.id = combined.po_id
-    WHERE 1=1 ${employeeFilter} ${poFilter} ${searchFilter}
+    SELECT COUNT(*) AS total FROM (
+      SELECT
+        combined.planned_hours,
+        CASE
+          WHEN combined.planned_hours > 0
+            THEN ROUND(((combined.actual_hours - combined.planned_hours) / combined.planned_hours * 100)::numeric, 2)
+          ELSE NULL
+        END AS variance_pct
+      FROM combined
+      INNER JOIN employees e   ON e.id  = combined.emp_id
+      INNER JOIN service_pos sp ON sp.id = combined.po_id
+      WHERE 1=1 ${employeeFilter} ${poFilter} ${searchFilter}
+    ) filtered
+    ${varianceFilterClause}
   `;
 
   const [rows, countResult] = await Promise.all([
@@ -568,7 +606,14 @@ async function getEmployeeCapacityForecast(filters) {
   } = filters;
 
   const MONTHLY_CAP = 176;
-  const benchThreshold = benchThresholdHours !== undefined ? parseFloat(benchThresholdHours) : 40;
+  // undefined -> no bench filtering (existing behavior: every row
+  // returned, each merely annotated with bench_flag computed against the
+  // display default of 40). A real number (including 0) -> the caller
+  // explicitly asked to filter, so only bench_flag = true rows (at THAT
+  // threshold) are returned — applied before pagination, see
+  // benchFilterClause below.
+  const benchThresholdFilterRequested = benchThresholdHours !== undefined;
+  const benchThreshold = benchThresholdFilterRequested ? parseFloat(benchThresholdHours) : 40;
 
   const allowedSort = ['full_name', 'designation', 'total_planned_hours', 'capacity_used_pct', 'active_po_mappings_count'];
   const safeSort = allowedSort.includes(sortBy) ? sortBy : 'capacity_used_pct';
@@ -576,7 +621,10 @@ async function getEmployeeCapacityForecast(filters) {
 
   const monthNum = parseInt(month, 10);
   const yearNum = parseInt(year, 10);
-  const replacements = { monthNum, yearNum, limit, offset, companyId, monthlyCap: MONTHLY_CAP, benchThreshold };
+  const replacements = {
+    monthNum, yearNum, limit, offset, companyId,
+    monthlyCap: MONTHLY_CAP, benchThreshold, benchThresholdFilterRequested,
+  };
 
   const conditions = ["e.status = 'active'", 'e.company_id = :companyId'];
   if (employeeId) { conditions.push('e.id = :employeeId'); replacements.employeeId = employeeId; }
@@ -587,40 +635,69 @@ async function getEmployeeCapacityForecast(filters) {
   }
   const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
+  // bench_flag is a per-row computed value (active_po_mappings_count > 0
+  // AND total_planned_hours < threshold) — filtering on it requires an
+  // OUTER query, same reasoning as getResourceStaffingPlanAccuracy's
+  // variance_pct filter above: Postgres can't reference a SELECT-list
+  // alias from that same query's WHERE clause. When no threshold was
+  // explicitly requested, this clause is a no-op (every row passes).
+  const benchFilterClause = `
+    WHERE :benchThresholdFilterRequested = false OR filtered.bench_flag = true
+  `;
+
   const dataQuery = `
-    SELECT
-      e.id                                  AS employee_id,
-      e.employee_code,
-      e.full_name,
-      e.designation,
-      :monthlyCap                           AS monthly_capacity_hours,
-      COALESCE(rb.total_planned_hours, 0)    AS total_planned_hours,
-      ROUND((COALESCE(rb.total_planned_hours, 0) / :monthlyCap * 100)::numeric, 2) AS capacity_used_pct,
-      COALESCE(map.active_po_mappings_count, 0) AS active_po_mappings_count,
-      (COALESCE(rb.total_planned_hours, 0) > :monthlyCap)                          AS overallocation_flag,
-      (COALESCE(map.active_po_mappings_count, 0) > 0 AND COALESCE(rb.total_planned_hours, 0) < :benchThreshold) AS bench_flag
-    FROM employees e
-    LEFT JOIN (
-      SELECT emp_id, SUM(hours) AS total_planned_hours
-      FROM resource_budget_master
-      WHERE status = 'active' AND month = :monthNum AND year = :yearNum AND company_id = :companyId
-      GROUP BY emp_id
-    ) rb ON rb.emp_id = e.id
-    LEFT JOIN (
-      SELECT employee_id, COUNT(*) AS active_po_mappings_count
-      FROM employee_servicepo_mapping
-      WHERE status = 'active' AND company_id = :companyId
-      GROUP BY employee_id
-    ) map ON map.employee_id = e.id
-    ${whereClause}
+    SELECT * FROM (
+      SELECT
+        e.id                                  AS employee_id,
+        e.employee_code,
+        e.full_name,
+        e.designation,
+        :monthlyCap                           AS monthly_capacity_hours,
+        COALESCE(rb.total_planned_hours, 0)    AS total_planned_hours,
+        ROUND((COALESCE(rb.total_planned_hours, 0) / :monthlyCap * 100)::numeric, 2) AS capacity_used_pct,
+        COALESCE(map.active_po_mappings_count, 0) AS active_po_mappings_count,
+        (COALESCE(rb.total_planned_hours, 0) > :monthlyCap)                          AS overallocation_flag,
+        (COALESCE(map.active_po_mappings_count, 0) > 0 AND COALESCE(rb.total_planned_hours, 0) < :benchThreshold) AS bench_flag
+      FROM employees e
+      LEFT JOIN (
+        SELECT emp_id, SUM(hours) AS total_planned_hours
+        FROM resource_budget_master
+        WHERE status = 'active' AND month = :monthNum AND year = :yearNum AND company_id = :companyId
+        GROUP BY emp_id
+      ) rb ON rb.emp_id = e.id
+      LEFT JOIN (
+        SELECT employee_id, COUNT(*) AS active_po_mappings_count
+        FROM employee_servicepo_mapping
+        WHERE status = 'active' AND company_id = :companyId
+        GROUP BY employee_id
+      ) map ON map.employee_id = e.id
+      ${whereClause}
+    ) filtered
+    ${benchFilterClause}
     ORDER BY ${safeSort} ${safeOrder}
     LIMIT :limit OFFSET :offset
   `;
 
   const countQuery = `
-    SELECT COUNT(*) AS total
-    FROM employees e
-    ${whereClause}
+    SELECT COUNT(*) AS total FROM (
+      SELECT
+        (COALESCE(map.active_po_mappings_count, 0) > 0 AND COALESCE(rb.total_planned_hours, 0) < :benchThreshold) AS bench_flag
+      FROM employees e
+      LEFT JOIN (
+        SELECT emp_id, SUM(hours) AS total_planned_hours
+        FROM resource_budget_master
+        WHERE status = 'active' AND month = :monthNum AND year = :yearNum AND company_id = :companyId
+        GROUP BY emp_id
+      ) rb ON rb.emp_id = e.id
+      LEFT JOIN (
+        SELECT employee_id, COUNT(*) AS active_po_mappings_count
+        FROM employee_servicepo_mapping
+        WHERE status = 'active' AND company_id = :companyId
+        GROUP BY employee_id
+      ) map ON map.employee_id = e.id
+      ${whereClause}
+    ) filtered
+    ${benchFilterClause}
   `;
 
   const [rows, countResult] = await Promise.all([

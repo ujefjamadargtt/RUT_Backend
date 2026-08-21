@@ -4,6 +4,7 @@ const { sequelize } = require('../models');
 const authRepository = require('../repositories/authRepository');
 const userRepository = require('../repositories/userRepository');
 const rbacService = require('./rbacService');
+const buHeadCompanyMappingRepository = require('../repositories/buHeadCompanyMappingRepository');
 const { generateTokens, verifyRefreshToken, REFRESH_TOKEN_EXPIRY } = require('../config/jwt');
 const logger = require('../utils/logger');
 const moment = require('moment-timezone');
@@ -208,7 +209,7 @@ async function login(email, password, ipAddress, userAgent) {
     user.role.hierarchy_rank
   );
 
-  return {
+  const response = {
     accessToken,
     refreshToken,
     expiresIn,
@@ -220,6 +221,20 @@ async function login(email, password, ipAddress, userAgent) {
     roles: serialiseRoles(user.role, user.additionalRoles, extractIsOriginalDataVisible(user.company)),
     forms,
   };
+
+  // Additive, BU-Head-only field: the Companies ("BUs") this user is mapped
+  // to (see database/migrations/20260863_create_bu_head_company_mappings.sql),
+  // for the frontend's global BU selector. Every other role's login response
+  // is byte-for-byte unchanged — this key is simply absent for them.
+  if (user.role.role_name.toLowerCase() === 'bu head') {
+    const mappings = await buHeadCompanyMappingRepository.findMappingsForBuHead(user.id);
+    response.mapped_bu = mappings.map((mapping) => ({
+      id: mapping.company.id,
+      name: mapping.company.company_name,
+    }));
+  }
+
+  return response;
 }
 
 /**

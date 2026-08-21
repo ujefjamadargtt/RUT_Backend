@@ -310,6 +310,62 @@ const findByRole = async (roleId, filters = {}, pagination = {}, sort = {}) => {
 };
 
 /**
+ * Fetch a paginated list of Users whose id is in a given set, filtered to a
+ * specific role — the "BU Head Master" module's data source. A BU Head has
+ * no single company_id (NULL, like Entity Admin/Admin — see
+ * resolveCompany.js), so unlike findByCompanyIdsAndRole (BU Admin Master),
+ * scoping is driven by an explicit id set the caller has already resolved
+ * (buHeadService.js: every BU Head mapped to a Company under the calling
+ * Entity Admin/Admin's owned Entities — see
+ * buHeadCompanyMappingRepository.findBuHeadUserIdsForCompanyIds). Additive
+ * export — every existing function above is untouched.
+ *
+ * @param {number[]} userIds
+ * @param {number} roleId - resolved by the caller via roleRepository.findByName
+ * @param {object} filters - { search, status }
+ * @param {object} pagination - { limit, offset }
+ * @param {object} sort - { sortBy, sortOrder }
+ * @returns {Promise<{ rows: User[], count: number }>}
+ */
+const findByIdsInAndRole = async (userIds, roleId, filters = {}, pagination = {}, sort = {}) => {
+  const { search, status } = filters;
+  const { limit = 20, offset = 0 } = pagination;
+  const { sortBy: requestedSortBy = 'created_at', sortOrder = 'DESC' } = sort;
+  const allowedSortColumns = ['email', 'created_at', 'last_login'];
+  const sortBy = allowedSortColumns.includes(requestedSortBy) ? requestedSortBy : 'created_at';
+  const safeSortOrder = ['ASC', 'DESC'].includes((sortOrder || '').toUpperCase())
+    ? sortOrder.toUpperCase()
+    : 'DESC';
+
+  if (!userIds || userIds.length === 0) {
+    return { rows: [], count: 0 };
+  }
+
+  const where = {
+    is_deleted: false,
+    id: { [Op.in]: userIds },
+    role_id: roleId,
+  };
+
+  if (status && status !== 'all') {
+    where.status = status;
+  }
+
+  if (search && search.trim()) {
+    where.email = { [Op.iLike]: `%${search.trim()}%` };
+  }
+
+  return User.findAndCountAll({
+    where,
+    include: DEFAULT_INCLUDE,
+    limit,
+    offset,
+    order: [[sortBy, safeSortOrder]],
+    distinct: true,
+  });
+};
+
+/**
  * Lightweight fetch of every non-deleted user's email (lowercased), for
  * bulk-import uniqueness validation — email is unique across the whole
  * `users` table (not per-company, see users_email_key), so this
@@ -334,4 +390,5 @@ module.exports = {
   softDelete,
   findByCompanyIdsAndRole,
   findByRole,
+  findByIdsInAndRole,
 };

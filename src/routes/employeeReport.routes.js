@@ -12,6 +12,7 @@ const {
   rangeReportQuerySchema,
   projectHoursReportQuerySchema,
   timesheetApprovalStatusQuerySchema,
+  workLogTimeReportQuerySchema,
 } = require('../validations/employeeReportValidation');
 const controller = require('../controllers/employeeReportController');
 
@@ -282,6 +283,73 @@ router.get(
   authenticate,
   validate(timesheetApprovalStatusQuerySchema, 'query'),
   controller.getTimesheetApprovalStatus
+);
+
+/**
+ * @swagger
+ * /employee-reports/work-log-time:
+ *   get:
+ *     summary: Work Log Time Report — Day/Employee Code/Name/Project/Module/Task/Start Time/End Time/Total Hours
+ *     description: >
+ *       One row per employee_work_logs entry (never aggregated). Exactly one
+ *       of {startDate & endDate} or {month & year} is required. Scope is the
+ *       same data-driven Manager-team resolution as
+ *       /timesheet-approval-status (manager_employee_mappings) — an Employee
+ *       sees only their own rows; a Manager additionally sees their whole
+ *       mapped team, or one requested employee_id if mapped to them.
+ *       Project comes from the Service PO's Project Master
+ *       (service_pos.project_id); Module is the logged hierarchy node's own
+ *       name, or its Parent's name when a Child node was logged against;
+ *       Task is the Work Log's own description. Old rows with no
+ *       start_time/end_time show their existing hours and blank
+ *       start/end times — never fabricated. Default sort: date DESC, then
+ *       start time ASC. Compatible with the same json/excel/csv/pdf export
+ *       as /daily, /monthly, /range.
+ *     tags: [Employee Reports]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: employee_id
+ *         schema: { type: integer }
+ *         description: Manager only — must be one of the caller's own mapped Employees; omit for the whole team
+ *       - in: query
+ *         name: service_po_id
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: project_id
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: startDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: endDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: month
+ *         schema: { type: integer, minimum: 1, maximum: 12 }
+ *       - in: query
+ *         name: year
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: format
+ *         schema: { type: string, enum: [json, excel, csv, pdf], default: json }
+ *     responses:
+ *       200:
+ *         description: >
+ *           { rows: [{ date, employeeCode, name, project, module, task,
+ *           startTime, endTime, totalHours }], totalHours }
+ *       400:
+ *         description: No period given, or both period modes given
+ *       403:
+ *         description: employee_id not mapped to the caller, or the caller has no linked Employee account
+ */
+router.get(
+  '/work-log-time',
+  authenticate,
+  authorize('employee.view_reports'),
+  validate(workLogTimeReportQuerySchema, 'query'),
+  controller.getWorkLogTimeReport
 );
 
 module.exports = router;

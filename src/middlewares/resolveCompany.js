@@ -1,6 +1,7 @@
 'use strict';
 
 const logger = require('../utils/logger');
+const buHeadCompanyMappingRepository = require('../repositories/buHeadCompanyMappingRepository');
 
 /**
  * Company-scoping gate. Runs as the tail of authenticate() (see auth.js) so
@@ -20,9 +21,53 @@ const logger = require('../utils/logger');
  * risk before Phase 4 flips this to strict enforcement (a pure env-flag
  * flip, no code change).
  */
-const resolveCompany = (req, res, next) => {
+const resolveCompany = async (req, res, next) => {
   if (req.hierarchyRank === 1) {
     // Platform Admin has no company and never touches business routes.
+    return next();
+  }
+
+  // BU Head (hierarchy_rank NULL — a parallel branch like HR, not part of
+  // the numeric admin chain, see database/migrations/
+  // 20260861_add_bu_head_role.sql) is scoped to a SET of Companies
+  // (bu_head_company_mappings), not the single users.company_id column
+  // (NULL for a BU Head account, same as Entity Admin/Admin) — so it can't
+  // reuse the single-company branch below. The frontend sends the SAME
+  // X-Company-Id header BU Admin already sends (its "currently selected
+  // BU"); the difference is this header is verified against a per-user
+  // mapping table rather than a single stored company_id. Once verified,
+  // req.companyId is populated exactly like it is for BU Admin, so every
+  // existing BU-Admin-scoped route/controller/service that reads
+  // req.companyId works for BU Head unchanged.
+  const isBuHead = req.userRoleName && req.userRoleName.toLowerCase() === 'bu head';
+  if (isBuHead) {
+    const rawHeader = req.headers['x-company-id'];
+    const headerCompanyId = rawHeader ? parseInt(rawHeader, 10) : null;
+
+    if (!headerCompanyId) {
+      return res.status(400).json({
+        success: false,
+        message: 'X-Company-Id header is required.',
+        code: 'COMPANY_HEADER_REQUIRED',
+      });
+    }
+
+    const isMapped = await buHeadCompanyMappingRepository.exists(req.userId, headerCompanyId);
+    if (!isMapped) {
+      logger.warn('BU Head attempted to access an unmapped company', {
+        userId: req.userId,
+        headerCompanyId,
+        path: req.path,
+        method: req.method,
+      });
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied: this Business Unit is not mapped to you.',
+        code: 'BU_NOT_MAPPED',
+      });
+    }
+
+    req.companyId = headerCompanyId;
     return next();
   }
 

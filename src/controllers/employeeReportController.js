@@ -3,6 +3,7 @@
 const employeeReportService = require('../services/employeeReportService');
 const employeeProjectHoursReportService = require('../services/employeeProjectHoursReportService');
 const timesheetApprovalReportService = require('../services/timesheetApprovalReportService');
+const workLogTimeReportService = require('../services/workLogTimeReportService');
 const { toExcelBuffer, toCsvExportBuffer, toPdfBuffer } = require('../utils/reportExporter');
 const { sendSuccess, sendError } = require('../utils/response');
 
@@ -131,6 +132,27 @@ const getTimesheetApprovalStatus = async (req, res, next) => {
   }
 };
 
+/**
+ * GET /api/v1/employee-reports/work-log-time?startDate=&endDate=|month=&year=&employee_id=&service_po_id=&project_id=&format=
+ * Work Log Time Report — Day/Employee Code/Name/Project/Module/Task/Start
+ * Time/End Time/Total Hours. Flat rows, so it's compatible with the same
+ * respond() export mechanism (json/excel/csv/pdf) as /daily, /monthly,
+ * /range above.
+ */
+const getWorkLogTimeReport = async (req, res, next) => {
+  try {
+    const { format = 'json' } = req.query;
+    const result = await workLogTimeReportService.getReport(req.userId, req.employeeId, req.companyId, req.query);
+    const filenameSuffix = req.query.startDate && req.query.endDate
+      ? `${req.query.startDate}-to-${req.query.endDate}`
+      : `${req.query.year}-${req.query.month}`;
+    return await respond(res, format, 'Work Log Time Report', `work-log-time-report-${filenameSuffix}`, result);
+  } catch (err) {
+    if (err.statusCode) return sendError(res, err.message, err.statusCode);
+    next(err);
+  }
+};
+
 module.exports = {
   getDaily,
   getMonthly,
@@ -138,4 +160,5 @@ module.exports = {
   getProjectHours,
   getProjectHoursFilterTree,
   getTimesheetApprovalStatus,
+  getWorkLogTimeReport,
 };
