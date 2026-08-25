@@ -1,6 +1,6 @@
 'use strict';
 
-const { User, TeamMapping } = require('../models');
+const { Employee, Role, TeamMapping } = require('../models');
 
 /**
  * Team Mapping Repository
@@ -9,17 +9,27 @@ const { User, TeamMapping } = require('../models');
  */
 
 /**
- * All Users holding the given role_id within one company — used to list
- * every Manager in the company for the "Map Managers" drawer (role_id
- * resolved by the caller via roleRepository.findByName).
+ * All Employees holding the given role_id, scoped to their home Business
+ * Unit (employees.company_id) — used to list every Manager in the company
+ * for the "Map Managers" drawer (role_id resolved by the caller via
+ * roleRepository.findByName). Employee-keyed now that role assignment
+ * lives on employee_roles, not users.role_id.
  *
  * @param {number} roleId
  * @param {number} companyId
- * @returns {Promise<User[]>}
+ * @returns {Promise<Employee[]>}
  */
 const findUsersByRole = async (roleId, companyId) => {
-  return User.findAll({
-    where: { role_id: roleId, company_id: companyId, is_deleted: false },
+  return Employee.findAll({
+    where: { company_id: companyId, is_deleted: false },
+    include: [{
+      model: Role,
+      as: 'roles',
+      where: { id: roleId },
+      attributes: [],
+      through: { attributes: [], where: { status: 'active' } },
+      required: true,
+    }],
     attributes: ['id', 'email', 'status', 'created_at'],
     order: [['email', 'ASC']],
   });
@@ -48,7 +58,7 @@ const findAllMappingsInCompany = async (companyId) => {
  */
 const findByServicePOAdmin = async (servicePOAdminUserId, companyId) => {
   return TeamMapping.findAll({
-    where: { service_po_admin_user_id: servicePOAdminUserId, company_id: companyId, status: 'active' },
+    where: { service_po_admin_employee_id: servicePOAdminUserId, company_id: companyId, status: 'active' },
   });
 };
 
@@ -60,7 +70,7 @@ const findByServicePOAdmin = async (servicePOAdminUserId, companyId) => {
  * @returns {Promise<TeamMapping|null>}
  */
 const findByManager = async (managerUserId) => {
-  return TeamMapping.findOne({ where: { manager_user_id: managerUserId } });
+  return TeamMapping.findOne({ where: { manager_employee_id: managerUserId } });
 };
 
 /**
@@ -73,7 +83,7 @@ const findByManager = async (managerUserId) => {
  */
 const findByServicePOAdminAndManager = async (servicePOAdminUserId, managerUserId, companyId) => {
   return TeamMapping.findOne({
-    where: { service_po_admin_user_id: servicePOAdminUserId, manager_user_id: managerUserId, company_id: companyId },
+    where: { service_po_admin_employee_id: servicePOAdminUserId, manager_employee_id: managerUserId, company_id: companyId },
   });
 };
 

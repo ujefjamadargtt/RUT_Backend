@@ -3,6 +3,7 @@
 const xlsx = require('xlsx');
 const { Client } = require('../models');
 const { generateClientCode } = require('../helpers/codeGenerator');
+const { resolveCreateCompanyId } = require('./companyAccessControlService');
 const logger = require('../utils/logger');
 
 // ── Header map (case-insensitive, trimmed) ────────────────────────────────────
@@ -101,10 +102,20 @@ function validateRow(data) {
  *
  * @param {string} filePath
  * @param {number} userId
- * @param {number} companyId
+ * @param {import('express').Request} req - for resolveCreateCompanyId: a
+ *   BU-scoped actor's own req.companyId always wins; a company-less
+ *   Admin/Entity Admin must supply `company_id` in the multipart form body,
+ *   validated against their own owned Companies — replaces the previous
+ *   raw `req.companyId` passthrough, which crashed for those actors.
  * @returns {Promise<{ total, imported, skipped, error_rows }>}
  */
-async function importClients(filePath, userId, companyId) {
+async function importClients(filePath, userId, req) {
+  const bodyCompanyId = req.body && req.body.company_id ? parseInt(req.body.company_id, 10) : undefined;
+  const companyId = await resolveCreateCompanyId(
+    { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId },
+    bodyCompanyId,
+    'a Client import'
+  );
   logger.info('Client import started', { userId, companyId, filePath });
 
   // ── Parse workbook ──────────────────────────────────────────────────────────

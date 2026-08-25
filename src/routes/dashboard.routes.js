@@ -4,7 +4,14 @@ const express = require('express');
 const router = express.Router();
 
 const Joi = require('joi');
-const authenticate = require('../middlewares/auth');
+const authenticateBase = require('../middlewares/auth');
+const resolveCompanyContextForCompanyLessActors = require('../middlewares/resolveCompanyContextForCompanyLessActors');
+// Admin/Entity Admin (ranks 2-3) have no single req.companyId from
+// authenticateBase alone — every Dashboard endpoint (including analytics /
+// analytics2) reads req.companyId directly, so every route resolves ONE
+// Business Unit context for them too (see
+// resolveCompanyContextForCompanyLessActors.js for the contract).
+const authenticate = [authenticateBase, resolveCompanyContextForCompanyLessActors];
 const { validate } = require('../middlewares/validateRequest');
 const dashboardController = require('../controllers/dashboardController');
 const { heavyReportLimiter } = require('../middlewares/rateLimiters');

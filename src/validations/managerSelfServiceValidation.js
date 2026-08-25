@@ -77,10 +77,25 @@ const bulkApproveTimesheetsSchema = Joi.object({
     'object.xor': 'Provide exactly one of "dates" (daily approval) or "months" (monthly approval).',
   });
 
+/**
+ * PUT /my-team/timesheets/:id/reject — the remark is mandatory (a plain
+ * "Rejected" with no reason is explicitly disallowed by spec) and must be
+ * non-empty after trimming.
+ */
+const rejectWorkLogSchema = Joi.object({
+  remark: Joi.string().trim().min(1).max(1000).required().messages({
+    'any.required': 'remark is required.',
+    'string.empty': 'remark is required.',
+    'string.min': 'remark is required.',
+    'string.max': 'remark cannot exceed 1000 characters.',
+  }),
+});
+
 module.exports = {
   assignServicePOSchema,
   mapEmployeeSchema,
   listMyTeamTimesheetsQuerySchema,
   approvalSummaryQuerySchema,
   bulkApproveTimesheetsSchema,
+  rejectWorkLogSchema,
 };

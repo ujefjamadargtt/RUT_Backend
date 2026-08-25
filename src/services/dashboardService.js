@@ -328,7 +328,6 @@ async function getDashboardStats(query = {}, companyId) {
     closedPOs,
     currentMonthHours,
     billableSplit,
-    overallUtilisation,
     totalRevenue,
     recentActivity,
     topPOs,
@@ -343,7 +342,6 @@ async function getDashboardStats(query = {}, companyId) {
     dashboardRepo.getClosedPOs(companyId),
     dashboardRepo.getCurrentMonthHours(currentMonth, currentYear, hoursSource, roleId, companyId),
     dashboardRepo.getCurrentMonthBillableSplit(currentMonth, currentYear, hoursSource, roleId, companyId),
-    dashboardRepo.getOverallUtilisation(currentMonth, currentYear, hoursSource, roleId, companyId),
     dashboardRepo.getTotalRevenue({ year: currentYear, companyId }),
     dashboardRepo.getRecentTimesheetActivity(hoursSource, roleId, companyId),
     dashboardRepo.getTopPOsByHours(hoursSource, roleId, companyId),
@@ -384,7 +382,6 @@ async function getDashboardStats(query = {}, companyId) {
       total_hours_logged: round2(currentMonthHours),
       billable_hours_logged: round2(billableSplit.billable_hours),
       non_billable_hours_logged: round2(billableSplit.non_billable_hours),
-      overall_utilisation_pct: overallUtilisation,
       // Activity-based counts (distinct active employees/clients with logged
       // hours this period) — comparable to /dashboard/analytics tiles, unlike
       // workforce.active_employees/portfolio.total_clients above which are
@@ -805,8 +802,8 @@ async function getAnalyticsDashboard(query = {}, companyId) {
   // Publish visibility for Role ID 5 is applied per-row: a timesheet row
   // only counts if its import batch is published (see buildAnalyticsFilters()
   // for the scopedFilters/trendFilters-driven calls below, and the
-  // publishGuard added directly to getOverallUtilisationForPeriod/
-  // getEmployeeCountByCategoryForPeriod/getTopPOsByHoursForPeriod/
+  // publishGuard added directly to getEmployeeCountByCategoryForPeriod/
+  // getTopPOsByHoursForPeriod/
   // getRecentTimesheetActivityForPeriod). That way a window spanning several
   // months (a quarter, a fiscal year) still shows real data for whichever of
   // those months ARE published, instead of blocking the whole window because
@@ -827,7 +824,6 @@ async function getAnalyticsDashboard(query = {}, companyId) {
     globalActivePOs,
     globalClosedPOs,
     totalBudgetCost,
-    capacityUtilisationPct,
     employeeCountByCategoryRows,
     topPOsRows,
     recentActivityRows,
@@ -854,7 +850,6 @@ async function getAnalyticsDashboard(query = {}, companyId) {
       serviceTypeId,
       serviceCategoryId,
     }),
-    dashboardRepo.getOverallUtilisationForPeriod(period.start, period.end, query.hoursSource, query.roleId, companyId),
     dashboardRepo.getEmployeeCountByCategoryForPeriod(period.start, period.end, query.roleId, companyId),
     dashboardRepo.getTopPOsByHoursForPeriod(period.start, period.end, query.hoursSource, query.roleId, companyId),
     dashboardRepo.getRecentTimesheetActivityForPeriod(period.start, period.end, query.hoursSource, query.roleId, companyId),
@@ -1019,7 +1014,6 @@ async function getAnalyticsDashboard(query = {}, companyId) {
       non_billable_hours: round2(totalHours - billableHours),
       total_cost: round2(tilesRow.total_cost),
       utilization_pct: totalHours > 0 ? round2((billableHours / totalHours) * 100) : 0,
-      capacity_utilisation_pct: capacityUtilisationPct,
       active_employees: activeEmployees,
       active_clients: parseInt(tilesRow.active_clients, 10) || 0,
       active_service_pos: parseInt(tilesRow.active_service_pos, 10) || 0,

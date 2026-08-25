@@ -7,6 +7,8 @@ const { validate } = require('../middlewares/validateRequest');
 const { authLimiter } = require('../middlewares/rateLimiters');
 const {
   loginSchema,
+  microsoftLoginSchema,
+  selectRoleSchema,
   refreshTokenSchema,
   directChangePasswordSchema,
   forgotPasswordSchema,
@@ -30,30 +32,21 @@ const router = Router();
  * @swagger
  * /auth/login:
  *   post:
- *     summary: Authenticate a User or Employee
+ *     summary: Authenticate an Employee (Role-Based Login)
  *     description: |
- *       Validates credentials and returns a short-lived JWT access token
- *       and a long-lived refresh token. The backend resolves whether the
- *       submitted email belongs to a User, an Employee, both, or neither —
- *       both tables are always checked (never a sequential fallback).
+ *       Validates credentials against Employee Master. An Employee holding
+ *       exactly ONE active role is logged in directly, same as before. An
+ *       Employee holding MULTIPLE active roles does NOT get tokens yet —
+ *       the response instead carries `requiresRoleSelection: true`, the
+ *       list of roles to choose from, and a short-lived `loginTicket`
+ *       (credentials are already verified at this point). The frontend
+ *       must prompt the user to pick a role and complete login via
+ *       POST /auth/select-role with that `loginTicket` and the chosen
+ *       `roleId`.
  *
- *       `loginType` is OPTIONAL.
- *
- *       - Email registered as only a User, or only an Employee: `loginType`
- *         is ignored entirely; behavior is unchanged from a single-account email.
- *       - Email registered as BOTH a User and an Employee, `loginType` omitted:
- *         the submitted password is checked against BOTH accounts (via each
- *         account's own bcrypt-based password check) before asking the
- *         frontend to choose:
- *           - matches only one account → logged in as that account immediately,
- *             no disambiguation needed.
- *           - matches both accounts (same password on both) → returns
- *             `requiresUserTypeSelection: true`; resubmit with `loginType`
- *             set to the client's choice.
- *           - matches neither → standard 401 invalid-credentials response.
- *       - Email registered as BOTH, `loginType` provided (e.g. the resubmit
- *         after the user picks an account): authenticates ONLY against that
- *         selected account.
+ *       Neither response carries mapped Business Units — fetch those
+ *       separately via GET /employees/{id}/business-units using the
+ *       employee id from this response.
  *     tags: [Auth]
  *     requestBody:
  *       required: true
@@ -72,18 +65,15 @@ const router = Router();
  *                 format: password
  *                 minLength: 6
  *                 example: "Secret@123"
- *               loginType:
- *                 type: string
- *                 enum: [user, employee]
- *                 description: Optional — required only when the email resolves to both a User and an Employee.
  *     responses:
  *       200:
- *         description: Login successful, OR account-type disambiguation required (see requiresUserTypeSelection)
+ *         description: Login successful, OR role selection required (see requiresRoleSelection)
  *         content:
  *           application/json:
  *             schema:
  *               oneOf:
  *                 - type: object
+ *                   description: Exactly one active role — logged in directly
  *                   properties:
  *                     success: { type: boolean, example: true }
  *                     message: { type: string, example: Login successful. }
@@ -93,31 +83,110 @@ const router = Router();
  *                         accessToken: { type: string }
  *                         refreshToken: { type: string }
  *                         expiresIn: { type: string, example: "15m" }
- *                         user:
- *                           $ref: '#/components/schemas/UserProfile'
+ *                         employee: { type: object }
+ *                         roles: { type: array, items: { type: object } }
+ *                         forms: { type: object }
  *                 - type: object
- *                   description: Returned when the email is registered as both a User and an Employee, loginType was omitted, and the submitted password matched both accounts
+ *                   description: More than one active role — role selection required
  *                   properties:
- *                     success: { type: boolean, example: false }
- *                     requiresUserTypeSelection: { type: boolean, example: true }
- *                     message: { type: string, example: This email is associated with multiple accounts using the same password. Please choose the account you want to log in to. }
- *                     accountTypes:
- *                       type: array
- *                       items:
- *                         type: object
- *                         properties:
- *                           type: { type: string, example: user }
- *                           label: { type: string, example: User }
+ *                     success: { type: boolean, example: true }
+ *                     message: { type: string, example: Login successful. }
+ *                     data:
+ *                       type: object
+ *                       properties:
+ *                         requiresRoleSelection: { type: boolean, example: true }
+ *                         loginTicket: { type: string, description: Short-lived (5m); pass to POST /auth/select-role }
+ *                         roles: { type: array, items: { type: object } }
  *       401:
  *         description: Invalid credentials (email resolved to an account, but the password was wrong)
  *       403:
  *         description: Account or role is inactive
  *       404:
- *         description: Email ID is not registered (in either table, or not for the requested loginType)
+ *         description: Email ID is not registered
  *       422:
- *         description: Validation error, including an unrecognised loginType value
+ *         description: Validation error
  */
 router.post('/login', authLimiter, validate(loginSchema), authController.login);
+
+/**
+ * @swagger
+ * /auth/microsoft:
+ *   post:
+ *     summary: Authenticate an Employee via Microsoft Entra ID SSO
+ *     description: |
+ *       The frontend completes an Authorization Code + PKCE sign-in via MSAL
+ *       entirely client-side, then sends ONLY the resulting Microsoft ID
+ *       token here. The backend verifies its signature (against Microsoft's
+ *       JWKS), issuer, audience, expiration, and tenant ID before trusting
+ *       any claim from it — email/name/role are never accepted from the
+ *       request body itself.
+ *
+ *       Once the verified email resolves to an existing Employee, behavior
+ *       is IDENTICAL to POST /auth/login from that point on: an Employee
+ *       holding exactly ONE active role logs in directly; an Employee
+ *       holding MULTIPLE active roles gets `requiresRoleSelection: true`
+ *       instead, completed via POST /auth/select-role. Microsoft SSO never
+ *       auto-creates an Employee — an unrecognised email is rejected the
+ *       same way an unregistered email is on the password login endpoint.
+ *     tags: [Auth]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [idToken]
+ *             properties:
+ *               idToken:
+ *                 type: string
+ *                 description: Microsoft Entra ID ID token obtained by the frontend via MSAL.
+ *     responses:
+ *       200:
+ *         description: Login successful, OR role selection required (see requiresRoleSelection) — same response shape as POST /auth/login
+ *       401:
+ *         description: Invalid, expired, or wrong-tenant Microsoft token
+ *       403:
+ *         description: Account or role is inactive
+ *       404:
+ *         description: Email ID is not registered
+ *       422:
+ *         description: Validation error (missing idToken)
+ *       503:
+ *         description: Microsoft SSO is not configured on this server
+ */
+router.post('/microsoft', authLimiter, validate(microsoftLoginSchema), authController.loginWithMicrosoft);
+
+/**
+ * @swagger
+ * /auth/select-role:
+ *   post:
+ *     summary: Complete Role-Based Login by picking one of several active roles
+ *     description: |
+ *       Exchanges the `loginTicket` from a login() response that carried
+ *       `requiresRoleSelection: true`, plus the chosen `roleId`, for a real
+ *       access/refresh token pair scoped to ONLY that role.
+ *     tags: [Auth]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [loginTicket, roleId]
+ *             properties:
+ *               loginTicket: { type: string }
+ *               roleId: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Login successful
+ *       401:
+ *         description: Invalid or expired login ticket
+ *       403:
+ *         description: Account inactive, or the role is no longer available for this account
+ *       422:
+ *         description: Validation error
+ */
+router.post('/select-role', authLimiter, validate(selectRoleSchema), authController.selectRole);
 
 /**
  * @swagger

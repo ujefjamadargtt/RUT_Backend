@@ -24,7 +24,7 @@ const getHierarchy = async (req, res) => {
     const servicePOId = parsePositiveInt(req.params.servicePoId);
     if (!servicePOId) return sendError(res, 'Invalid Service PO ID.', 400);
 
-    const tree = await servicePOHierarchyService.getTree(servicePOId, req.companyId);
+    const tree = await servicePOHierarchyService.getTree(servicePOId, req);
     return sendSuccess(res, tree, 'Service PO hierarchy fetched successfully.');
   } catch (error) {
     if (error.statusCode === 404) return sendNotFound(res, 'Service PO');

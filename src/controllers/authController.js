@@ -25,15 +25,18 @@ function resolveIp(req) {
 /**
  * POST /api/auth/login
  *
- * Authenticate against User Master. Login response always includes both
- * `user` and `employee` — `employee` is null for an account with no linked
- * Employee record (see authService.login).
+ * Authenticate against Employee Master — see authService.login() for the
+ * Role-Based Login behavior (single active role logs in directly;
+ * multiple active roles return `requiresRoleSelection` instead of tokens,
+ * completed via POST /api/auth/select-role).
  *
  * Request body (validated upstream by Joi middleware):
  *   { email: string, password: string }
  *
- * Response 200:
- *   { success: true, message: string, data: { accessToken, refreshToken, expiresIn, user, employee, roles, forms } }
+ * Response 200 (one active role):
+ *   { success: true, message: string, data: { accessToken, refreshToken, expiresIn, employee, roles, forms } }
+ * Response 200 (multiple active roles):
+ *   { success: true, message: string, data: { requiresRoleSelection: true, loginTicket, roles } }
  * Response 404: { success: false, message: 'Email ID is not registered.' }
  */
 const login = async (req, res, next) => {
@@ -46,6 +49,73 @@ const login = async (req, res, next) => {
 
     return sendSuccess(res, result, 'Login successful.');
   } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * POST /api/auth/microsoft
+ *
+ * Authenticate via Microsoft Entra ID SSO — see authService.loginWithMicrosoft()
+ * for the full Microsoft-token-verification + Role-Based Login behavior.
+ * Once the Microsoft ID token is verified and mapped to an existing
+ * Employee, the response is IDENTICAL in shape to POST /auth/login (single
+ * active role logs in directly; multiple active roles return
+ * `requiresRoleSelection`, completed via the SAME POST /auth/select-role).
+ *
+ * Request body (validated upstream by Joi middleware):
+ *   { idToken: string } — the frontend must never send email/role/
+ *   employeeId/etc. directly; only claims verified from the Microsoft ID
+ *   token itself are ever trusted.
+ *
+ * Response 200 (one active role):
+ *   { success: true, message: string, data: { accessToken, refreshToken, expiresIn, employee, roles, forms } }
+ * Response 200 (multiple active roles):
+ *   { success: true, message: string, data: { requiresRoleSelection: true, loginTicket, roles } }
+ * Response 401: invalid/expired/wrong-tenant Microsoft token
+ * Response 403: account or role inactive
+ * Response 404: { success: false, message: 'Email ID is not registered.' }
+ * Response 503: Microsoft SSO is not configured on this server
+ */
+const loginWithMicrosoft = async (req, res, next) => {
+  try {
+    const { idToken } = req.body;
+    const ipAddress = resolveIp(req);
+    const userAgent = req.headers['user-agent'] || '';
+
+    const result = await authService.loginWithMicrosoft(idToken, ipAddress, userAgent);
+
+    return sendSuccess(res, result, 'Login successful.');
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * POST /api/auth/select-role
+ *
+ * Completes Role-Based Login: exchanges the `loginTicket` from a
+ * `requiresRoleSelection` login() response plus the employee's chosen
+ * `roleId` for a real access/refresh token pair scoped to that role.
+ *
+ * Request body: { loginTicket: string, roleId: number }
+ * Response 200: { success: true, message: string, data: { accessToken, refreshToken, expiresIn, employee, roles, forms } }
+ * Response 401: invalid/expired login ticket
+ * Response 403: account inactive, or the role is no longer available
+ */
+const selectRole = async (req, res, next) => {
+  try {
+    const { loginTicket, roleId } = req.body;
+    const ipAddress = resolveIp(req);
+    const userAgent = req.headers['user-agent'] || '';
+
+    const result = await authService.selectRole(loginTicket, roleId, ipAddress, userAgent);
+
+    return sendSuccess(res, result, 'Login successful.');
+  } catch (err) {
+    if (err.statusCode === 401 || err.statusCode === 403) {
+      return sendError(res, err.message, err.statusCode);
+    }
     next(err);
   }
 };
@@ -249,6 +319,8 @@ const changePassword = async (req, res, next) => {
 
 module.exports = {
   login,
+  loginWithMicrosoft,
+  selectRole,
   logout,
   refreshToken,
   getProfile,

@@ -18,6 +18,12 @@ const { validate } = require('../middlewares/validateRequest');
 const WRITE_ROLES = ['Finance', 'Management'];
 
 const createSchema = Joi.object({
+  // Only meaningful for a company-less actor (Admin/Entity Admin) — see
+  // companyAccessControlService.resolveCreateCompanyId(). A BU-scoped
+  // actor's own req.companyId always wins over this field.
+  company_id: Joi.number().integer().positive().optional().messages({
+    'number.base': 'Business Unit (company_id) must be a number.',
+  }),
   name: Joi.string().trim().min(2).max(100).required().messages({
     'string.min': 'Name must be at least 2 characters.',
     'string.max': 'Name cannot exceed 100 characters.',

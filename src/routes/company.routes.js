@@ -21,14 +21,50 @@ const companyController = require('../controllers/companyController');
  *     Company provisioning — Entity Admin only (repurposed from Platform
  *     Admin when Entity Admin was introduced; see
  *     database/migrations/20260826_add_entity_admin_role.sql). Every
- *     endpoint is scoped to the calling Entity Admin's own owned Entities.
+ *     endpoint is scoped to the calling Entity Admin's own owned Entities,
+ *     EXCEPT GET / (see allowCompanyListing below).
  */
+
+/**
+ * GET / is also the "load BUs" dropdown the Service PO creation flow (and
+ * other BU-dependent create screens) call — a BU Admin (hierarchy_rank 4)
+ * legitimately needs to load THEIR OWN mapped BUs here too, without gaining
+ * Entity Admin's "every company under my owned Entities" scope. Delegates
+ * unchanged to requireEntityAdminOrAdmin for Admin/Entity Admin; for a BU
+ * Admin with at least one active mapped BU, sets req.employeeBUsOnly so
+ * companyController.getAll returns their own mapped BUs instead. Anyone
+ * else (including a 0-BU BU Admin) is rejected exactly as before.
+ *
+ * Uses authenticate.authenticateIdentity (not the default authenticate)
+ * because resolveCompany is irrelevant to both branches here (Entity Admin/
+ * Admin's scope comes from req.entityIds, not req.companyId; a BU Admin's
+ * own mapped BUs come straight from req.employeeBusinessUnits) and a
+ * multi-BU BU Admin must be able to load this dropdown BEFORE they have
+ * picked an active BU to put in X-Company-Id — the same bootstrap
+ * requirement as GET /employees/:id/business-units.
+ */
+const allowCompanyListing = (req, res, next) => {
+  if (req.hierarchyRank === 2 || (req.userRoleName && req.userRoleName.toLowerCase() === 'entity admin')) {
+    return requireEntityAdminOrAdmin(req, res, next);
+  }
+  if (req.hierarchyRank === 4 && (req.employeeBusinessUnits || []).length > 0) {
+    req.employeeBUsOnly = true;
+    return next();
+  }
+  return res.status(403).json({
+    success: false,
+    message: 'Access denied. This action is restricted to Admin, Entity Admin, or a BU Admin with a mapped Business Unit.',
+    code: 'ENTITY_ADMIN_OR_ADMIN_OR_BU_ADMIN_REQUIRED',
+  });
+};
 
 /**
  * @swagger
  * /companies:
  *   get:
- *     summary: List companies under the caller's owned Entities (Entity Admin only)
+ *     summary: >
+ *       List companies under the caller's owned Entities (Entity Admin/
+ *       Admin), or the caller's own mapped Business Units (BU Admin)
  *     tags: [Companies]
  *     security:
  *       - bearerAuth: []
@@ -36,12 +72,12 @@ const companyController = require('../controllers/companyController');
  *       200:
  *         description: Company list
  *       403:
- *         description: Not an Entity Admin
+ *         description: Not an Entity Admin, Admin, or mapped BU Admin
  */
 router.get(
   '/',
-  authenticate,
-  requireEntityAdminOrAdmin,
+  authenticate.authenticateIdentity,
+  allowCompanyListing,
   validate(listCompaniesQuerySchema, 'query'),
   companyController.getAll
 );

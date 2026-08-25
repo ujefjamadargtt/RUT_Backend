@@ -117,6 +117,33 @@ const findFormsInModule = async (moduleName, status) => {
 };
 
 /**
+ * Find a module row (module_name IS NULL) by its own id — used wherever a
+ * caller already has a numeric module id (categories, the move endpoint)
+ * rather than the module's name.
+ * @param {number} id
+ * @returns {Promise<FormMaster|null>}
+ */
+const findModuleById = async (id) => {
+  return FormMaster.findOne({ where: { id, module_name: null } });
+};
+
+/**
+ * List every form registered under one category, ordered by its
+ * within-module seq (categories don't have their own ordering scope for
+ * forms — see categoryRepository.js's doc comment).
+ * @param {number} categoryId
+ * @param {string} [status] - 'active' | 'inactive' | 'all'
+ * @returns {Promise<FormMaster[]>}
+ */
+const findFormsInCategory = async (categoryId, status) => {
+  const where = { category_id: categoryId };
+  if (status && status !== 'all') {
+    where.status = status;
+  }
+  return FormMaster.findAll({ where, order: [['seq', 'ASC']] });
+};
+
+/**
  * Count every form registered under one module, regardless of status —
  * used by the module-delete guard (a module with any children, even
  * inactive ones, cannot be deleted).
@@ -207,8 +234,10 @@ module.exports = {
   findByIds,
   findByName,
   findModuleByName,
+  findModuleById,
   findModules,
   findFormsInModule,
+  findFormsInCategory,
   countFormsInModule,
   getMaxModuleSeq,
   getMaxSeqInModule,

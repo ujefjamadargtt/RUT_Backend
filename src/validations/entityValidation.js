@@ -34,14 +34,14 @@ const createEntitySchema = Joi.object({
   // assign it to an Entity Admin later via update(). Must be an existing
   // Entity Admin user id created by the calling Admin (enforced server-side
   // in entityService.js, never trusted from the request alone).
-  entity_admin_user_id: Joi.number()
+  entity_admin_employee_id: Joi.number()
     .integer()
     .positive()
     .optional()
     .allow(null)
     .messages({
-      'number.base': 'Entity Admin user ID must be a number.',
-      'number.positive': 'Entity Admin user ID must be a positive integer.',
+      'number.base': 'Entity Admin employee ID must be a number.',
+      'number.positive': 'Entity Admin employee ID must be a positive integer.',
     }),
 
   status: Joi.string()
@@ -76,14 +76,14 @@ const updateEntitySchema = Joi.object({
 
   // (Re)assign this Entity to a different Entity Admin — same server-side
   // ownership validation as create().
-  entity_admin_user_id: Joi.number()
+  entity_admin_employee_id: Joi.number()
     .integer()
     .positive()
     .optional()
     .allow(null)
     .messages({
-      'number.base': 'Entity Admin user ID must be a number.',
-      'number.positive': 'Entity Admin user ID must be a positive integer.',
+      'number.base': 'Entity Admin employee ID must be a number.',
+      'number.positive': 'Entity Admin employee ID must be a positive integer.',
     }),
 
   status: Joi.string()

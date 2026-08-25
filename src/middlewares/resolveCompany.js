@@ -1,25 +1,25 @@
 'use strict';
 
 const logger = require('../utils/logger');
-const buHeadCompanyMappingRepository = require('../repositories/buHeadCompanyMappingRepository');
 
 /**
  * Company-scoping gate. Runs as the tail of authenticate() (see auth.js) so
- * it reaches every authenticated route without touching any of the 135+
+ * it reaches every authenticated route without touching any of the
  * per-route authenticate() call sites.
  *
- * Reads the X-Company-Id header (not body/query — keeps every existing Joi
- * validation schema, several of them allowUnknown:false, untouched) and
- * checks it against the authenticated user's actual company membership.
- * req.companyId is always set from the DB-verified req.user.company_id,
- * never from the header directly — the header is only ever the thing being
- * validated against, never trusted as the source of truth. This closes a
- * header-spoofing path even while shadow mode is on.
+ * Employee-as-Identity redesign: every Employee (not just the old BU
+ * Head) is now scoped to a SET of Business Units (employee_business_units,
+ * req.employeeBusinessUnits — populated by auth.js), not a single
+ * company_id column. Reads the X-Company-Id header and validates it
+ * against that set:
+ *   - 0 BUs -> 403 (nothing to scope into).
+ *   - exactly 1 BU -> req.companyId is that BU; header optional, but if
+ *     present it's cross-checked against it.
+ *   - >1 BUs -> X-Company-Id header is required and must be one of them.
  *
- * Shadow mode (COMPANY_SCOPE_SHADOW_MODE=true): mismatches are logged, never
- * blocked — lets the frontend's header rollout be observed with zero outage
- * risk before Phase 4 flips this to strict enforcement (a pure env-flag
- * flip, no code change).
+ * Platform Admin (rank 1) and Admin/Entity Admin (ranks 2-3) are exempt —
+ * they are platform-wide/Entity-scoped, not Business-Unit-scoped; see the
+ * early-return block below, unchanged from the pre-redesign behavior.
  */
 const resolveCompany = async (req, res, next) => {
   if (req.hierarchyRank === 1) {
@@ -27,89 +27,77 @@ const resolveCompany = async (req, res, next) => {
     return next();
   }
 
-  // BU Head (hierarchy_rank NULL — a parallel branch like HR, not part of
-  // the numeric admin chain, see database/migrations/
-  // 20260861_add_bu_head_role.sql) is scoped to a SET of Companies
-  // (bu_head_company_mappings), not the single users.company_id column
-  // (NULL for a BU Head account, same as Entity Admin/Admin) — so it can't
-  // reuse the single-company branch below. The frontend sends the SAME
-  // X-Company-Id header BU Admin already sends (its "currently selected
-  // BU"); the difference is this header is verified against a per-user
-  // mapping table rather than a single stored company_id. Once verified,
-  // req.companyId is populated exactly like it is for BU Admin, so every
-  // existing BU-Admin-scoped route/controller/service that reads
-  // req.companyId works for BU Head unchanged.
-  const isBuHead = req.userRoleName && req.userRoleName.toLowerCase() === 'bu head';
-  if (isBuHead) {
-    const rawHeader = req.headers['x-company-id'];
-    const headerCompanyId = rawHeader ? parseInt(rawHeader, 10) : null;
+  // Admin (rank 2) is platform-wide. Entity Admin (rank 3) is scoped to a
+  // SET of Entities (req.entityIds, populated by requireEntityAdmin.js /
+  // requireEntityAdminOrAdmin.js), not a single company. Skip
+  // single-company resolution for both.
+  if (req.hierarchyRank === 2 || req.hierarchyRank === 3) {
+    return next();
+  }
 
-    if (!headerCompanyId) {
-      return res.status(400).json({
-        success: false,
-        message: 'X-Company-Id header is required.',
-        code: 'COMPANY_HEADER_REQUIRED',
-      });
-    }
+  const businessUnits = req.employeeBusinessUnits || [];
 
-    const isMapped = await buHeadCompanyMappingRepository.exists(req.userId, headerCompanyId);
-    if (!isMapped) {
-      logger.warn('BU Head attempted to access an unmapped company', {
-        userId: req.userId,
+  if (businessUnits.length === 0) {
+    logger.warn('Employee has no active Business Unit membership', {
+      employeeId: req.employeeId,
+      path: req.path,
+      method: req.method,
+    });
+    return res.status(403).json({
+      success: false,
+      message: 'Access denied: no Business Unit is assigned to your account.',
+      code: 'NO_BUSINESS_UNIT',
+    });
+  }
+
+  const rawHeader = req.headers['x-company-id'];
+  const headerCompanyId = rawHeader ? parseInt(rawHeader, 10) : null;
+
+  if (businessUnits.length === 1) {
+    const onlyBu = businessUnits[0];
+    if (headerCompanyId && headerCompanyId !== onlyBu.id) {
+      logger.warn('Company header does not match employee\'s sole Business Unit', {
+        employeeId: req.employeeId,
+        businessUnitId: onlyBu.id,
         headerCompanyId,
         path: req.path,
         method: req.method,
       });
       return res.status(403).json({
         success: false,
-        message: 'Access denied: this Business Unit is not mapped to you.',
+        message: 'Access denied: this Business Unit is not assigned to you.',
         code: 'BU_NOT_MAPPED',
       });
     }
-
-    req.companyId = headerCompanyId;
+    req.companyId = onlyBu.id;
     return next();
   }
 
-  // Admin (rank 2) is also platform-wide, like Platform Admin — it manages
-  // Entity Admins and BU Admins across every Entity/Company, never scoped
-  // to one. Entity Admin (rank 3) is scoped to a SET of Entities
-  // (req.entityIds, populated by requireEntityAdmin.js /
-  // requireEntityAdminOrAdmin.js), not a single company —
-  // users.company_id is NULL for both roles by design. Skip single-company
-  // resolution for both, the same way Platform Admin does, rather than
-  // falsely flagging a "company header mismatch" for a role that
-  // legitimately has none.
-  if (req.hierarchyRank === 2 || req.hierarchyRank === 3) {
-    return next();
+  // More than one BU — the header is required and must be one of them.
+  if (!headerCompanyId) {
+    return res.status(400).json({
+      success: false,
+      message: 'X-Company-Id header is required.',
+      code: 'COMPANY_HEADER_REQUIRED',
+    });
   }
 
-  const shadowMode = process.env.COMPANY_SCOPE_SHADOW_MODE !== 'false';
-
-  const rawHeader = req.headers['x-company-id'];
-  const headerCompanyId = rawHeader ? parseInt(rawHeader, 10) : null;
-  const mismatch = !headerCompanyId || headerCompanyId !== req.user.company_id;
-
-  if (mismatch) {
-    logger.warn('Company header mismatch', {
-      userId: req.userId,
-      userCompanyId: req.user.company_id,
-      headerCompanyId: rawHeader || null,
+  const isMapped = businessUnits.some((bu) => bu.id === headerCompanyId);
+  if (!isMapped) {
+    logger.warn('Employee attempted to access an unmapped Business Unit', {
+      employeeId: req.employeeId,
+      headerCompanyId,
       path: req.path,
       method: req.method,
-      shadowMode,
     });
-
-    if (!shadowMode) {
-      return res.status(401).json({
-        success: false,
-        message: 'Unauthorized: company mismatch.',
-        code: 'COMPANY_MISMATCH',
-      });
-    }
+    return res.status(403).json({
+      success: false,
+      message: 'Access denied: this Business Unit is not assigned to you.',
+      code: 'BU_NOT_MAPPED',
+    });
   }
 
-  req.companyId = req.user.company_id;
+  req.companyId = headerCompanyId;
   next();
 };
 

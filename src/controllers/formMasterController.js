@@ -144,6 +144,46 @@ const remove = async (req, res, next) => {
 };
 
 /**
+ * GET /api/v1/forms/hierarchy
+ * Management only. The full Module -> Category -> Form tree.
+ */
+const getHierarchy = async (req, res, next) => {
+  try {
+    const hierarchy = await formMasterService.getHierarchy();
+    return sendSuccess(res, hierarchy, 'Form hierarchy fetched successfully.');
+  } catch (err) {
+    logger.error('formMasterController.getHierarchy error', { error: err.message, stack: err.stack });
+    next(err);
+  }
+};
+
+/**
+ * PUT /api/v1/forms/:id/move
+ * Management only. Moves a form Module<->Category/Category<->Category —
+ * never renames or (de)activates it (use PUT /forms/:id for that).
+ */
+const move = async (req, res, next) => {
+  try {
+    const id = parsePositiveInt(req.params.id);
+    if (!id) {
+      return sendError(res, 'Invalid form ID.', 400);
+    }
+
+    const form = await formMasterService.moveForm(id, req.body, req.userId, getIpAddress(req));
+    return sendSuccess(res, form, 'Form moved successfully.');
+  } catch (err) {
+    if (err.statusCode === 404) {
+      return sendNotFound(res, 'Form');
+    }
+    if (err.statusCode) {
+      return sendError(res, err.message, err.statusCode);
+    }
+    logger.error('formMasterController.move error', { error: err.message, stack: err.stack });
+    next(err);
+  }
+};
+
+/**
  * PATCH /api/v1/forms/modules/reorder
  * Management only. Bulk-updates module seq values.
  * Body: { items: [{ id, seq }] }
@@ -188,8 +228,10 @@ module.exports = {
   getAll,
   getModules,
   getById,
+  getHierarchy,
   create,
   update,
+  move,
   remove,
   reorderModules,
   reorderForms,

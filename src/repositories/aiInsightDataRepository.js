@@ -642,7 +642,7 @@ async function getQuarterEndReviewData(companyId) {
 async function getNewPoStaffingSuggestionData(servicePoId, companyId) {
   const [po] = await sequelize.query(
     `SELECT sp.id AS service_po_id, sp.service_po_name, sp.service_description,
-            sp.expected_man_hours, sp.start_date, sp.end_date,
+            sp.start_date, sp.end_date,
             c.client_name, st.service_type_name, sc.name AS category_name
      FROM service_pos sp
      INNER JOIN clients c ON c.id = sp.client_id
@@ -665,7 +665,11 @@ async function getNewPoStaffingSuggestionData(servicePoId, companyId) {
   const fullyIdleEmployees = await sequelize.query(
     `SELECT e.id AS employee_id, e.full_name, e.designation, e.resource_description
      FROM employees e
-     WHERE e.is_deleted = false AND e.status = 'active' AND e.company_id = :companyId
+     WHERE e.is_deleted = false AND e.status = 'active'
+       AND (e.company_id = :companyId OR EXISTS (
+         SELECT 1 FROM employee_business_units ebu
+         WHERE ebu.employee_id = e.id AND ebu.business_unit_id = :companyId AND ebu.status = 'active'
+       ))
        AND e.id NOT IN (:employeeIds)
        AND NOT EXISTS (
          SELECT 1 FROM timesheets t
@@ -718,7 +722,6 @@ async function getNewPoStaffingSuggestionData(servicePoId, companyId) {
       service_type_name: po.service_type_name,
       category_name: po.category_name || 'Uncategorized',
       service_description: truncate(po.service_description, 500),
-      expected_man_hours: po.expected_man_hours ? parseFloat(po.expected_man_hours) : null,
       start_date: po.start_date,
       end_date: po.end_date,
     },

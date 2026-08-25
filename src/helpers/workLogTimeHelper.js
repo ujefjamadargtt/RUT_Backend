@@ -65,8 +65,66 @@ function formatTimeForDisplay(timeStr) {
   return `${String(h).padStart(2, '0')}:${mStr} ${period}`;
 }
 
+/**
+ * Reject a set of {start_time, end_time} segments (one Module/Task line's
+ * `time_entries`, see employeeTimesheetService.resolveHoursAndTimeEntries)
+ * if any two overlap. Segments are only ever compared against each other
+ * within the SAME line (same Service PO + hierarchy node + date) — that is
+ * the only scope in which "overlap" is meaningful, since two different
+ * Module/Tasks legitimately don't share a clock.
+ *
+ * @param {Array<{ start_time: string, end_time: string }>} entries
+ * @throws {Error} statusCode 400 on the first overlap found
+ */
+function assertNoOverlappingEntries(entries) {
+  const sorted = [...entries].sort((a, b) => toMinutes(a.start_time) - toMinutes(b.start_time));
+  for (let i = 1; i < sorted.length; i++) {
+    if (toMinutes(sorted[i].start_time) < toMinutes(sorted[i - 1].end_time)) {
+      const err = new Error(
+        `Time entries overlap: ${sorted[i - 1].start_time}-${sorted[i - 1].end_time} and ` +
+        `${sorted[i].start_time}-${sorted[i].end_time}.`
+      );
+      err.statusCode = 400;
+      throw err;
+    }
+  }
+}
+
+/**
+ * Sum a set of already-computed per-entry hours into the combined total for
+ * one Module/Task on one date — e.g. 09:30-10:20 (0.83h) + 14:00-15:00 (1h)
+ * = 1.83h, the value written into employee_work_logs.hours.
+ *
+ * @param {number[]} hoursList
+ * @returns {number} rounded to 2 decimal places
+ */
+function sumHours(hoursList) {
+  return Math.round(hoursList.reduce((sum, h) => sum + h, 0) * 100) / 100;
+}
+
+/**
+ * Format a decimal hours value as "1 hr 50 mins" for display — the combined-
+ * total presentation the Work Log Time Report/UI shows alongside each
+ * Module/Task's individual time entries (see this file's header comment and
+ * the ticket example: "Total = 110 minutes = 1 hour 50 minutes").
+ *
+ * @param {number} hours
+ * @returns {string}
+ */
+function formatHoursAsHrMin(hours) {
+  const totalMinutes = Math.round(hours * 60);
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  if (h === 0) return `${m} min${m === 1 ? '' : 's'}`;
+  if (m === 0) return `${h} hr${h === 1 ? '' : 's'}`;
+  return `${h} hr${h === 1 ? '' : 's'} ${m} min${m === 1 ? '' : 's'}`;
+}
+
 module.exports = {
   TIME_PATTERN,
   calculateHoursFromTimes,
   formatTimeForDisplay,
+  assertNoOverlappingEntries,
+  sumHours,
+  formatHoursAsHrMin,
 };

@@ -11,6 +11,28 @@ const { QueryTypes } = require('sequelize');
  */
 
 /**
+ * Builds a `company_id` WHERE fragment — Op.in-aware for an array (a
+ * company-less Admin/Entity Admin's resolved owned-Company-id scope, see
+ * companyAccessControlService.resolveActorCompanyScope), plain equality for
+ * a number. Deliberately has NO "omit the filter when undefined" fallback
+ * (unlike employeeRepository.js's companyScope) — every function below
+ * touches timesheet import history/errors/files, which must always be
+ * company-scoped; a caller that hasn't resolved a real scope should get a
+ * thrown "invalid undefined value" error, not a silently unscoped
+ * read/write/delete across every tenant's import batches (the
+ * GET/PUT/DELETE /timesheets/import cross-tenant leak fix).
+ *
+ * @param {number|number[]} companyId
+ * @returns {object}
+ */
+function companyScope(companyId) {
+  if (Array.isArray(companyId)) {
+    return { company_id: { [Op.in]: companyId } };
+  }
+  return { company_id: companyId };
+}
+
+/**
  * Insert a new import history record.
  *
  * @param {object} data
@@ -36,8 +58,7 @@ const createImportHistory = async (data) => {
  * @returns {Promise<TimesheetImportHistory|null>}
  */
 const updateImportHistory = async (id, data, transaction = null, companyId) => {
-  const where = { id };
-  if (companyId !== undefined) where.company_id = companyId;
+  const where = { id, ...companyScope(companyId) };
   const record = await TimesheetImportHistory.findOne({ where, ...(transaction ? { transaction } : {}) });
   if (!record) return null;
   return record.update(data, transaction ? { transaction } : {});
@@ -62,8 +83,7 @@ const createImportErrors = async (errors) => {
  * @returns {Promise<TimesheetImportHistory|null>}
  */
 const findImportById = async (id, companyId) => {
-  const where = { id };
-  if (companyId !== undefined) where.company_id = companyId;
+  const where = { id, ...companyScope(companyId) };
   return TimesheetImportHistory.findOne({
     where,
     include: [
@@ -174,8 +194,7 @@ const getEmployeeCountsByImportIds = async (importIds, companyId) => {
  */
 const deleteErrorsByImportIds = async (importIds, transaction = null, companyId) => {
   if (!importIds || importIds.length === 0) return 0;
-  const where = { import_id: { [Op.in]: importIds } };
-  if (companyId !== undefined) where.company_id = companyId;
+  const where = { import_id: { [Op.in]: importIds }, ...companyScope(companyId) };
   return TimesheetImportError.destroy({
     where,
     ...(transaction ? { transaction } : {}),
@@ -214,8 +233,7 @@ const findByMonthYearSource = async (companyId, month, year, source) => {
  */
 const findImportsByIds = async (ids, companyId) => {
   if (!ids || ids.length === 0) return [];
-  const where = { id: { [Op.in]: ids } };
-  if (companyId !== undefined) where.company_id = companyId;
+  const where = { id: { [Op.in]: ids }, ...companyScope(companyId) };
   return TimesheetImportHistory.findAll({ where });
 };
 
@@ -230,8 +248,7 @@ const findImportsByIds = async (ids, companyId) => {
  */
 const deleteImportsById = async (ids, transaction = null, companyId) => {
   if (!ids || ids.length === 0) return 0;
-  const where = { id: { [Op.in]: ids } };
-  if (companyId !== undefined) where.company_id = companyId;
+  const where = { id: { [Op.in]: ids }, ...companyScope(companyId) };
   return TimesheetImportHistory.destroy({
     where,
     ...(transaction ? { transaction } : {}),
@@ -250,8 +267,7 @@ const deleteImportsById = async (ids, transaction = null, companyId) => {
 const deleteImportsByIds = async (ids, excludeId, transaction = null, companyId) => {
   const targets = ids.filter((id) => id !== excludeId);
   if (!targets.length) return 0;
-  const where = { id: { [Op.in]: targets } };
-  if (companyId !== undefined) where.company_id = companyId;
+  const where = { id: { [Op.in]: targets }, ...companyScope(companyId) };
   return TimesheetImportHistory.destroy({
     where,
     ...(transaction ? { transaction } : {}),
@@ -285,8 +301,8 @@ const arePeriodsFullyPublished = async (yearMonths, companyId) => {
   const where = {
     status: 'completed',
     [Op.or]: yearMonths.map(({ year, month }) => ({ import_year: year, import_month: month })),
+    ...companyScope(companyId),
   };
-  if (companyId !== undefined) where.company_id = companyId;
 
   const rows = await TimesheetImportHistory.findAll({
     attributes: ['import_year', 'import_month', 'is_publish'],

@@ -80,7 +80,11 @@ async function getMissingTimesheetData(companyId) {
   const rows = await sequelize.query(
     `SELECT e.id AS employee_id, e.full_name, e.designation
      FROM employees e
-     WHERE e.is_deleted = false AND e.status = 'active' AND e.company_id = :companyId
+     WHERE e.is_deleted = false AND e.status = 'active'
+       AND (e.company_id = :companyId OR EXISTS (
+         SELECT 1 FROM employee_business_units ebu
+         WHERE ebu.employee_id = e.id AND ebu.business_unit_id = :companyId AND ebu.status = 'active'
+       ))
        AND NOT EXISTS (
          SELECT 1 FROM timesheets t WHERE t.employee_id = e.id AND t.timesheet_date = :checkDate
        )
@@ -147,7 +151,6 @@ const pickServicePO = (r) => ({
   service_po_name: r.service_po_name,
   client_name: r.client_name,
   po_value: r.po_value,
-  expected_man_hours: r.expected_man_hours,
   hours_delivered_before_month: r.hours_delivered_before_month,
   monthly_billable_amount: r.monthly_billable_amount,
 });

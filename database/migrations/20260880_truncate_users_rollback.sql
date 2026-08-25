@@ -1,0 +1,9 @@
+-- Rollback for 20260880_truncate_users.sql
+-- Not auto-run by the migration runner.
+--
+-- There is no automatic rollback for a TRUNCATE — the original rows are
+-- gone. Restore `users` from a backup taken before this migration ran if
+-- the data is needed back (e.g. the Node+pg JSON-dump approach used
+-- elsewhere in this project for environments with no pg_dump installed).
+-- The table structure itself was never dropped, so no DDL rollback is
+-- needed here — only data restoration, which this file cannot perform.

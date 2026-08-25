@@ -2,10 +2,17 @@
 
 const { sequelize } = require('../models');
 const authRepository = require('../repositories/authRepository');
-const userRepository = require('../repositories/userRepository');
+const employeeRepository = require('../repositories/employeeRepository');
+const microsoftAuthService = require('./microsoftAuthService');
 const rbacService = require('./rbacService');
-const buHeadCompanyMappingRepository = require('../repositories/buHeadCompanyMappingRepository');
-const { generateTokens, verifyRefreshToken, REFRESH_TOKEN_EXPIRY } = require('../config/jwt');
+const {
+  generateTokens,
+  verifyToken,
+  verifyRefreshToken,
+  signRoleSelectionTicket,
+  ROLE_SELECTION_TICKET_TYPE,
+  REFRESH_TOKEN_EXPIRY,
+} = require('../config/jwt');
 const logger = require('../utils/logger');
 const moment = require('moment-timezone');
 const { extractIsOriginalDataVisible } = require('../utils/timesheetPublishPolicy');
@@ -13,19 +20,19 @@ const { extractIsOriginalDataVisible } = require('../utils/timesheetPublishPolic
 /**
  * Auth Service — login/logout/refresh/profile/change-password.
  *
- * Login authenticates exclusively against User Master (`users`) — Employees
- * are pure business data now (see database/migrations/
- * 20260842_employees_drop_login_columns.sql); every Employee that needs to
- * log in has a linked User row (users.employee_id) created automatically at
- * Employee-creation time (see employeeService.js). There is no dual-lookup,
- * no loginType disambiguation, and no separate Employee token audience —
- * one identity table, one token shape, for every account tier.
+ * Login authenticates exclusively against Employee Master (`employees`) —
+ * the Employee-as-Identity redesign (database/migrations/
+ * 20260864-20260880) moved login off `users` entirely. Every account tier
+ * (Platform Admin through Employee/HR) is now a plain Employee row holding
+ * zero or more roles (employee_roles) and zero or more Business Units
+ * (employee_business_units) — no primary/additional role split, no single
+ * home company_id for scoping.
  */
 
 /**
  * Parse a JWT expiry string such as "7d", "15m", "1h" into a future Date.
  *
- * @param {string} expiry - e.g. "7d", "15m", "2h", "3600" (seconds as string)
+ * @param {string} expiry
  * @returns {Date}
  */
 function expiryToDate(expiry) {
@@ -44,40 +51,59 @@ function expiryToDate(expiry) {
 }
 
 /**
- * Strip sensitive fields and return a safe user object for API responses.
+ * Strip sensitive fields and return a safe employee object for API responses.
  *
- * @param {object} user - Sequelize User instance or plain object.
+ * @param {object} employee - Sequelize Employee instance or plain object.
  * @returns {object}
  */
-function sanitiseUser(user) {
-  const plain = user.toJSON ? user.toJSON() : { ...user };
+function sanitiseEmployee(employee) {
+  const plain = employee.toJSON ? employee.toJSON() : { ...employee };
   delete plain.password;
   return plain;
 }
 
 /**
- * Shape a user's roles for the login/refresh-token response — the PRIMARY
- * role plus every ADDITIONAL operational role they hold (see
- * database/migrations/20260850_add_user_additional_roles.sql). is_original_data_visible
- * is the user's COMPANY's own companies.is_original_data_visible (see
- * database/migrations/20260808_add_company_original_data_visibility.sql),
- * not a per-role column, so it's stamped identically onto every entry.
+ * An employee's currently-active roles: both the role's own status
+ * (roles.status) and this employee's grant of it (employee_roles.status)
+ * must be 'active'. No primary/additional distinction — every consumer
+ * treats the set uniformly.
  *
- * @param {object} primaryRole
- * @param {object[]} additionalRoles
- * @param {boolean} isOriginalDataVisible - the user's COMPANY's is_original_data_visible
+ * @param {object} employee - with `.roles` included (see authRepository.js)
  * @returns {object[]}
  */
-function serialiseRoles(primaryRole, additionalRoles, isOriginalDataVisible) {
-  if (!primaryRole) return [];
-  const roles = [primaryRole, ...(additionalRoles || [])];
-  return roles.map((role) => ({
-    id: role.id,
-    name: role.role_name,
-    permission: role.permission,
-    hierarchyRank: role.hierarchy_rank,
-    is_original_data_visible: isOriginalDataVisible,
-  }));
+function getActiveRoles(employee) {
+  return (employee.roles || []).filter(
+    (role) => role.status === 'active' && role.EmployeeRole && role.EmployeeRole.status === 'active'
+  );
+}
+
+/**
+ * An employee's currently-active Business Units (employee_business_units.status).
+ *
+ * @param {object} employee - with `.businessUnits` included
+ * @returns {object[]}
+ */
+function getActiveBusinessUnits(employee) {
+  return (employee.businessUnits || []).filter(
+    (bu) => bu.EmployeeBusinessUnit && bu.EmployeeBusinessUnit.status === 'active'
+  );
+}
+
+/**
+ * Effective hierarchy rank = MIN(hierarchy_rank) across an employee's
+ * active roles — NULL-rank roles (HR-style, not part of the numeric admin
+ * chain) are excluded from the MIN, matching the pre-redesign isSeniorTier
+ * semantics where a NULL-rank role never counted as senior.
+ *
+ * @param {object[]} activeRoles
+ * @returns {number|null}
+ */
+function getEffectiveHierarchyRank(activeRoles) {
+  const ranks = activeRoles
+    .map((role) => role.hierarchy_rank)
+    .filter((rank) => Number.isInteger(rank));
+  if (ranks.length === 0) return null;
+  return Math.min(...ranks);
 }
 
 /**
@@ -103,12 +129,17 @@ function emailNotRegisteredError() {
 }
 
 /**
- * The one generic 401 every refresh-token failure mode returns — invalid
- * signature, expired, unknown jti, already-consumed (replay), wrong user,
- * inactive account. Deliberately identical in every case so a caller can
- * never distinguish "this token doesn't exist" from "this token was
- * already used" from any other rejection reason.
- *
+ * @returns {Error}
+ */
+function invalidLoginTicketError() {
+  const err = new Error('Invalid or expired login ticket. Please log in again.');
+  err.statusCode = 401;
+  err.code = 'INVALID_LOGIN_TICKET';
+  err.isOperational = true;
+  return err;
+}
+
+/**
  * @returns {Error}
  */
 function invalidRefreshTokenError() {
@@ -119,66 +150,67 @@ function invalidRefreshTokenError() {
   return err;
 }
 
-// ─── Auth Service ─────────────────────────────────────────────────────────────
+/**
+ * Plain `{id, name, permission, hierarchyRank}` shape for a role — used for
+ * BOTH the pending-role-selection listing (login() with >1 active role)
+ * and the final issued-session response (issueSession()).
+ *
+ * @param {object} role
+ * @returns {object}
+ */
+function buildRoleSummary(role) {
+  return {
+    id: role.id,
+    name: role.role_name,
+    permission: role.permission,
+    hierarchyRank: role.hierarchy_rank,
+  };
+}
 
 /**
- * POST /auth/login
+ * Issue a real session (access + refresh token pair, a persisted
+ * employee_login_sessions row, last-login stamp, and the accessible-forms
+ * set) for an Employee scoped to EXACTLY the given roles — Role-Based
+ * Login's shared completion path, used by both login() (employee holds a
+ * single active role, no selection needed) and selectRole() (employee
+ * picked one of several). `rolesToGrant` is always a single-role array in
+ * practice today, but this stays role-array-shaped (not role-singular)
+ * because hierarchyRank/capabilities elsewhere are computed as a
+ * MIN/union over an array — see getEffectiveHierarchyRank().
  *
- * @param {string} email
- * @param {string} password
+ * Deliberately does NOT return `businessUnits` — mapped Business Units are
+ * fetched on demand via GET /api/v1/employees/:id/business-units instead
+ * (frontend already has the employee's own id from `employee.id` in this
+ * same response), not carried in every login/refresh payload.
+ *
+ * @param {object} employee - with `.roles`/`.businessUnits` included (see authRepository.js)
+ * @param {object[]} rolesToGrant - the role(s) this session is scoped to
  * @param {string} [ipAddress]
  * @param {string} [userAgent]
- * @returns {Promise<{ accessToken, refreshToken, expiresIn, user, employee, roles, forms }>}
- * @throws {{ statusCode: number, message: string, isOperational: boolean }}
+ * @returns {Promise<{ accessToken, refreshToken, expiresIn, employee, roles, forms }>}
  */
-async function login(email, password, ipAddress, userAgent) {
-  const user = await authRepository.findUserByEmail(email);
+async function issueSession(employee, rolesToGrant, ipAddress, userAgent) {
+  const hierarchyRank = getEffectiveHierarchyRank(rolesToGrant);
+  const roleIds = rolesToGrant.map((role) => role.id);
+  const roleNames = rolesToGrant.map((role) => role.role_name);
+  // Role-Based Login always scopes a session to exactly one role by the
+  // time it reaches here (the caller already narrowed rolesToGrant down,
+  // whether that's the employee's sole role or the one they picked) — see
+  // config/jwt.js's generateTokens() doc comment for why this rides in the
+  // token itself rather than only in this response.
+  const activeRoleId = roleIds.length === 1 ? roleIds[0] : null;
 
-  if (!user) {
-    logger.warn('Login attempt with unregistered email', { email });
-    throw emailNotRegisteredError();
-  }
-
-  if (user.status !== 'active') {
-    logger.warn('Login attempt on inactive account', { userId: user.id });
-    const err = new Error('Your account has been deactivated. Please contact the administrator.');
-    err.statusCode = 403;
-    err.code = 'ACCOUNT_INACTIVE';
-    err.isOperational = true;
-    throw err;
-  }
-
-  if (!user.role || user.role.status !== 'active') {
-    logger.warn('Login attempt with no active role', { userId: user.id, roleId: user.role_id });
-    const err = new Error('No active role is assigned to your account. Please contact the administrator.');
-    err.statusCode = 403;
-    err.code = 'ROLE_INACTIVE';
-    err.isOperational = true;
-    throw err;
-  }
-
-  if (user.employee && (user.employee.status !== 'active' || user.employee.is_deleted)) {
-    logger.warn('Login attempt on inactive employee record', { userId: user.id, employeeId: user.employee.id });
-    const err = new Error('Your employee record is inactive. Please contact the administrator.');
-    err.statusCode = 403;
-    err.code = 'EMPLOYEE_INACTIVE';
-    err.isOperational = true;
-    throw err;
-  }
-
-  const isPasswordValid = await user.validatePassword(password);
-
-  if (!isPasswordValid) {
-    logger.warn('Login attempt with incorrect password', { userId: user.id });
-    throw invalidCredentialsError();
-  }
-
-  // No familyId passed — login always starts a brand NEW session lineage,
-  // never reuses one (that only happens on rotation — see refreshToken()).
-  const { accessToken, refreshToken, expiresIn, refreshExpiresIn, jti, familyId } = generateTokens(user);
+  const { accessToken, refreshToken, expiresIn, refreshExpiresIn, jti, familyId } = generateTokens({
+    id: employee.id,
+    email: employee.email,
+    roleIds,
+    roleNames,
+    hierarchyRank,
+    activeRoleId,
+  });
 
   await authRepository.createSession({
-    user_id: user.id,
+    employee_id: employee.id,
     refresh_token: refreshToken,
     jti,
     family_id: familyId,
@@ -187,62 +219,245 @@ async function login(email, password, ipAddress, userAgent) {
     user_agent: userAgent || null,
   });
 
-  authRepository.updateLastLogin(user.id).catch((updateErr) => {
-    logger.error('Failed to update last_login', { userId: user.id, error: updateErr.message });
-  });
+  await authRepository.updateLastLogin(employee.id);
 
-  logger.info('User logged in successfully', { userId: user.id, email: user.email });
+  const forms = await rbacService.getActiveFormsForRoles(roleIds, hierarchyRank);
 
-  // Only actively-mapped forms (role_form_mapping.status = true), grouped by
-  // module — inactive/unmapped forms are excluded entirely. Every role the
-  // user holds (primary + additional — see database/migrations/
-  // 20260850_add_user_additional_roles.sql) contributes its own mapped
-  // forms; getActiveFormsForRoles() unions and dedupes across all of them,
-  // exactly like it already does for req.capabilities — a role never gets
-  // treated as more or less entitled to its own forms because it's
-  // "additional" rather than primary. Platform Admin (hierarchy_rank === 1)
-  // implicitly sees every active form rather than relying on stored mapping
-  // rows — see rbacService.getActiveFormsForRoles().
-  const additionalRoleIds = (user.additionalRoles || []).map((role) => role.id);
-  const forms = await rbacService.getActiveFormsForRoles(
-    [user.role.id, ...additionalRoleIds],
-    user.role.hierarchy_rank
-  );
+  // is_original_data_visible is a policy flag derived FROM the employee's
+  // Business Units, not the mapped-BU list itself — kept here (unlike the
+  // BU list, see this function's doc comment) since existing consumers of
+  // the login response already read it off `roles[].is_original_data_visible`.
+  const activeBusinessUnits = getActiveBusinessUnits(employee);
+  const isOriginalDataVisible = extractIsOriginalDataVisible(activeBusinessUnits[0] || null);
 
-  const response = {
+  return {
     accessToken,
     refreshToken,
     expiresIn,
-    user: sanitiseUser(user),
-    // Per the RBAC redesign: login always returns both `user` and
-    // `employee` — `employee` is null for an account with no linked
-    // Employee record (every Admin/Manager tier that isn't also staff).
-    employee: user.employee ? user.employee.toJSON() : null,
-    roles: serialiseRoles(user.role, user.additionalRoles, extractIsOriginalDataVisible(user.company)),
+    employee: sanitiseEmployee(employee),
+    roles: rolesToGrant.map((role) => ({ ...buildRoleSummary(role), is_original_data_visible: isOriginalDataVisible })),
     forms,
   };
+}
 
-  // Additive, BU-Head-only field: the Companies ("BUs") this user is mapped
-  // to (see database/migrations/20260863_create_bu_head_company_mappings.sql),
-  // for the frontend's global BU selector. Every other role's login response
-  // is byte-for-byte unchanged — this key is simply absent for them.
-  if (user.role.role_name.toLowerCase() === 'bu head') {
-    const mappings = await buHeadCompanyMappingRepository.findMappingsForBuHead(user.id);
-    response.mapped_bu = mappings.map((mapping) => ({
-      id: mapping.company.id,
-      name: mapping.company.company_name,
-    }));
+// ─── Auth Service ─────────────────────────────────────────────────────────────
+
+/**
+ * Account-state gate shared by EVERY login path (password, Microsoft SSO, or
+ * any future identity provider) — must run identically regardless of how the
+ * caller's identity was established, so it is checked once here rather than
+ * duplicated per provider.
+ *
+ * @param {object} employee
+ * @returns {object[]} the employee's currently-active roles (never empty —
+ *   throws instead)
+ * @throws {{ statusCode: 403, code: 'ACCOUNT_INACTIVE'|'ROLE_INACTIVE' }}
+ */
+function assertEmployeeLoginEligible(employee) {
+  if (employee.status !== 'active' || employee.is_deleted) {
+    logger.warn('Login attempt on inactive/deleted employee', { employeeId: employee.id });
+    const err = new Error('Your account has been deactivated. Please contact the administrator.');
+    err.statusCode = 403;
+    err.code = 'ACCOUNT_INACTIVE';
+    err.isOperational = true;
+    throw err;
   }
 
-  return response;
+  const activeRoles = getActiveRoles(employee);
+  if (activeRoles.length === 0) {
+    logger.warn('Login attempt with no active role', { employeeId: employee.id });
+    const err = new Error('No active role is assigned to your account. Please contact the administrator.');
+    err.statusCode = 403;
+    err.code = 'ROLE_INACTIVE';
+    err.isOperational = true;
+    throw err;
+  }
+
+  return activeRoles;
 }
 
 /**
- * Invalidate a user session by revoking it (same soft-revoke mechanism as
- * rotation — see authRepository.revokeSessionByJti) so a subsequent replay
- * of this same refresh token is recognized as reuse, not silently
- * forgotten. Idempotent: an unparseable, unknown, or already-revoked token
- * still returns success from the client's perspective.
+ * Role-Based Login's shared completion step, once identity is established
+ * AND assertEmployeeLoginEligible() has already passed — an employee holding
+ * exactly one active role logs in directly; an employee holding MULTIPLE
+ * active roles does NOT get real tokens yet, instead gets
+ * `requiresRoleSelection: true` plus their role list and a short-lived
+ * `loginTicket`, completed via selectRole()/POST /auth/select-role. Used by
+ * BOTH login() (after a correct password) and loginWithMicrosoft() (after a
+ * verified Microsoft ID token) so this behavior can never drift between
+ * identity providers.
+ *
+ * @param {object} employee
+ * @param {object[]} activeRoles - from assertEmployeeLoginEligible()
+ * @param {string} [ipAddress]
+ * @param {string} [userAgent]
+ * @returns {Promise<{ accessToken, refreshToken, expiresIn, employee, roles, forms }
+ *   | { requiresRoleSelection: true, loginTicket: string, roles: object[] }>}
+ */
+async function completeAuthenticatedLogin(employee, activeRoles, ipAddress, userAgent) {
+  if (activeRoles.length > 1) {
+    logger.info('Login credentials verified; awaiting role selection', {
+      employeeId: employee.id,
+      roleCount: activeRoles.length,
+    });
+    return {
+      requiresRoleSelection: true,
+      loginTicket: signRoleSelectionTicket(employee.id),
+      roles: activeRoles.map(buildRoleSummary),
+    };
+  }
+
+  return issueSession(employee, activeRoles, ipAddress, userAgent);
+}
+
+/**
+ * POST /auth/login
+ *
+ * Role-Based Login: an employee holding exactly one active role logs in
+ * directly (unchanged from before). An employee holding MULTIPLE active
+ * roles does NOT get real tokens yet — instead gets `requiresRoleSelection:
+ * true` plus their role list and a short-lived `loginTicket` (credentials
+ * already verified at this point); the frontend must prompt them to pick
+ * one and complete login via selectRole()/POST /auth/select-role.
+ *
+ * @param {string} email
+ * @param {string} password
+ * @param {string} [ipAddress]
+ * @param {string} [userAgent]
+ * @returns {Promise<{ accessToken, refreshToken, expiresIn, employee, roles, forms }
+ *   | { requiresRoleSelection: true, loginTicket: string, roles: object[] }>}
+ * @throws {{ statusCode: number, message: string, isOperational: boolean }}
+ */
+async function login(email, password, ipAddress, userAgent) {
+  const employee = await authRepository.findEmployeeByEmail(email);
+
+  if (!employee || !employee.password) {
+    logger.warn('Login attempt with unregistered email', { email });
+    throw emailNotRegisteredError();
+  }
+
+  const activeRoles = assertEmployeeLoginEligible(employee);
+
+  const isPasswordValid = await employee.validatePassword(password);
+  if (!isPasswordValid) {
+    logger.warn('Login attempt with incorrect password', { employeeId: employee.id });
+    throw invalidCredentialsError();
+  }
+
+  logger.info('Employee logged in successfully', { employeeId: employee.id, email: employee.email });
+  return completeAuthenticatedLogin(employee, activeRoles, ipAddress, userAgent);
+}
+
+/**
+ * POST /auth/microsoft
+ *
+ * Microsoft Entra ID SSO login. The frontend completes an Authorization
+ * Code + PKCE sign-in via MSAL entirely client-side and hands this function
+ * only the resulting Microsoft ID token — nothing else in the request is
+ * ever trusted (see authController.loginWithMicrosoft(), authValidation.js's
+ * microsoftLoginSchema).
+ *
+ * Once microsoftAuthService.verifyMicrosoftIdToken() has verified the
+ * token's signature/issuer/audience/expiry/tenant and returned a trusted
+ * email, this function falls into EXACTLY the same identity → account-state
+ * → role-selection-or-session pipeline as login() — assertEmployeeLoginEligible()
+ * and completeAuthenticatedLogin() are the same functions, not
+ * reimplementations, so an Employee's authorization behavior (active-role
+ * checks, multi-role selection, issued tokens, roles, forms, business
+ * units) can never differ based on which identity provider was used.
+ *
+ * Employee lookup deliberately does NOT require `employee.password` to be
+ * set (unlike login()) — an employee who signs in exclusively via Microsoft
+ * SSO may have no password at all, and that must not block them.
+ *
+ * @param {string} idToken - raw Microsoft ID token from the frontend
+ * @param {string} [ipAddress]
+ * @param {string} [userAgent]
+ * @returns {Promise<{ accessToken, refreshToken, expiresIn, employee, roles, forms }
+ *   | { requiresRoleSelection: true, loginTicket: string, roles: object[] }>}
+ * @throws {{ statusCode: number, message: string, isOperational: boolean }}
+ */
+async function loginWithMicrosoft(idToken, ipAddress, userAgent) {
+  const { email, oid } = await microsoftAuthService.verifyMicrosoftIdToken(idToken);
+
+  const employee = await authRepository.findEmployeeByEmail(email);
+  if (!employee) {
+    logger.warn('Microsoft SSO login attempt with unregistered email', { email });
+    throw emailNotRegisteredError();
+  }
+
+  const activeRoles = assertEmployeeLoginEligible(employee);
+
+  logger.info('Employee logged in successfully via Microsoft SSO', { employeeId: employee.id, email: employee.email });
+
+  // Best-effort: remember Microsoft's stable identifier for this employee
+  // for future audit/hardening. Never blocks login on failure — email is,
+  // and remains, the sole login-matching key.
+  if (oid) {
+    authRepository.updateMicrosoftObjectId(employee.id, oid).catch((err) => {
+      logger.warn('Failed to persist microsoft_object_id', { employeeId: employee.id, error: err.message });
+    });
+  }
+
+  return completeAuthenticatedLogin(employee, activeRoles, ipAddress, userAgent);
+}
+
+/**
+ * POST /auth/select-role
+ *
+ * Completes Role-Based Login for an employee who holds multiple active
+ * roles: exchanges the short-lived `loginTicket` login() issued (proof
+ * that credentials were already verified) plus the chosen `roleId` for a
+ * real session scoped to ONLY that role.
+ *
+ * @param {string} loginTicket - from login()'s `requiresRoleSelection` response
+ * @param {number} roleId - must be one of the SAME employee's currently active roles
+ * @param {string} [ipAddress]
+ * @param {string} [userAgent]
+ * @returns {Promise<{ accessToken, refreshToken, expiresIn, employee, roles, forms }>}
+ * @throws {{ statusCode: number, message: string, isOperational: boolean }}
+ */
+async function selectRole(loginTicket, roleId, ipAddress, userAgent) {
+  let decoded;
+  try {
+    decoded = verifyToken(loginTicket);
+  } catch (err) {
+    throw invalidLoginTicketError();
+  }
+
+  if (decoded.type !== ROLE_SELECTION_TICKET_TYPE) {
+    throw invalidLoginTicketError();
+  }
+
+  const employee = await authRepository.findEmployeeById(decoded.id);
+  if (!employee || employee.status !== 'active' || employee.is_deleted) {
+    logger.warn('Role selection for inactive/missing employee', { employeeId: decoded.id });
+    const err = new Error('Your account has been deactivated. Please contact the administrator.');
+    err.statusCode = 403;
+    err.code = 'ACCOUNT_INACTIVE';
+    err.isOperational = true;
+    throw err;
+  }
+
+  const activeRoles = getActiveRoles(employee);
+  const selectedRole = activeRoles.find((role) => role.id === roleId);
+  if (!selectedRole) {
+    logger.warn('Role selection for a role no longer available', { employeeId: employee.id, roleId });
+    const err = new Error('The selected role is not available for this account.');
+    err.statusCode = 403;
+    err.code = 'ROLE_NOT_AVAILABLE';
+    err.isOperational = true;
+    throw err;
+  }
+
+  logger.info('Employee logged in successfully (role selected)', { employeeId: employee.id, roleId });
+  return issueSession(employee, [selectedRole], ipAddress, userAgent);
+}
+
+/**
+ * Invalidate an employee session by revoking it (soft-revoke, same
+ * mechanism as rotation) so a subsequent replay of this same refresh token
+ * is recognized as reuse, not silently forgotten. Idempotent.
  *
  * @param {string} refreshToken
  * @returns {Promise<void>}
@@ -268,51 +483,18 @@ async function logout(refreshToken) {
     await authRepository.revokeSessionByJti(decoded.jti);
   }
 
-  logger.info('Session revoked on logout', { userId: decoded.id });
+  logger.info('Session revoked on logout', { employeeId: decoded.id });
 }
 
 /**
  * Exchange a valid refresh token for a fresh access + refresh token pair,
- * with full ROTATION + REPLAY PREVENTION:
- *
- *  1. Cryptographically verify the refresh token (signature, expiry,
- *     audience — verifyRefreshToken() already rejects an access token
- *     presented here, since access/refresh tokens are signed with
- *     different secrets under different audiences).
- *  2. Require a `jti` claim — a refresh token issued before this fix has
- *     none and can never be safely tracked/rotated; reject it (forces a
- *     one-time re-login for any session started before this change shipped).
- *  3. Look up the session by jti REGARDLESS of revoked state, to tell
- *     apart three cases: unknown jti (invalid), an ALREADY-REVOKED jti
- *     (replay — the same token being reused after it was already rotated
- *     or logged out) vs. still-live. A replay revokes the ENTIRE token
- *     family (every descendant of the same login), not just this one
- *     token, since reuse of an old token is a signal it may have been
- *     stolen and both the legitimate and illegitimate holder may now have
- *     valid-looking tokens.
- *  4. Confirm the owning user is still active.
- *  5. Generate a new token pair, reusing the SAME family_id (rotation
- *     stays within one session lineage; only login starts a new one).
- *  6. ATOMICALLY consume (soft-revoke) the presented token by jti — see
- *     authRepository.consumeSessionByJti()'s doc comment for exactly how
- *     this makes concurrent replay of the SAME token safe: only one of two
- *     simultaneous requests presenting the same refresh token can ever
- *     affect a row, so only one can ever receive a new token pair. If this
- *     call reports 0 rows affected, another request already won the race
- *     between our step-3 read and here — the freshly generated tokens
- *     below are discarded, never persisted or returned.
- *  7. Persist the new session and return the new pair.
- *
- * Steps 6-7 run inside one transaction: a crash between consuming the old
- * session and persisting the new one leaves the old token dead but issues
- * no orphaned "new" token that was never actually stored — the caller
- * simply has to log in again, which is a safe failure mode, never a
- * security one.
+ * with full ROTATION + REPLAY PREVENTION — same contract as before, now
+ * keyed on Employee instead of User.
  *
  * @param {string} refreshToken
  * @param {string} [ipAddress]
  * @param {string} [userAgent]
- * @returns {Promise<{ accessToken: string, refreshToken: string, expiresIn: string, user: object }>}
+ * @returns {Promise<{ accessToken: string, refreshToken: string, expiresIn: string, employee: object, roles: object[], forms: object }>}
  * @throws {{ statusCode: number, message: string, isOperational: boolean }}
  */
 async function refreshToken(refreshToken, ipAddress, userAgent) {
@@ -332,30 +514,27 @@ async function refreshToken(refreshToken, ipAddress, userAgent) {
   }
 
   if (!decoded.jti) {
-    logger.warn('Refresh token missing jti claim — issued before rotation fix, rejecting', { userId: decoded.id });
+    logger.warn('Refresh token missing jti claim — issued before rotation fix, rejecting', { employeeId: decoded.id });
     throw invalidRefreshTokenError();
   }
 
   const existingSession = await authRepository.findSessionByJti(decoded.jti);
 
   if (!existingSession) {
-    logger.warn('Refresh token jti not found in any session', { userId: decoded.id });
+    logger.warn('Refresh token jti not found in any session', { employeeId: decoded.id });
     throw invalidRefreshTokenError();
   }
 
-  if (existingSession.user_id !== decoded.id) {
-    logger.warn('Refresh token jti does not belong to the claimed user — rejecting', {
-      claimedUserId: decoded.id, sessionUserId: existingSession.user_id,
+  if (existingSession.employee_id !== decoded.id) {
+    logger.warn('Refresh token jti does not belong to the claimed employee — rejecting', {
+      claimedEmployeeId: decoded.id, sessionEmployeeId: existingSession.employee_id,
     });
     throw invalidRefreshTokenError();
   }
 
   if (existingSession.revoked_at) {
-    // REPLAY: this exact token was already consumed (rotated or logged
-    // out) at some point in the past. Kill the whole family — if it was
-    // stolen, this stops both the legitimate and illegitimate holder.
     logger.warn('Refresh token reuse detected — revoking entire session family', {
-      userId: decoded.id, familyId: existingSession.family_id, jti: decoded.jti,
+      employeeId: decoded.id, familyId: existingSession.family_id, jti: decoded.jti,
     });
     if (existingSession.family_id) {
       await authRepository.revokeFamily(existingSession.family_id);
@@ -367,10 +546,10 @@ async function refreshToken(refreshToken, ipAddress, userAgent) {
     throw invalidRefreshTokenError();
   }
 
-  const { user } = existingSession;
+  const { employee } = existingSession;
 
-  if (!user || user.status !== 'active') {
-    logger.warn('Token refresh for inactive/missing user account', { userId: decoded.id });
+  if (!employee || employee.status !== 'active' || employee.is_deleted) {
+    logger.warn('Token refresh for inactive/missing employee account', { employeeId: decoded.id });
     await authRepository.revokeSessionByJti(decoded.jti);
     const err = new Error('Account is inactive. Please contact the administrator.');
     err.statusCode = 403;
@@ -379,8 +558,9 @@ async function refreshToken(refreshToken, ipAddress, userAgent) {
     throw err;
   }
 
-  if (!user.role || user.role.status !== 'active') {
-    logger.warn('Token refresh for account with no active role', { userId: decoded.id });
+  const activeRoles = getActiveRoles(employee);
+  if (activeRoles.length === 0) {
+    logger.warn('Token refresh for account with no active role', { employeeId: decoded.id });
     await authRepository.revokeSessionByJti(decoded.jti);
     const err = new Error('No active role is assigned to your account. Please contact the administrator.');
     err.statusCode = 403;
@@ -389,25 +569,47 @@ async function refreshToken(refreshToken, ipAddress, userAgent) {
     throw err;
   }
 
-  if (user.employee && (user.employee.status !== 'active' || user.employee.is_deleted)) {
-    logger.warn('Token refresh for inactive employee record', { userId: decoded.id, employeeId: user.employee.id });
-    await authRepository.revokeSessionByJti(decoded.jti);
-    const err = new Error('Your employee record is inactive. Please contact the administrator.');
-    err.statusCode = 403;
-    err.code = 'EMPLOYEE_INACTIVE';
-    err.isOperational = true;
-    throw err;
+  // Role-Based Login: carry the ORIGINAL session's role scope forward
+  // across rotation — same reasoning as middlewares/auth.js's identical
+  // narrowing. `decoded.activeRoleId` rides in the refresh token itself
+  // (config/jwt.js's generateTokens()), so this needs no session-table
+  // schema change to remember which role a session was issued as. If that
+  // role was since deactivated/removed, force re-login rather than
+  // silently widening back out to every currently active role.
+  let effectiveRoles = activeRoles;
+  if (decoded.activeRoleId != null) {
+    const stillActiveRole = activeRoles.find((role) => role.id === decoded.activeRoleId);
+    if (!stillActiveRole) {
+      logger.warn('Refresh token\'s selected role is no longer active — forcing re-login', {
+        employeeId: decoded.id, activeRoleId: decoded.activeRoleId,
+      });
+      await authRepository.revokeSessionByJti(decoded.jti);
+      const err = new Error('Your selected role is no longer active. Please log in again.');
+      err.statusCode = 403;
+      err.code = 'ROLE_INACTIVE';
+      err.isOperational = true;
+      throw err;
+    }
+    effectiveRoles = [stillActiveRole];
   }
 
+  const hierarchyRank = getEffectiveHierarchyRank(effectiveRoles);
+  const roleIds = effectiveRoles.map((role) => role.id);
+  const roleNames = effectiveRoles.map((role) => role.role_name);
+  const activeRoleId = decoded.activeRoleId ?? (roleIds.length === 1 ? roleIds[0] : null);
+
   // Reuse the existing family — rotation stays within one session lineage.
-  const tokens = generateTokens(user, { familyId: existingSession.family_id });
+  const tokens = generateTokens(
+    { id: employee.id, email: employee.email, roleIds, roleNames, hierarchyRank, activeRoleId },
+    { familyId: existingSession.family_id }
+  );
 
   let consumed = 0;
   await sequelize.transaction(async (transaction) => {
     consumed = await authRepository.consumeSessionByJti(decoded.jti, tokens.jti, { transaction });
     if (consumed === 1) {
       await authRepository.createSession({
-        user_id: user.id,
+        employee_id: employee.id,
         refresh_token: tokens.refreshToken,
         jti: tokens.jti,
         family_id: tokens.familyId,
@@ -419,28 +621,20 @@ async function refreshToken(refreshToken, ipAddress, userAgent) {
   });
 
   if (consumed === 0) {
-    // Lost a concurrent race against another request presenting the SAME
-    // token — the freshly generated tokens above were never persisted and
-    // are discarded here; only the winner's tokens are ever valid.
-    logger.warn('Refresh token was already consumed by a concurrent request', { userId: decoded.id, jti: decoded.jti });
+    logger.warn('Refresh token was already consumed by a concurrent request', { employeeId: decoded.id, jti: decoded.jti });
     throw invalidRefreshTokenError();
   }
 
-  logger.info('Token refreshed successfully (rotated)', { userId: user.id, oldJti: decoded.jti, newJti: tokens.jti });
+  logger.info('Token refreshed successfully (rotated)', { employeeId: employee.id, oldJti: decoded.jti, newJti: tokens.jti });
 
-  const forms = user.role
-    ? await rbacService.getActiveFormsForRoles(
-        [user.role.id, ...(user.additionalRoles || []).map((role) => role.id)],
-        user.role.hierarchy_rank
-      )
-    : {};
+  const forms = await rbacService.getActiveFormsForRoles(roleIds, hierarchyRank);
 
   return {
     accessToken: tokens.accessToken,
     refreshToken: tokens.refreshToken,
     expiresIn: tokens.expiresIn,
-    user: sanitiseUser(user),
-    roles: serialiseRoles(user.role, user.additionalRoles, extractIsOriginalDataVisible(user.company)),
+    employee: sanitiseEmployee(employee),
+    roles: effectiveRoles.map(buildRoleSummary),
     forms,
   };
 }
@@ -448,59 +642,57 @@ async function refreshToken(refreshToken, ipAddress, userAgent) {
 /**
  * PUT /auth/change-password
  *
- * Directly sets a new password for the already-authenticated User — no
- * current-password check. Distinct from userService.changePassword() (the
- * /users/:id/change-password self-service flow, which verifies the OLD
- * password).
+ * Directly sets a new password for the already-authenticated Employee —
+ * no current-password check.
  *
- * `userId` MUST be resolved from the verified JWT (req.userId, set by
- * middlewares/auth.js) — never from the request body — so an account can
- * only ever change its own password.
+ * `employeeId` MUST be resolved from the verified JWT (req.employeeId, set
+ * by middlewares/auth.js) — never from the request body.
  *
- * @param {number} userId - id resolved from the JWT
+ * @param {number} employeeId - id resolved from the JWT
  * @param {string} newPassword - plaintext, already Joi-validated against the password policy
- * @param {number} [companyId] - resolved from the JWT/DB re-fetch, scopes the update
  * @returns {Promise<{ message: string }>}
- * @throws {Error} statusCode 404 'User not found.'
+ * @throws {Error} statusCode 404 'Employee not found.'
  */
-async function changePassword(userId, newPassword, companyId) {
-  const updated = await userRepository.update(userId, { password: newPassword }, {}, companyId);
+async function changePassword(employeeId, newPassword) {
+  const updated = await employeeRepository.updatePassword(employeeId, newPassword);
   if (!updated) {
-    const err = new Error('User not found.');
+    const err = new Error('Employee not found.');
     err.statusCode = 404;
-    err.code = 'USER_NOT_FOUND';
+    err.code = 'EMPLOYEE_NOT_FOUND';
     err.isOperational = true;
     throw err;
   }
 
-  logger.info('Password changed successfully', { userId });
+  logger.info('Password changed successfully', { employeeId });
 
   return { message: 'Password updated successfully.' };
 }
 
 /**
- * Retrieve the full profile for the currently authenticated user.
+ * Retrieve the full profile for the currently authenticated employee.
  *
- * @param {number} userId
- * @returns {Promise<object>} Sanitised user object with role and employee data.
+ * @param {number} employeeId
+ * @returns {Promise<object>} Sanitised employee object with roles/BUs.
  * @throws {{ statusCode: number, message: string, isOperational: boolean }}
  */
-async function getProfile(userId) {
-  const user = await authRepository.findUserById(userId);
+async function getProfile(employeeId) {
+  const employee = await authRepository.findEmployeeById(employeeId);
 
-  if (!user) {
-    const err = new Error('User not found.');
+  if (!employee) {
+    const err = new Error('Employee not found.');
     err.statusCode = 404;
-    err.code = 'USER_NOT_FOUND';
+    err.code = 'EMPLOYEE_NOT_FOUND';
     err.isOperational = true;
     throw err;
   }
 
-  return sanitiseUser(user);
+  return sanitiseEmployee(employee);
 }
 
 module.exports = {
   login,
+  loginWithMicrosoft,
+  selectRole,
   logout,
   refreshToken,
   getProfile,

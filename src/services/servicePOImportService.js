@@ -6,6 +6,7 @@ const servicePORepository = require('../repositories/servicePORepository');
 const servicePOHierarchyRepository = require('../repositories/servicePOHierarchyRepository');
 const { generatePOCode } = require('../helpers/codeGenerator');
 const { createServicePOSchema } = require('../validations/servicePOValidation');
+const { resolveCreateCompanyId } = require('./companyAccessControlService');
 const logger = require('../utils/logger');
 
 // Sentinel stored in ctx.employeeByName when two employees in the same
@@ -64,11 +65,6 @@ const HEADER_MAP = {
   'end date': 'end_date',
   'end_date': 'end_date',
 
-  'expected man hours': 'expected_man_hours',
-  'expected hours': 'expected_man_hours',
-  'man hours': 'expected_man_hours',
-  'expected_man_hours': 'expected_man_hours',
-
   // NOTE: Is Billable is intentionally NOT mapped here — it is always derived
   // from the selected Service Type's category (see resolveRowFields()), never read
   // from the sheet, so any such column is ignored.
@@ -83,9 +79,6 @@ const HEADER_MAP = {
 
   'invoice frequency': 'invoice_frequency',
   'invoice_frequency': 'invoice_frequency',
-
-  'invoice amount': 'invoice_amount',
-  'invoice_amount': 'invoice_amount',
 
   'status': 'status',
 
@@ -465,29 +458,10 @@ function resolveRowFields(raw, ctx) {
     }
   }
 
-  // ── expected_man_hours ───────────────────────────────────────────────────────
-  if (!isBlank(raw.expected_man_hours)) {
-    const hours = parseNumber(raw.expected_man_hours);
-    if (hours === null) {
-      errors.push(`Expected man hours "${raw.expected_man_hours}" is not a valid number.`);
-      invalidFields.add('expected_man_hours');
-    } else {
-      candidate.expected_man_hours = hours;
-    }
-  }
 
   // ── free-text / enum fields (Joi validates length, enum membership) ─────────
   if (!isBlank(raw.service_description)) candidate.service_description = String(raw.service_description).trim();
   if (!isBlank(raw.invoice_frequency)) candidate.invoice_frequency = String(raw.invoice_frequency).trim().toLowerCase();
-  if (!isBlank(raw.invoice_amount)) {
-    const amt = parseNumber(raw.invoice_amount);
-    if (amt === null) {
-      errors.push(`Invoice amount "${raw.invoice_amount}" is not a valid number.`);
-      invalidFields.add('invoice_amount');
-    } else {
-      candidate.invoice_amount = amt;
-    }
-  }
   if (!isBlank(raw.status)) candidate.status = String(raw.status).trim().toLowerCase();
 
   // ── delegate required/length/range/enum/pattern rules to the shared schema ──
@@ -795,10 +769,21 @@ function reportRemainingRowsAsSkipped(rows, failedRaw, ctx, alsoExclude = []) {
  *
  * @param {string} filePath - Absolute path to the saved upload file
  * @param {number} userId   - ID of the authenticated user performing the import
- * @param {number} companyId
+ * @param {import('express').Request} req - for resolveCreateCompanyId: a
+ *   BU-scoped actor's own req.companyId always wins; a company-less
+ *   Admin/Entity Admin must supply `company_id` in the multipart form body,
+ *   validated against their own owned Companies — replaces the previous
+ *   raw `req.companyId` passthrough, which crashed for those actors.
  * @returns {Promise<{ total, imported, existing_po_reused, hierarchy_created, skipped, error_rows }>}
  */
-async function importServicePOs(filePath, userId, companyId) {
+async function importServicePOs(filePath, userId, req) {
+  const bodyCompanyId = req.body && req.body.company_id ? parseInt(req.body.company_id, 10) : undefined;
+  const companyId = await resolveCreateCompanyId(
+    { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId },
+    bodyCompanyId,
+    'a Service PO import'
+  );
+
   // 1. Parse Excel / CSV
   const rawRows = parseServicePOFile(filePath);
 

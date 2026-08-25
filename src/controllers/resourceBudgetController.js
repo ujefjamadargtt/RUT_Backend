@@ -21,7 +21,7 @@ const getMappedEmployees = async (req, res) => {
       return sendError(res, 'Invalid Service PO ID.', 400);
     }
 
-    const employees = await resourceBudgetService.getMappedEmployees(servicePOId, req.companyId);
+    const employees = await resourceBudgetService.getMappedEmployees(servicePOId, req);
     return sendSuccess(res, employees, 'Mapped employees fetched successfully.');
   } catch (error) {
     if (error.statusCode === 404) {
@@ -119,7 +119,7 @@ const listByServicePO = async (req, res) => {
       return sendError(res, 'Invalid Service PO ID.', 400);
     }
 
-    const records = await resourceBudgetService.listByServicePO(servicePOId, req.companyId);
+    const records = await resourceBudgetService.listByServicePO(servicePOId, req);
     return sendSuccess(res, records, 'Resource budgets fetched successfully.');
   } catch (error) {
     if (error.statusCode === 404) {
@@ -135,7 +135,7 @@ const listByServicePO = async (req, res) => {
  */
 const list = async (req, res) => {
   try {
-    const records = await resourceBudgetService.list(req.query, req.companyId);
+    const records = await resourceBudgetService.list(req.query, req);
     return sendSuccess(res, records, 'Resource budgets fetched successfully.');
   } catch (error) {
     logger.error('list (ResourceBudget) error', { error: error.message, query: req.query });

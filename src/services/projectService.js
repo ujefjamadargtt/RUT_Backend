@@ -2,6 +2,7 @@
 
 const projectRepository = require('../repositories/projectRepository');
 const clientRepository = require('../repositories/clientRepository');
+const { resolveActorCompanyScope, resolveOptionalCreateCompanyId } = require('./companyAccessControlService');
 const { generateProjectCode } = require('../helpers/codeGenerator');
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
@@ -20,7 +21,8 @@ const logger = require('../utils/logger');
  * @param {object} query - Express req.query (page, limit, status, search, sort_by, sort_order)
  * @returns {Promise<{ data: Project[], meta: object }>}
  */
-const getAll = async (query = {}, companyId) => {
+const getAll = async (query = {}, authContext) => {
+  const companyId = await resolveActorCompanyScope(authContext);
   const { page, limit, offset } = getPaginationParams(query);
 
   const filters = {
@@ -28,6 +30,12 @@ const getAll = async (query = {}, companyId) => {
     status: query.status || 'active',
     client_id: query.client_id ? parseInt(query.client_id, 10) : null,
     companyId,
+    // A company-less Admin/Entity Admin (companyId resolved as an array of
+    // owned Company ids) must still see their OWN Project(s) created with
+    // no Business Unit assigned yet (company_id NULL) — see
+    // projectRepository.companyScope()'s doc comment. No-op for a BU-scoped
+    // actor (companyId a plain number there, never an array).
+    createdBy: authContext.employeeId,
   };
 
   const sort = {
@@ -59,8 +67,9 @@ const getAll = async (query = {}, companyId) => {
  * @param {number} companyId
  * @returns {Promise<Project>}
  */
-const getById = async (id, companyId) => {
-  const project = await projectRepository.findById(id, companyId);
+const getById = async (id, authContext) => {
+  const companyId = await resolveActorCompanyScope(authContext);
+  const project = await projectRepository.findById(id, companyId, authContext.employeeId);
 
   if (!project) {
     const err = new Error('Project not found.');
@@ -81,15 +90,36 @@ const getById = async (id, companyId) => {
  * for existence, active status, and same-company membership, the same
  * pattern every other cross-entity FK in this codebase follows.
  *
- * @param {object} data   - Validated body (client_id, project_name, project_description, status, [project_code])
+ * @param {object} data   - Validated body (client_id, project_name, project_description, status, [project_code], [company_id])
  * @param {number} userId
  * @param {object} req
  * @returns {Promise<Project>}
  */
 const create = async (data, userId, req) => {
-  const companyId = req.companyId;
+  const { company_id: bodyCompanyId, ...fields } = data;
+  const authContext = { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId };
+  const companyId = await resolveOptionalCreateCompanyId(authContext, bodyCompanyId);
+  data = fields;
 
-  const client = await clientRepository.findById(data.client_id, companyId);
+  // Client lookup: when this Project is being created WITH a Business
+  // Unit, `companyId` is that one concrete company and the referenced
+  // Client must belong to it, same as before. When a company-less actor
+  // creates a Project with NO Business Unit, the Client they picked can
+  // either belong to one of that actor's OWN owned Companies, or itself
+  // have no Business Unit — companyScope()'s array form can't express
+  // "IN (...) OR IS NULL" (SQL IN never matches NULL), so fetch unscoped
+  // and verify manually instead (same pattern as
+  // servicePOService.js's assertValidDeliveryHead()).
+  let client;
+  if (companyId != null) {
+    client = await clientRepository.findById(data.client_id, companyId);
+  } else {
+    const ownedCompanyIds = await resolveActorCompanyScope(authContext);
+    const candidate = await clientRepository.findByIdUnscoped(data.client_id);
+    const clientInScope =
+      candidate && (candidate.company_id === null || ownedCompanyIds.includes(candidate.company_id));
+    client = clientInScope ? candidate : null;
+  }
   if (!client) {
     const err = new Error('Client not found.');
     err.statusCode = 404;
@@ -98,6 +128,16 @@ const create = async (data, userId, req) => {
   if (client.status !== 'active') {
     const err = new Error('Cannot create a Project for an inactive client.');
     err.statusCode = 400;
+    throw err;
+  }
+
+  // Reject a duplicate project_name up front (case-insensitive, scoped to
+  // this company) — project_code uniqueness alone doesn't stop the same
+  // Project from being entered twice under two different codes.
+  const duplicateName = await projectRepository.findByName(data.project_name, companyId);
+  if (duplicateName) {
+    const err = new Error(`Project "${data.project_name}" already exists.`);
+    err.statusCode = 409;
     throw err;
   }
 
@@ -153,14 +193,19 @@ const create = async (data, userId, req) => {
  * @returns {Promise<Project>}
  */
 const update = async (id, data, userId, req) => {
-  const companyId = req.companyId;
+  const scope = await resolveActorCompanyScope({
+    companyId: req.companyId,
+    hierarchyRank: req.hierarchyRank,
+    employeeId: req.employeeId,
+  });
 
-  const existing = await projectRepository.findById(id, companyId);
+  const existing = await projectRepository.findById(id, scope, req.employeeId);
   if (!existing) {
     const err = new Error('Project not found.');
     err.statusCode = 404;
     throw err;
   }
+  const companyId = existing.company_id;
 
   // If client_id is being changed, validate the new client — same
   // conditional-on-change pattern servicePOService.update() uses.
@@ -182,6 +227,17 @@ const update = async (id, data, userId, req) => {
     const conflict = await projectRepository.findByCode(data.project_code, companyId);
     if (conflict) {
       const err = new Error(`Project code "${data.project_code}" is already in use.`);
+      err.statusCode = 409;
+      throw err;
+    }
+  }
+
+  // Same rule as create() — a renamed project can't collide with another
+  // project's name in the same company.
+  if (data.project_name && data.project_name.trim().toLowerCase() !== existing.project_name.toLowerCase()) {
+    const nameConflict = await projectRepository.findByName(data.project_name, companyId);
+    if (nameConflict && nameConflict.id !== id) {
+      const err = new Error(`Project "${data.project_name}" already exists.`);
       err.statusCode = 409;
       throw err;
     }
@@ -223,9 +279,13 @@ const update = async (id, data, userId, req) => {
  * @returns {Promise<void>}
  */
 const deleteProject = async (id, userId, req) => {
-  const companyId = req.companyId;
+  const scope = await resolveActorCompanyScope({
+    companyId: req.companyId,
+    hierarchyRank: req.hierarchyRank,
+    employeeId: req.employeeId,
+  });
 
-  const existing = await projectRepository.findById(id, companyId);
+  const existing = await projectRepository.findById(id, scope, req.employeeId);
   if (!existing) {
     const err = new Error('Project not found.');
     err.statusCode = 404;
@@ -238,7 +298,7 @@ const deleteProject = async (id, userId, req) => {
     throw err;
   }
 
-  const poCount = await projectRepository.countServicePOsByProject(id, companyId);
+  const poCount = await projectRepository.countServicePOsByProject(id, existing.company_id);
   if (poCount > 0) {
     const err = new Error(
       `Cannot delete project "${existing.project_name}". ` +
@@ -249,7 +309,7 @@ const deleteProject = async (id, userId, req) => {
     throw err;
   }
 
-  await projectRepository.softDelete(id, userId, companyId);
+  await projectRepository.softDelete(id, userId, existing.company_id);
 
   await createAuditLog(
     userId,
@@ -267,11 +327,12 @@ const deleteProject = async (id, userId, req) => {
 /**
  * Return a lightweight list of all active projects — for form dropdowns.
  *
- * @param {number} companyId
+ * @param {object} authContext - { companyId, hierarchyRank, employeeId }
  * @returns {Promise<Project[]>}
  */
-const getActiveProjects = async (companyId) => {
-  return projectRepository.getActiveProjects(companyId);
+const getActiveProjects = async (authContext) => {
+  const companyId = await resolveActorCompanyScope(authContext);
+  return projectRepository.getActiveProjects(companyId, authContext.employeeId);
 };
 
 module.exports = {

@@ -1,7 +1,7 @@
 'use strict';
 
 const employeeTimesheetService = require('../services/employeeTimesheetService');
-const { sendSuccess, sendError, sendNotFound } = require('../utils/response');
+const { sendSuccess, sendError, sendNotFound, sendPaginated } = require('../utils/response');
 
 /**
  * Employee Timesheet Controller (Employee Self Timesheet module)
@@ -120,6 +120,54 @@ const updateEntry = async (req, res, next) => {
 };
 
 /**
+ * POST /api/v1/employee-timesheets/time-entries
+ * The dedicated Time Entry form — ADDS the given Start Time/End Time
+ * segments to whatever this Module/Task already has for this date, rather
+ * than replacing the whole day (createEntry) or the whole entry
+ * (updateEntry). Find-or-creates the underlying work log entry.
+ */
+const addTimeEntries = async (req, res, next) => {
+  try {
+    const entry = await employeeTimesheetService.addTimeEntries(req.employeeId, req.companyId, req.body);
+    return sendSuccess(res, entry, 'Time entries added successfully.');
+  } catch (err) {
+    handleServiceError(err, res, next);
+  }
+};
+
+/**
+ * PUT /api/v1/employee-timesheets/entries/:id/resubmit
+ * Rejected -> Pending, no body required — the backend decides the target
+ * status, never the caller.
+ */
+const resubmitEntry = async (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) {
+      return sendError(res, 'Invalid timesheet entry ID.', 400);
+    }
+    const entry = await employeeTimesheetService.resubmitEntry(req.employeeId, req.companyId, id);
+    return sendSuccess(res, entry, 'Timesheet entry resubmitted successfully.');
+  } catch (err) {
+    handleServiceError(err, res, next);
+  }
+};
+
+/**
+ * GET /api/v1/employee-timesheets/entries
+ * Flat list of the caller's own entries (id, status, rejection_remark, ...)
+ * — the Employee Work Log list/history view.
+ */
+const getEntries = async (req, res, next) => {
+  try {
+    const { data, meta } = await employeeTimesheetService.getEntries(req.employeeId, req.companyId, req.query);
+    return sendPaginated(res, data, meta, 'Timesheet entries fetched successfully.');
+  } catch (err) {
+    handleServiceError(err, res, next);
+  }
+};
+
+/**
  * DELETE /api/v1/employee-timesheets/entries/:id
  */
 const deleteEntry = async (req, res, next) => {
@@ -142,5 +190,8 @@ module.exports = {
   getProjects,
   createEntry,
   updateEntry,
+  addTimeEntries,
+  resubmitEntry,
+  getEntries,
   deleteEntry,
 };

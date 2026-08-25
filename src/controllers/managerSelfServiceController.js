@@ -55,15 +55,15 @@ const getTimesheets = async (req, res) => {
 const approveTimesheet = async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
-    if (isNaN(id)) return sendError(res, 'Invalid Timesheet ID.', 400);
+    if (isNaN(id)) return sendError(res, 'Invalid work log entry ID.', 400);
 
-    const timesheet = await managerSelfServiceService.approveTimesheet(
+    const entry = await managerSelfServiceService.approveTimesheet(
       req.userId, id, req.companyId, req.userId, getIpAddress(req)
     );
-    return sendSuccess(res, timesheet, 'Timesheet approved successfully.');
+    return sendSuccess(res, entry, 'Work log entry approved successfully.');
   } catch (error) {
     if (error.statusCode === 403) return sendError(res, error.message, 403);
-    if (error.statusCode === 404) return sendNotFound(res, 'Timesheet');
+    if (error.statusCode === 404) return sendNotFound(res, 'Work log entry');
     if (error.statusCode === 409) return sendError(res, error.message, 409);
     logger.error('approveTimesheet error', { error: error.message, userId: req.userId });
     return sendError(res, error.message, error.statusCode || 500);
@@ -102,6 +102,24 @@ const bulkApproveTimesheets = async (req, res) => {
     if (error.statusCode === 403) return sendError(res, error.message, 403);
     if (error.statusCode === 404) return sendNotFound(res, 'Employee');
     logger.error('bulkApproveTimesheets error', { error: error.message, userId: req.userId });
+    return sendError(res, error.message, error.statusCode || 500);
+  }
+};
+
+const rejectWorkLogEntry = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) return sendError(res, 'Invalid work log entry ID.', 400);
+
+    const entry = await managerSelfServiceService.rejectWorkLogEntry(
+      req.userId, id, req.body.remark, req.companyId, req.userId, getIpAddress(req)
+    );
+    return sendSuccess(res, entry, 'Work log entry rejected successfully.');
+  } catch (error) {
+    if (error.statusCode === 403) return sendError(res, error.message, 403);
+    if (error.statusCode === 404) return sendNotFound(res, 'Work log entry');
+    if (error.statusCode === 409) return sendError(res, error.message, 409);
+    logger.error('rejectWorkLogEntry error', { error: error.message, userId: req.userId });
     return sendError(res, error.message, error.statusCode || 500);
   }
 };
@@ -190,6 +208,7 @@ module.exports = {
   approveTimesheet,
   getApprovalSummary,
   bulkApproveTimesheets,
+  rejectWorkLogEntry,
   assignServicePO,
   removeServicePO,
   mapEmployee,

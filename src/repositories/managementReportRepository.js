@@ -3,6 +3,22 @@
 const { sequelize } = require('../models');
 const { QueryTypes } = require('sequelize');
 
+// An Employee created after the Employee-Business-Unit redesign
+// (database/migrations/20260866_create_employee_business_units.sql) never
+// gets its own `employees.company_id` populated; its Company/BU membership
+// lives exclusively in `employee_business_units`. Matching on `e.company_id`
+// alone silently drops such employees from these reports. Same OR-with-
+// legacy-column pattern as employeeRepository.js's employeeScope().
+const EMPLOYEE_COMPANY_SCOPE_SQL = `(
+  e.company_id = :companyId
+  OR EXISTS (
+    SELECT 1 FROM employee_business_units ebu
+    WHERE ebu.employee_id = e.id
+      AND ebu.business_unit_id = :companyId
+      AND ebu.status = 'active'
+  )
+)`;
+
 /**
  * Management Report Repository
  *
@@ -528,7 +544,13 @@ async function getBUPerformanceScorecard(filters) {
     WITH bu AS (
       SELECT
         co.id AS company_id, co.company_code, co.company_name, co.entity_id,
-        (SELECT COUNT(*) FROM employees e WHERE e.company_id = co.id AND e.status = 'active') AS active_employees,
+        (SELECT COUNT(*) FROM employees e WHERE e.status = 'active' AND (
+          e.company_id = co.id
+          OR EXISTS (
+            SELECT 1 FROM employee_business_units ebu
+            WHERE ebu.employee_id = e.id AND ebu.business_unit_id = co.id AND ebu.status = 'active'
+          )
+        )) AS active_employees,
         (SELECT COUNT(*) FROM service_pos sp WHERE sp.company_id = co.id AND sp.status IN ('in-progress','pending')) AS active_pos,
         COALESCE((
           SELECT SUM(spmb.invoice_amount)
@@ -626,7 +648,7 @@ async function getEmployeeCapacityForecast(filters) {
     monthlyCap: MONTHLY_CAP, benchThreshold, benchThresholdFilterRequested,
   };
 
-  const conditions = ["e.status = 'active'", 'e.company_id = :companyId'];
+  const conditions = ["e.status = 'active'", EMPLOYEE_COMPANY_SCOPE_SQL];
   if (employeeId) { conditions.push('e.id = :employeeId'); replacements.employeeId = employeeId; }
   if (designation) { conditions.push('e.designation ILIKE :designation'); replacements.designation = `%${designation}%`; }
   if (search) {
@@ -709,7 +731,8 @@ async function getEmployeeCapacityForecast(filters) {
 }
 
 // ---------------------------------------------------------------------------
-// 7. Service PO Budget & Timeline Exhaustion Risk Report
+// 7. Service PO Timeline Risk Report (date-elapsed risk only — see
+//    computeTimelineRisk() in managementReportService.js)
 // ---------------------------------------------------------------------------
 /**
  * Raw hours-delivered-to-date + PO date range, for the service layer to
@@ -725,7 +748,7 @@ async function getServicePOTimelineRiskRaw(filters) {
   } = filters;
 
   const hoursCol = (hoursSource === 'O') ? 't.hours_logged' : 'COALESCE(t.modified_hours, t.hours_logged)';
-  const allowedSort = ['sp.service_po_name', 'sp.start_date', 'sp.end_date', 'sp.expected_man_hours', 'hours_delivered_to_date'];
+  const allowedSort = ['sp.service_po_name', 'sp.start_date', 'sp.end_date', 'hours_delivered_to_date'];
   const safeSort = allowedSort.includes(sortBy) ? sortBy : 'sp.end_date';
   const safeOrder = sortOrder && sortOrder.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
 
@@ -734,8 +757,6 @@ async function getServicePOTimelineRiskRaw(filters) {
     'sp.company_id = :companyId',
     'sp.start_date IS NOT NULL',
     'sp.end_date IS NOT NULL',
-    'sp.expected_man_hours IS NOT NULL',
-    'sp.expected_man_hours > 0',
   ];
 
   if (status && status !== 'all') { conditions.push('sp.status = :status'); replacements.status = status; }
@@ -761,7 +782,6 @@ async function getServicePOTimelineRiskRaw(filters) {
       sp.start_date,
       sp.end_date,
       sp.po_value,
-      sp.expected_man_hours,
       c.id                                  AS client_id,
       c.client_name,
       COALESCE(hrs.hours_delivered_to_date, 0) AS hours_delivered_to_date
@@ -810,7 +830,7 @@ async function getDeliveryHeadPerformance(filters) {
   } = filters;
 
   const hoursCol = (hoursSource === 'O') ? 't.hours_logged' : 'COALESCE(t.modified_hours, t.hours_logged)';
-  const allowedSort = ['full_name', 'po_count', 'total_hours_delivered', 'total_invoiced', 'total_delivery_cost', 'total_margin', 'at_risk_po_count'];
+  const allowedSort = ['full_name', 'po_count', 'total_hours_delivered', 'total_invoiced', 'total_delivery_cost', 'total_margin'];
   const safeSort = allowedSort.includes(sortBy) ? sortBy : 'total_margin';
   const safeOrder = sortOrder && sortOrder.toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
@@ -839,7 +859,6 @@ async function getDeliveryHeadPerformance(filters) {
       SELECT
         sp.id AS service_po_id,
         sp.delivery_head_employee_id,
-        sp.expected_man_hours,
         COALESCE(spmb.invoice_amount, 0)        AS invoiced_amount,
         COALESCE(cur.delivery_cost, 0)          AS delivery_cost,
         COALESCE(cur.hours_delivered, 0)        AS hours_delivered,
@@ -880,11 +899,7 @@ async function getDeliveryHeadPerformance(filters) {
       ROUND(SUM(per_po.hours_delivered)::numeric, 2)   AS total_hours_delivered,
       ROUND(SUM(per_po.invoiced_amount)::numeric, 2)   AS total_invoiced,
       ROUND(SUM(per_po.delivery_cost)::numeric, 2)     AS total_delivery_cost,
-      ROUND((SUM(per_po.invoiced_amount) - SUM(per_po.delivery_cost))::numeric, 2) AS total_margin,
-      COUNT(*) FILTER (
-        WHERE per_po.expected_man_hours > 0
-          AND (per_po.hours_delivered_before + per_po.hours_delivered) > per_po.expected_man_hours
-      )                                        AS at_risk_po_count
+      ROUND((SUM(per_po.invoiced_amount) - SUM(per_po.delivery_cost))::numeric, 2) AS total_margin
     FROM per_po
     INNER JOIN employees e ON e.id = per_po.delivery_head_employee_id
     INNER JOIN service_pos sp ON sp.id = per_po.service_po_id

@@ -1,7 +1,7 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { Entity, Company, User } = require('../models');
+const { Entity, Company, Employee } = require('../models');
 
 /**
  * Entity Repository
@@ -56,7 +56,7 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
     limit,
     offset,
     order: [[safeSortBy, safeSortOrder]],
-    attributes: ['id', 'entity_code', 'entity_name', 'entity_admin_user_id', 'status', 'created_at', 'updated_at', 'created_by'],
+    attributes: ['id', 'entity_code', 'entity_name', 'entity_admin_employee_id', 'status', 'created_at', 'updated_at', 'created_by'],
   });
 };
 
@@ -73,7 +73,7 @@ const findById = async (id, entityIds = []) => {
   }
   return Entity.findOne({
     where: { id, is_deleted: false },
-    attributes: ['id', 'entity_code', 'entity_name', 'entity_admin_user_id', 'status', 'created_at', 'updated_at', 'created_by', 'updated_by'],
+    attributes: ['id', 'entity_code', 'entity_name', 'entity_admin_employee_id', 'status', 'created_at', 'updated_at', 'created_by', 'updated_by'],
   });
 };
 
@@ -84,7 +84,7 @@ const findById = async (id, entityIds = []) => {
  *   (a) the Admin created it directly (entities.created_by = adminUserId —
  *       the normal case going forward: Entity Master is now an Admin-only
  *       flow, see entityService.js), OR
- *   (b) its assigned Entity Admin (entities.entity_admin_user_id) was
+ *   (b) its assigned Entity Admin (entities.entity_admin_employee_id) was
  *       created by that Admin (users.created_by) — covers an Entity the
  *       Admin created and later re-assigned, and legacy Entities from
  *       before Entity Master became Admin-only.
@@ -96,21 +96,21 @@ const findById = async (id, entityIds = []) => {
  * Admin's scope — the deliberately safe outcome for pre-existing/legacy
  * data — see database/migrations/20260850_document_legacy_entity_ownership.sql.
  *
- * @param {number} adminUserId
+ * @param {number} adminEmployeeId
  * @returns {Promise<number[]>}
  */
-const findIdsOwnedByAdmin = async (adminUserId) => {
+const findIdsOwnedByAdmin = async (adminEmployeeId) => {
   const entities = await Entity.findAll({
     where: {
       is_deleted: false,
       [Op.or]: [
-        { created_by: adminUserId },
-        { '$entityAdmin.created_by$': adminUserId },
+        { created_by: adminEmployeeId },
+        { '$entityAdmin.created_by$': adminEmployeeId },
       ],
     },
     include: [
       {
-        model: User,
+        model: Employee,
         as: 'entityAdmin',
         attributes: [],
         required: false,
@@ -149,7 +149,7 @@ const create = async (data) => {
  * Update an existing Entity, scoped to the caller's allowed Entity set —
  * Entity Master management is Admin-only (see requireAdmin.js), so the
  * scope is req.entityIds (the Admin's own Entities), not a single
- * entity_admin_user_id (an Entity's assigned Entity Admin is data being
+ * entity_admin_employee_id (an Entity's assigned Entity Admin is data being
  * edited here, not necessarily the actor doing the editing).
  *
  * @param {number} id

@@ -28,7 +28,20 @@ const listMappingsQuerySchema = Joi.object({
   status: Joi.string().trim().lowercase().valid('active', 'inactive').optional(),
 });
 
+/**
+ * PUT /employee-servicepo-mapping/employee/:employeeId
+ * `service_po_ids` is the DESIRED full set of active mappings for this
+ * Employee — an empty array is valid (unmaps everything).
+ */
+const saveEmployeeMappingsSchema = Joi.object({
+  service_po_ids: Joi.array().items(Joi.number().integer().positive()).required().messages({
+    'any.required': 'service_po_ids is required.',
+    'array.base': 'service_po_ids must be an array.',
+  }),
+});
+
 module.exports = {
   assignMappingSchema,
   listMappingsQuerySchema,
+  saveEmployeeMappingsSchema,
 };

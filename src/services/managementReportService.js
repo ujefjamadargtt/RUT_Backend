@@ -312,7 +312,12 @@ async function getEmployeeCapacityForecast(query, companyId) {
 }
 
 // ---------------------------------------------------------------------------
-// 7. Service PO Budget & Timeline Exhaustion Risk Report
+// 7. Service PO Timeline Risk Report — date-elapsed risk only
+//    (on_track/overdue). The hours-budget dimension this report used to
+//    also cover (consumed_hours_pct, at_risk/critical levels,
+//    projected_exhaustion_date) required service_pos.expected_man_hours,
+//    which was retired — see database/migrations/
+//    20260884_drop_service_pos_invoice_amount_and_expected_man_hours.sql.
 // ---------------------------------------------------------------------------
 function computeTimelineRisk(row, asOfDate) {
   const start = new Date(row.start_date);
@@ -321,39 +326,16 @@ function computeTimelineRisk(row, asOfDate) {
   const elapsedDays = Math.min(totalDays, Math.max(0, Math.round((asOfDate - start) / 86400000)));
   const elapsedPct = round2((elapsedDays / totalDays) * 100);
 
-  const expectedHours = parseFloat(row.expected_man_hours) || 0;
-  const deliveredHours = parseFloat(row.hours_delivered_to_date) || 0;
-  const consumedPct = expectedHours > 0 ? round2((deliveredHours / expectedHours) * 100) : null;
-
-  let riskLevel = 'on_track';
+  // Date-elapsed risk only — the hours-budget dimension (consumed_hours_pct,
+  // at_risk/critical levels, projected_exhaustion_date) required an
+  // expected-hours target, which no longer exists on Service PO.
   const isOverdue = asOfDate > end && !['completed', 'closed', 'cancelled'].includes(row.status);
-  if (isOverdue) {
-    riskLevel = 'overdue';
-  } else if (consumedPct !== null) {
-    const gap = consumedPct - elapsedPct;
-    if (deliveredHours > expectedHours || gap > 20) riskLevel = 'critical';
-    else if (gap > 10) riskLevel = 'at_risk';
-  }
-
-  let projectedExhaustionDate = null;
-  if (elapsedDays > 0 && deliveredHours > 0 && expectedHours > deliveredHours) {
-    const burnRatePerDay = deliveredHours / elapsedDays;
-    if (burnRatePerDay > 0) {
-      const remainingHours = expectedHours - deliveredHours;
-      const daysToExhaust = Math.ceil(remainingHours / burnRatePerDay);
-      const projected = new Date(asOfDate.getTime() + daysToExhaust * 86400000);
-      projectedExhaustionDate = projected.toISOString().slice(0, 10);
-    }
-  }
+  const riskLevel = isOverdue ? 'overdue' : 'on_track';
 
   return {
     ...row,
     elapsed_time_pct: elapsedPct,
-    consumed_hours_pct: consumedPct,
     risk_level: riskLevel,
-    // Linear extrapolation of the current burn rate — an ESTIMATE, not a
-    // guaranteed date. Null when there isn't enough burn history yet.
-    projected_exhaustion_date: projectedExhaustionDate,
   };
 }
 
@@ -398,8 +380,6 @@ async function getServicePOTimelineRisk(query, companyId) {
     meta,
     summary: {
       overdue_count_on_page: enriched.filter((r) => r.risk_level === 'overdue').length,
-      critical_count_on_page: enriched.filter((r) => r.risk_level === 'critical').length,
-      at_risk_count_on_page: enriched.filter((r) => r.risk_level === 'at_risk').length,
     },
     as_of_date: asOfDate.toISOString().slice(0, 10),
   };
@@ -426,9 +406,8 @@ async function getDeliveryHeadPerformance(query, companyId) {
     acc.invoiced += parseFloat(r.total_invoiced) || 0;
     acc.cost += parseFloat(r.total_delivery_cost) || 0;
     acc.margin += parseFloat(r.total_margin) || 0;
-    acc.atRisk += parseInt(r.at_risk_po_count, 10) || 0;
     return acc;
-  }, { invoiced: 0, cost: 0, margin: 0, atRisk: 0 });
+  }, { invoiced: 0, cost: 0, margin: 0 });
 
   return {
     data: rows,
@@ -437,7 +416,6 @@ async function getDeliveryHeadPerformance(query, companyId) {
       total_invoiced_amount: round2(totals.invoiced),
       total_delivery_cost: round2(totals.cost),
       total_margin: round2(totals.margin),
-      total_at_risk_po_count: totals.atRisk,
     },
   };
 }

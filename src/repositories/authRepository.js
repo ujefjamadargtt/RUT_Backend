@@ -1,19 +1,7 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { User, UserSession, Role, Employee, Company } = require('../models');
-
-// PRIMARY role stays the sole source of truth for hierarchy/scoping; this
-// is a purely additive capability grant, unioned into effective
-// capabilities only — see database/migrations/20260850_add_user_additional_roles.sql
-// and authService.js's serialiseRoles().
-const ADDITIONAL_ROLES_INCLUDE = {
-  model: Role,
-  as: 'additionalRoles',
-  attributes: ['id', 'role_name', 'permission', 'status', 'hierarchy_rank', 'inherits_role_id'],
-  through: { attributes: [] },
-  required: false,
-};
+const { Employee, EmployeeLoginSession, Role, Company } = require('../models');
 const logger = require('../utils/logger');
 const dateHelper = require('../helpers/dateHelper');
 
@@ -23,109 +11,81 @@ const dateHelper = require('../helpers/dateHelper');
  * Responsible exclusively for data-access operations related to authentication.
  * No business logic lives here — all decisions belong in authService.js.
  *
- * Single identity table (`users`) for every account tier, including
- * Employees — see database/migrations/20260842_employees_drop_login_columns.sql.
- * There is no longer a parallel Employee lookup/session store.
+ * Employee is the sole login identity now (Employee-as-Identity redesign,
+ * database/migrations/20260864-20260880) — `users` stays in the DB
+ * (never dropped) but is no longer read or written by this file.
  */
 
+// through.attributes keeps employee_roles.status alongside each joined
+// Role (surfaced as role.EmployeeRole.status) — a role can be globally
+// active/inactive (roles.status) independently of whether THIS employee's
+// grant of it is active (employee_roles.status); authService.js's login
+// checks both.
+const ROLES_INCLUDE = {
+  model: Role,
+  as: 'roles',
+  attributes: ['id', 'role_name', 'permission', 'status', 'hierarchy_rank', 'inherits_role_id'],
+  through: { attributes: ['status'] },
+};
+
+const BUSINESS_UNITS_INCLUDE = {
+  model: Company,
+  as: 'businessUnits',
+  attributes: ['id', 'company_code', 'company_name', 'status', 'is_original_data_visible'],
+  through: { attributes: ['status'] },
+};
+
 /**
- * Find a user by email address.
- * Returns the user with their role and linked employee joined (password
- * excluded via defaultScope). Use User.scope('withPassword') before calling
- * if the password hash is needed.
+ * Find an employee by email address, with roles and business units
+ * joined. Returns the employee with password included (defaultScope
+ * excludes it — use Employee.scope('withPassword')).
  *
  * @param {string} email - Normalised, lowercase email address.
- * @returns {Promise<User|null>}
+ * @returns {Promise<Employee|null>}
  */
-async function findUserByEmail(email) {
-  return User.scope('withPassword').findOne({
+async function findEmployeeByEmail(email) {
+  return Employee.scope('withPassword').findOne({
     where: {
       email: email.toLowerCase().trim(),
     },
-    // The Role include deliberately does NOT list is_original_data_visible,
-    // and the Company include DOES: the login response's
-    // roles[].is_original_data_visible is sourced from the user's COMPANY
-    // (see authService.js's serialiseRoles()), not from Role, and not from
-    // a users-table column — see database/migrations/
-    // 20260808_add_company_original_data_visibility.sql.
-    include: [
-      {
-        model: Role,
-        as: 'role',
-        attributes: ['id', 'role_name', 'permission', 'status', 'hierarchy_rank', 'inherits_role_id'],
-      },
-      ADDITIONAL_ROLES_INCLUDE,
-      {
-        model: Employee,
-        as: 'employee',
-        required: false,
-      },
-      {
-        model: Company,
-        as: 'company',
-        attributes: ['id', 'company_code', 'company_name', 'status', 'is_original_data_visible'],
-        required: false,
-      },
-    ],
+    include: [ROLES_INCLUDE, BUSINESS_UNITS_INCLUDE],
   });
 }
 
 /**
- * Find a user by primary key.
- * Returns the user with their role and linked employee record.
- * Password is excluded (defaultScope).
+ * Find an employee by primary key, with roles and business units joined.
+ * Password excluded (defaultScope).
  *
- * @param {number} id - User primary key.
- * @returns {Promise<User|null>}
+ * @param {number} id - Employee primary key.
+ * @returns {Promise<Employee|null>}
  */
-async function findUserById(id) {
-  return User.findOne({
+async function findEmployeeById(id) {
+  return Employee.findOne({
     where: { id },
-    include: [
-      {
-        model: Role,
-        as: 'role',
-        attributes: ['id', 'role_name', 'permission', 'status', 'hierarchy_rank', 'inherits_role_id'],
-      },
-      ADDITIONAL_ROLES_INCLUDE,
-      {
-        model: Employee,
-        as: 'employee',
-        required: false,
-      },
-      {
-        model: Company,
-        as: 'company',
-        attributes: ['id', 'company_code', 'company_name', 'status'],
-        required: false,
-      },
-    ],
-    attributes: { exclude: ['password'] },
+    include: [ROLES_INCLUDE, BUSINESS_UNITS_INCLUDE],
   });
 }
 
 /**
- * Stamp the last_login timestamp for a user.
+ * Stamp the last_login timestamp for an employee. Employee has no
+ * last_login column of its own (never carried one) — logged only, not
+ * persisted, to avoid a schema change purely for this. Kept as a no-op
+ * hook point so callers don't need to change if a column is added later.
  *
- * @param {number} userId
- * @returns {Promise<[number]>} Sequelize update result tuple.
+ * @param {number} employeeId
+ * @returns {Promise<void>}
  */
-async function updateLastLogin(userId) {
-  return User.update(
-    { last_login: dateHelper.nowDate() },
-    { where: { id: userId } }
-  );
+async function updateLastLogin(employeeId) {
+  logger.info('Employee logged in', { employeeId });
 }
 
 /**
- * Persist a new user session record — one row per issued refresh token.
- * `jti`/`family_id` back the rotation/replay-detection mechanism (see
- * database/migrations/20260857_add_refresh_token_rotation.sql); `jti` is
- * unique per issuance, `family_id` is shared across every token descended
- * from one login.
+ * Persist a new employee login session record — one row per issued
+ * refresh token. `jti`/`family_id` back the rotation/replay-detection
+ * mechanism (mirrors user_sessions' shape).
  *
  * @param {object} sessionData
- * @param {number} sessionData.user_id
+ * @param {number} sessionData.employee_id
  * @param {string} sessionData.refresh_token
  * @param {string} sessionData.jti
  * @param {string} sessionData.family_id
@@ -133,11 +93,11 @@ async function updateLastLogin(userId) {
  * @param {string} [sessionData.ip_address]
  * @param {string} [sessionData.user_agent]
  * @param {object} [options] - Sequelize options (e.g. { transaction })
- * @returns {Promise<UserSession>}
+ * @returns {Promise<EmployeeLoginSession>}
  */
 async function createSession(sessionData, options = {}) {
-  return UserSession.create({
-    user_id: sessionData.user_id,
+  return EmployeeLoginSession.create({
+    employee_id: sessionData.employee_id,
     refresh_token: sessionData.refresh_token,
     jti: sessionData.jti,
     family_id: sessionData.family_id,
@@ -147,94 +107,60 @@ async function createSession(sessionData, options = {}) {
   }, options);
 }
 
-const SESSION_USER_INCLUDE = [
+const SESSION_EMPLOYEE_INCLUDE = [
   {
-    model: User,
-    as: 'user',
-    attributes: ['id', 'email', 'role_id', 'employee_id', 'company_id', 'status'],
-    include: [
-      {
-        model: Role,
-        as: 'role',
-        attributes: ['id', 'role_name', 'permission', 'status', 'hierarchy_rank', 'inherits_role_id'],
-      },
-      ADDITIONAL_ROLES_INCLUDE,
-      // is_original_data_visible sourced from the user's COMPANY, not
-      // from Role or a users-table column — see authService.js's
-      // serialiseRoles() and database/migrations/
-      // 20260808_add_company_original_data_visibility.sql. Without this
-      // include, refreshToken()'s serialiseRoles() call would always
-      // see it as undefined.
-      {
-        model: Company,
-        as: 'company',
-        attributes: ['id', 'is_original_data_visible'],
-        required: false,
-      },
-      {
-        model: Employee,
-        as: 'employee',
-        attributes: ['id', 'status', 'is_deleted'],
-        required: false,
-      },
-    ],
+    model: Employee,
+    as: 'employee',
+    attributes: ['id', 'email', 'status', 'is_deleted', 'company_id'],
+    include: [ROLES_INCLUDE, BUSINESS_UNITS_INCLUDE],
   },
 ];
 
 /**
  * Look up a LIVE (unrevoked, unexpired) session by its refresh token's own
- * `jti` claim — the sole lookup key for the refresh flow now, replacing a
- * match on the raw token string. Read-only; does not consume the session
- * (see consumeSessionByJti() below for the atomic, one-time-use step).
+ * `jti` claim. Read-only; does not consume the session.
  *
  * @param {string} jti
- * @returns {Promise<UserSession|null>}
+ * @returns {Promise<EmployeeLoginSession|null>}
  */
 async function findActiveSessionByJti(jti) {
-  return UserSession.findOne({
+  return EmployeeLoginSession.findOne({
     where: {
       jti,
       revoked_at: null,
       expires_at: { [Op.gt]: dateHelper.nowDate() },
     },
-    include: SESSION_USER_INCLUDE,
+    include: SESSION_EMPLOYEE_INCLUDE,
   });
 }
 
 /**
  * Look up a session by `jti` REGARDLESS of revoked/expired state, with the
- * owning User/Role/Company joined the same way findActiveSessionByJti()
- * does — authService.refreshToken() uses this single lookup both to
- * distinguish "unknown jti" from "already consumed" (replay) AND, when the
- * session turns out to still be live, as the source of the User record the
- * rotation itself needs (role/company for the response payload).
+ * owning Employee/roles/businessUnits joined — authService.refreshToken()
+ * uses this single lookup both to distinguish "unknown jti" from "already
+ * consumed" (replay) AND, when the session is still live, as the source of
+ * the Employee record the rotation itself needs.
  *
  * @param {string} jti
- * @returns {Promise<UserSession|null>}
+ * @returns {Promise<EmployeeLoginSession|null>}
  */
 async function findSessionByJti(jti) {
-  return UserSession.findOne({ where: { jti }, include: SESSION_USER_INCLUDE });
+  return EmployeeLoginSession.findOne({ where: { jti }, include: SESSION_EMPLOYEE_INCLUDE });
 }
 
 /**
  * Atomically consume (soft-revoke) a session by `jti` — the single-use
- * guarantee refresh-token rotation depends on. The `revoked_at IS NULL`
- * guard in the WHERE clause is what makes this safe under concurrent
- * requests presenting the SAME refresh token: Postgres serializes
- * concurrent UPDATEs touching the same row, so at most one of them can
- * ever affect a row here — the loser sees 0 rows affected and must treat
- * the token as already consumed, never issuing a second child token pair.
- * Soft-revoke (not delete) so a later replay of this same jti is still
- * recognizable as reuse rather than "unknown token" — see
- * findSessionByJti() above.
+ * guarantee refresh-token rotation depends on. See the equivalent
+ * user_sessions logic this replaces: the `revoked_at IS NULL` guard makes
+ * this safe under concurrent requests presenting the SAME refresh token.
  *
  * @param {string} jti
- * @param {string} replacedByJti - the newly issued token's jti, for lineage tracing
+ * @param {string} replacedByJti
  * @param {object} [options] - Sequelize options (e.g. { transaction })
- * @returns {Promise<number>} 1 if this call consumed the session, 0 if it was already revoked/gone
+ * @returns {Promise<number>} 1 if this call consumed the session, 0 if already revoked/gone
  */
 async function consumeSessionByJti(jti, replacedByJti, options = {}) {
-  const [affectedCount] = await UserSession.update(
+  const [affectedCount] = await EmployeeLoginSession.update(
     { revoked_at: dateHelper.nowDate(), replaced_by_jti: replacedByJti },
     { where: { jti, revoked_at: null }, ...options }
   );
@@ -243,15 +169,13 @@ async function consumeSessionByJti(jti, replacedByJti, options = {}) {
 
 /**
  * Revoke every currently-active session in a family in one statement — the
- * replay-detection response: presenting an already-consumed refresh token
- * is treated as a signal the token may have been stolen, so the entire
- * lineage descended from the same login is killed, forcing a fresh login.
+ * replay-detection response.
  *
  * @param {string} familyId
  * @returns {Promise<number>} number of sessions revoked
  */
 async function revokeFamily(familyId) {
-  const [affectedCount] = await UserSession.update(
+  const [affectedCount] = await EmployeeLoginSession.update(
     { revoked_at: dateHelper.nowDate() },
     { where: { family_id: familyId, revoked_at: null } }
   );
@@ -259,16 +183,13 @@ async function revokeFamily(familyId) {
 }
 
 /**
- * Soft-revoke one session by `jti` — logout. Idempotent (an already-
- * revoked or unknown jti simply affects 0 rows; the caller treats this as
- * success either way, matching the existing "logout is always a success
- * from the client's perspective" behavior).
+ * Soft-revoke one session by `jti` — logout. Idempotent.
  *
  * @param {string} jti
  * @returns {Promise<number>}
  */
 async function revokeSessionByJti(jti) {
-  const [affectedCount] = await UserSession.update(
+  const [affectedCount] = await EmployeeLoginSession.update(
     { revoked_at: dateHelper.nowDate() },
     { where: { jti, revoked_at: null } }
   );
@@ -276,21 +197,39 @@ async function revokeSessionByJti(jti) {
 }
 
 /**
- * Remove all sessions belonging to a user.
+ * Remove all sessions belonging to an employee.
  * Use this on password change, account suspension, or admin-forced logout.
  *
- * @param {number} userId
+ * @param {number} employeeId
  * @returns {Promise<number>} Number of rows deleted.
  */
-async function deleteUserSessions(userId) {
-  return UserSession.destroy({
-    where: { user_id: userId },
+async function deleteEmployeeSessions(employeeId) {
+  return EmployeeLoginSession.destroy({
+    where: { employee_id: employeeId },
   });
 }
 
+/**
+ * Persist Microsoft's stable object id (the `oid` claim) against an employee
+ * on a successful Microsoft SSO login — see authService.loginWithMicrosoft().
+ * Best-effort by design: the caller treats a failure here as non-fatal to
+ * the login itself, since email remains the sole login-matching key and this
+ * value is stored for audit/future hardening only.
+ *
+ * @param {number} employeeId
+ * @param {string} microsoftObjectId
+ * @returns {Promise<void>}
+ */
+async function updateMicrosoftObjectId(employeeId, microsoftObjectId) {
+  await Employee.update(
+    { microsoft_object_id: microsoftObjectId },
+    { where: { id: employeeId } }
+  );
+}
+
 module.exports = {
-  findUserByEmail,
-  findUserById,
+  findEmployeeByEmail,
+  findEmployeeById,
   updateLastLogin,
   createSession,
   findActiveSessionByJti,
@@ -298,5 +237,6 @@ module.exports = {
   consumeSessionByJti,
   revokeFamily,
   revokeSessionByJti,
-  deleteUserSessions,
+  deleteEmployeeSessions,
+  updateMicrosoftObjectId,
 };

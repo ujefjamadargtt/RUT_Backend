@@ -40,7 +40,7 @@ const authorize = (capabilities = []) => {
       });
     }
 
-    if (roleHierarchyService.isSeniorTier(req.user.role)) {
+    if (roleHierarchyService.isSeniorTier(req.hierarchyRank)) {
       return next();
     }
 

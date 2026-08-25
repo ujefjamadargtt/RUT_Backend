@@ -1,12 +1,84 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { Employee, ServicePOResource, ServicePO, User } = require('../models');
+const { Employee, ServicePOResource, ServicePO, EmployeeBusinessUnit } = require('../models');
 
 /**
  * Employee Repository
  * Raw database access — no business logic.
  */
+
+/**
+ * Builds a `company_id` WHERE fragment that's safe to spread even when the
+ * caller has no single company (Admin/Entity Admin/Platform Admin — their
+ * own `employees.company_id` is NULL by design, and they legitimately
+ * manage Employees across many companies, not one). Passing
+ * `company_id: undefined` straight into a Sequelize `where` throws
+ * ("WHERE parameter \"company_id\" has invalid \"undefined\" value") —
+ * this omits the key entirely instead, so those actors' requests reach the
+ * intended row rather than crashing. Deliberately permissive rather than
+ * scoped-by-entity here: callers senior enough to have no companyId have
+ * already cleared `isSeniorTier`/route-level `authorize()` checks upstream.
+ *
+ * Array-aware (same shape as clientRepository.js/projectRepository.js/
+ * servicePORepository.js's companyScope) so a caller that HAS resolved a
+ * company-less Admin/Entity Admin's owned-Company-id array via
+ * companyAccessControlService.resolveActorCompanyScope can pass it straight
+ * through as a proper `IN (...)` filter instead of falling back to `{}`.
+ *
+ * @param {number|number[]|null|undefined} companyId
+ * @returns {object} `{ company_id: companyId }`, `{ company_id: { [Op.in]: companyId } }`, or `{}`
+ */
+function companyScope(companyId) {
+  if (Array.isArray(companyId)) {
+    return { company_id: { [Op.in]: companyId } };
+  }
+  return companyId != null ? { company_id: companyId } : {};
+}
+
+/**
+ * Same intent as companyScope(), but for queries whose base row IS the
+ * Employee (so a bare `id` key unambiguously means Employee.id) — an
+ * Employee created after the Employee-Business-Unit redesign
+ * (database/migrations/20260866_create_employee_business_units.sql) never
+ * gets its own `company_id` populated; its Company/BU membership lives
+ * exclusively in `employee_business_units` now (see that model's doc
+ * comment: "replacing the old single users.company_id column"). Matching
+ * on `company_id` alone therefore 404s every such Employee for any
+ * company-scoped lookup (e.g. mapping them to a Service PO). This ORs the
+ * legacy column with an active employee_business_units membership so both
+ * old and new Employees resolve. NOT safe to reuse for a query on a
+ * different model (e.g. findActiveAllocations() below queries
+ * ServicePOResource/ServicePO, where `id` means something else) — those
+ * keep using the plain companyScope() above.
+ *
+ * @param {number|number[]|null|undefined} companyId
+ * @returns {Promise<object>}
+ */
+async function employeeScope(companyId) {
+  if (companyId == null) return {};
+
+  const companyIdCondition = Array.isArray(companyId) ? { [Op.in]: companyId } : companyId;
+  const buRows = await EmployeeBusinessUnit.findAll({
+    where: {
+      business_unit_id: Array.isArray(companyId) ? { [Op.in]: companyId } : companyId,
+      status: 'active',
+    },
+    attributes: ['employee_id'],
+    raw: true,
+  });
+
+  if (buRows.length === 0) {
+    return { company_id: companyIdCondition };
+  }
+
+  return {
+    [Op.or]: [
+      { company_id: companyIdCondition },
+      { id: { [Op.in]: buRows.map((row) => row.employee_id) } },
+    ],
+  };
+}
 
 /**
  * Fetch a paginated, filtered, sorted list of employees.
@@ -36,7 +108,7 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
   // callers of this same filters shape still rely on.
   const where = accessWhere
     ? { is_deleted: false, ...accessWhere }
-    : { is_deleted: false, company_id: companyId };
+    : { is_deleted: false, ...(await employeeScope(companyId)) };
 
   // Status filter — omit clause entirely when 'all' is requested
   if (status && status !== 'all') {
@@ -60,14 +132,6 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
 
   return Employee.findAndCountAll({
     where,
-    include: [
-      {
-        model: User,
-        as: 'users',
-        attributes: ['email'],
-        required: false,
-      },
-    ],
     limit,
     offset,
     order: [[sortBy, safeSortOrder]],
@@ -81,7 +145,7 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
  * @returns {Promise<Employee|null>}
  */
 const findById = async (id, companyId) => {
-  return Employee.findOne({ where: { id, is_deleted: false, company_id: companyId } });
+  return Employee.findOne({ where: { id, is_deleted: false, ...(await employeeScope(companyId)) } });
 };
 
 /**
@@ -113,16 +177,35 @@ const findByIdWithEmail = async (id, companyId, accessWhere = null) => {
   return Employee.findOne({
     where: accessWhere
       ? { [Op.and]: [{ id, is_deleted: false }, accessWhere] }
-      : { id, is_deleted: false, company_id: companyId },
-    include: [
-      {
-        model: User,
-        as: 'users',
-        attributes: ['email'],
-        required: false,
-      },
-    ],
+      : { id, is_deleted: false, ...(await employeeScope(companyId)) },
   });
+};
+
+/**
+ * Find a single employee by their native login email (case-insensitive,
+ * trimmed) — the uniqueness check at Employee creation/update time.
+ *
+ * @param {string} email
+ * @returns {Promise<Employee|null>}
+ */
+const findByEmail = async (email) => {
+  return Employee.findOne({ where: { email: email.toLowerCase().trim() } });
+};
+
+/**
+ * Set (and hash, via the model's beforeUpdate hook) a new password for one
+ * Employee — the self-service PUT /auth/change-password flow.
+ *
+ * @param {number} id
+ * @param {string} newPassword - plaintext, already Joi-validated for policy
+ * @returns {Promise<boolean>} true if a row was updated
+ */
+const updatePassword = async (id, newPassword) => {
+  const employee = await Employee.findOne({ where: { id } });
+  if (!employee) return false;
+  employee.password = newPassword;
+  await employee.save();
+  return true;
 };
 
 /**
@@ -135,7 +218,7 @@ const findByIdWithEmail = async (id, companyId, accessWhere = null) => {
  * @returns {Promise<Employee|null>}
  */
 const findByCode = async (code, companyId) => {
-  return Employee.findOne({ where: { employee_code: code, company_id: companyId } });
+  return Employee.findOne({ where: { employee_code: code, ...(await employeeScope(companyId)) } });
 };
 
 /**
@@ -157,7 +240,7 @@ const create = async (data, options = {}) => {
  * @returns {Promise<Employee>}
  */
 const update = async (id, data, companyId, options = {}) => {
-  const employee = await Employee.findOne({ where: { id, company_id: companyId }, transaction: options.transaction });
+  const employee = await Employee.findOne({ where: { id, ...(await employeeScope(companyId)) }, transaction: options.transaction });
   if (!employee) return null;
   return employee.update(data, options);
 };
@@ -170,19 +253,29 @@ const update = async (id, data, companyId, options = {}) => {
  * @returns {Promise<Employee|null>}
  */
 const softDelete = async (id, updatedBy, companyId) => {
-  const employee = await Employee.findOne({ where: { id, is_deleted: false, company_id: companyId } });
+  const employee = await Employee.findOne({ where: { id, is_deleted: false, ...(await employeeScope(companyId)) } });
   if (!employee) return null;
   return employee.update({ status: 'inactive', is_deleted: true, updated_by: updatedBy });
 };
 
 /**
  * Return all employees with status = 'active', ordered by full_name.
+ *
+ * `accessWhere` (employeeAccessControlService.resolveEmployeeAccessWhere),
+ * when supplied, takes precedence over the raw `companyScope(companyId)`
+ * fallback — same precedence rule as findAll()/findByIdWithEmail() — so a
+ * company-less Admin/Entity Admin gets their own resolved scope instead of
+ * companyScope's permissive `{}` (every record, cross-tenant).
+ *
  * @param {number} companyId
+ * @param {object} [accessWhere]
  * @returns {Promise<Employee[]>}
  */
-const getActiveEmployees = async (companyId) => {
+const getActiveEmployees = async (companyId, accessWhere = null) => {
   return Employee.findAll({
-    where: { status: 'active', is_deleted: false, company_id: companyId },
+    where: accessWhere
+      ? { [Op.and]: [{ status: 'active', is_deleted: false }, accessWhere] }
+      : { status: 'active', is_deleted: false, ...(await employeeScope(companyId)) },
     order: [['full_name', 'ASC']],
     attributes: [
       'id',
@@ -205,21 +298,49 @@ const getActiveEmployees = async (companyId) => {
  * Employee unique index) instead.
  *
  * @param {number} companyId
+ * @param {object} [accessWhere] - see getActiveEmployees()'s doc comment
  * @returns {Promise<Employee[]>}
  */
-const getEligibleDeliveryHeads = async (companyId) => {
+const getEligibleDeliveryHeads = async (companyId, accessWhere = null) => {
   return Employee.findAll({
-    where: { status: 'active', is_deleted: false, company_id: companyId },
-    include: [
-      {
-        model: User,
-        as: 'users',
-        attributes: ['email'],
-        required: false,
-      },
-    ],
-    attributes: ['id', 'employee_code', 'full_name', 'status', 'company_id'],
+    where: accessWhere
+      ? { [Op.and]: [{ status: 'active', is_deleted: false }, accessWhere] }
+      : { status: 'active', is_deleted: false, ...(await employeeScope(companyId)) },
+    attributes: ['id', 'employee_code', 'full_name', 'email', 'status', 'company_id'],
     order: [['full_name', 'ASC']],
+  });
+};
+
+/**
+ * Active, non-deleted Employees holding ANY of the given role ids — the
+ * eligible candidate list for Primary/Secondary Manager selection (must
+ * hold a role with the manager.view_mapped_employees capability, see
+ * employeeService.js's assertValidManager()/getEligibleManagers()). One
+ * query via the Employee<->Role join, not N+1 per candidate.
+ *
+ * @param {number|number[]} companyId
+ * @param {number[]} roleIds
+ * @param {object} [accessWhere] - see getActiveEmployees()'s doc comment
+ * @returns {Promise<Employee[]>}
+ */
+const findEligibleManagers = async (companyId, roleIds, accessWhere = null) => {
+  if (!roleIds || roleIds.length === 0) return [];
+  const { Role } = require('../models');
+  return Employee.findAll({
+    where: accessWhere
+      ? { [Op.and]: [{ status: 'active', is_deleted: false }, accessWhere] }
+      : { status: 'active', is_deleted: false, ...(await employeeScope(companyId)) },
+    include: [{
+      model: Role,
+      as: 'roles',
+      attributes: [],
+      where: { id: { [Op.in]: roleIds } },
+      through: { attributes: [] },
+      required: true,
+    }],
+    attributes: ['id', 'employee_code', 'full_name', 'designation', 'status'],
+    order: [['full_name', 'ASC']],
+    distinct: true,
   });
 };
 
@@ -232,7 +353,7 @@ const getEligibleDeliveryHeads = async (companyId) => {
 const findByIds = async (ids, companyId) => {
   if (!ids || ids.length === 0) return [];
   return Employee.findAll({
-    where: { id: { [Op.in]: ids }, is_deleted: false, company_id: companyId },
+    where: { id: { [Op.in]: ids }, is_deleted: false, ...(await employeeScope(companyId)) },
     order: [['full_name', 'ASC']],
   });
 };
@@ -246,12 +367,12 @@ const findByIds = async (ids, companyId) => {
  */
 const findActiveAllocations = async (employeeId, companyId) => {
   return ServicePOResource.findAll({
-    where: { employee_id: employeeId, company_id: companyId },
+    where: { employee_id: employeeId, ...companyScope(companyId) },
     include: [
       {
         model: ServicePO,
         as: 'servicePO',
-        where: { status: 'active', company_id: companyId },
+        where: { status: 'active', ...companyScope(companyId) },
         attributes: ['id', 'service_po_code', 'service_po_name', 'status'],
         required: true,
       },
@@ -264,28 +385,138 @@ const findActiveAllocations = async (employeeId, companyId) => {
  * soft-deleted) for bulk import code-uniqueness validation, so a code held
  * by a deleted employee in this company is still flagged as taken rather
  * than silently reused.
- * @param {number} companyId
+ *
+ * `companyId === null` (an Admin/Entity Admin import with no Business Unit
+ * assigned yet — see employeeImportService.js's resolveOptionalCreateCompanyId
+ * call) means "match the other company_id IS NULL employees", NOT
+ * companyScope()'s usual "unrestricted" meaning for that same value —
+ * otherwise this would flag every employee_code on the whole platform as
+ * taken instead of just the ones actually sharing this row's (lack of a)
+ * company.
+ * @param {number|null} companyId
  * @returns {Promise<{ employee_code: string }[]>}
  */
 const findAllForImport = async (companyId) => {
   return Employee.findAll({
-    where: { company_id: companyId },
+    where: companyId === null ? { company_id: null } : { ...(await employeeScope(companyId)) },
     attributes: ['employee_code'],
     raw: true,
   });
 };
 
+/**
+ * Every currently-registered native login email across ALL Employees
+ * (Employee is the sole login identity now — email uniqueness is GLOBAL,
+ * per the `employees_email_key` constraint, not scoped to one company) —
+ * the bulk-import duplicate-email pre-check's data source
+ * (employeeImportService.js). Excludes soft-deleted rows, same as
+ * findByEmail()'s uniqueness check would in spirit, though findByEmail()
+ * itself doesn't filter is_deleted (kept consistent with THIS query's own
+ * purpose: rows a fresh import could actually collide with).
+ *
+ * @returns {Promise<string[]>} lowercased emails, nulls excluded
+ */
+const findAllEmails = async () => {
+  const employees = await Employee.findAll({
+    where: { is_deleted: false, email: { [Op.ne]: null } },
+    attributes: ['email'],
+    raw: true,
+  });
+  return employees.map((e) => e.email.toLowerCase());
+};
+
+/**
+ * Fetch a paginated, filtered, sorted list of Employees holding one role,
+ * scoped to whoever created them — Admin's "View Entity Admins"/Platform
+ * Admin's "View Admins" module's data source. Admin/Entity Admin/Platform
+ * Admin employees always have company_id NULL by design (see
+ * resolveCompany.js), so there is no company to scope by; created_by (the
+ * actor who created this Admin/Entity Admin) is the scoping axis instead.
+ *
+ * @param {number} roleId
+ * @param {object} filters - { search, status, createdBy }
+ * @param {object} pagination - { limit, offset }
+ * @param {object} sort - { sortBy, sortOrder }
+ * @returns {Promise<{ rows: Employee[], count: number }>}
+ */
+const findByRoleAndCreator = async (roleId, filters = {}, pagination = {}, sort = {}) => {
+  const { Role } = require('../models');
+  const { search, status, createdBy } = filters;
+  const { limit = 20, offset = 0 } = pagination;
+  const { sortBy: requestedSortBy = 'created_at', sortOrder = 'DESC' } = sort;
+  const allowedSortColumns = ['email', 'created_at', 'full_name'];
+  const sortBy = allowedSortColumns.includes(requestedSortBy) ? requestedSortBy : 'created_at';
+  const safeSortOrder = ['ASC', 'DESC'].includes((sortOrder || '').toUpperCase())
+    ? sortOrder.toUpperCase()
+    : 'DESC';
+
+  const where = { is_deleted: false, created_by: createdBy };
+  if (status && status !== 'all') {
+    where.status = status;
+  }
+  if (search && search.trim()) {
+    where.email = { [Op.iLike]: `%${search.trim()}%` };
+  }
+
+  return Employee.findAndCountAll({
+    where,
+    include: [{
+      model: Role,
+      as: 'roles',
+      attributes: [],
+      where: { id: roleId },
+      through: { attributes: [] },
+      required: true,
+    }],
+    limit,
+    offset,
+    order: [[sortBy, safeSortOrder]],
+    distinct: true,
+  });
+};
+
+/**
+ * Single Employee, scoped to holding the given role AND having been
+ * created by `createdBy` — see findByRoleAndCreator's doc comment.
+ *
+ * @param {number} id
+ * @param {number} roleId
+ * @param {number} createdBy
+ * @returns {Promise<Employee|null>}
+ */
+const findByIdWithRoleAndCreator = async (id, roleId, createdBy) => {
+  const { Role } = require('../models');
+  return Employee.findOne({
+    where: { id, is_deleted: false, created_by: createdBy },
+    include: [{
+      model: Role,
+      as: 'roles',
+      attributes: [],
+      where: { id: roleId },
+      through: { attributes: [] },
+      required: true,
+    }],
+  });
+};
+
 module.exports = {
+  employeeScope,
   findAll,
   findById,
   findByIdWithEmail,
   findByCode,
+  findByEmail,
+  updatePassword,
+  findByRoleAndCreator,
+  findByIdWithRoleAndCreator,
   create,
   update,
   softDelete,
   getActiveEmployees,
   getEligibleDeliveryHeads,
+  findEligibleManagers,
   findByIds,
   findActiveAllocations,
   findAllForImport,
+  findAllEmails,
 };

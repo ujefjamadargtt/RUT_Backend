@@ -18,11 +18,22 @@ const logger = require('../utils/logger');
  */
 
 /**
+ * The object-level scoping context Project reads need for company-less
+ * actors (Admin/Entity Admin) — see companyAccessControlService.js. Built
+ * only from server-verified req fields, never from body/query.
+ *
+ * @param {import('express').Request} req
+ */
+function buildAuthContext(req) {
+  return { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId };
+}
+
+/**
  * GET /api/v1/projects
  */
 const getAllProjects = async (req, res) => {
   try {
-    const { data, meta } = await projectService.getAll(req.query, req.companyId);
+    const { data, meta } = await projectService.getAll(req.query, buildAuthContext(req));
     return sendPaginated(res, data, meta, 'Projects fetched successfully.');
   } catch (error) {
     logger.error('getAllProjects error', { error: error.message, userId: req.userId });
@@ -40,7 +51,7 @@ const getProjectById = async (req, res) => {
       return sendError(res, 'Invalid project ID.', 400);
     }
 
-    const project = await projectService.getById(id, req.companyId);
+    const project = await projectService.getById(id, buildAuthContext(req));
     return sendSuccess(res, project, 'Project fetched successfully.');
   } catch (error) {
     if (error.statusCode === 404) {
@@ -123,7 +134,7 @@ const deleteProject = async (req, res) => {
  */
 const getActiveProjects = async (req, res) => {
   try {
-    const projects = await projectService.getActiveProjects(req.companyId);
+    const projects = await projectService.getActiveProjects(buildAuthContext(req));
     return sendSuccess(res, projects, 'Active projects fetched successfully.');
   } catch (error) {
     logger.error('getActiveProjects error', { error: error.message });

@@ -8,10 +8,27 @@ const { ServiceCategory } = require('../models');
  * All direct database interaction for the service_categories table.
  */
 
+/**
+ * Builds a `company_id` WHERE fragment. Accepts a single number (BU-scoped
+ * actor's own `req.companyId`) or an array (a company-less actor's
+ * resolved list of owned Company ids — see
+ * companyAccessControlService.resolveActorCompanyScope; empty array
+ * correctly matches nothing). Same pattern as clientRepository.js.
+ *
+ * @param {number|number[]} companyId
+ * @returns {object}
+ */
+function companyScope(companyId) {
+  if (Array.isArray(companyId)) {
+    return { company_id: { [Op.in]: companyId } };
+  }
+  return { company_id: companyId };
+}
+
 const findAll = async (filters = {}) => {
   const { search, status, companyId } = filters;
 
-  const where = { is_deleted: false, company_id: companyId };
+  const where = { is_deleted: false, ...companyScope(companyId) };
 
   if (search && search.trim()) {
     where.name = { [Op.iLike]: `%${search.trim()}%` };
@@ -30,7 +47,7 @@ const findAll = async (filters = {}) => {
 
 const findById = async (id, companyId) => {
   return ServiceCategory.findOne({
-    where: { id, is_deleted: false, company_id: companyId },
+    where: { id, is_deleted: false, ...companyScope(companyId) },
     attributes: ['id', 'name', 'status', 'created_at', 'updated_at', 'created_by', 'updated_by'],
   });
 };
@@ -41,7 +58,7 @@ const findById = async (id, companyId) => {
  */
 const findByName = async (name, companyId) => {
   return ServiceCategory.findOne({
-    where: { name: { [Op.iLike]: name.trim() }, is_deleted: false, company_id: companyId },
+    where: { name: { [Op.iLike]: name.trim() }, is_deleted: false, ...companyScope(companyId) },
     attributes: ['id', 'name'],
   });
 };
@@ -57,12 +74,12 @@ const findByName = async (name, companyId) => {
  */
 const findDeletedByName = async (name, companyId) => {
   return ServiceCategory.findOne({
-    where: { name: { [Op.iLike]: name.trim() }, is_deleted: true, company_id: companyId },
+    where: { name: { [Op.iLike]: name.trim() }, is_deleted: true, ...companyScope(companyId) },
   });
 };
 
 const softDelete = async (id, updatedBy, companyId) => {
-  const record = await ServiceCategory.findOne({ where: { id, is_deleted: false, company_id: companyId } });
+  const record = await ServiceCategory.findOne({ where: { id, is_deleted: false, ...companyScope(companyId) } });
   if (!record) return null;
   return record.update({ status: 'inactive', is_deleted: true, updated_by: updatedBy });
 };
@@ -73,7 +90,7 @@ const create = async (data, options = {}) => {
 
 const update = async (id, data, companyId) => {
   const [affectedRows, [updated]] = await ServiceCategory.update(data, {
-    where: { id, company_id: companyId },
+    where: { id, ...companyScope(companyId) },
     returning: true,
   });
 

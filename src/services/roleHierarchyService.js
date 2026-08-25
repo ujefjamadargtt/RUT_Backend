@@ -83,11 +83,15 @@ function hasCapability(effectiveCapabilities, required) {
 }
 
 /**
- * @param {object|null} role - a Role instance/plain object with hierarchy_rank
+ * @param {number|null} hierarchyRank - an employee's EFFECTIVE hierarchy
+ *   rank (MIN across active roles — see authService.js's
+ *   getEffectiveHierarchyRank()), not a single Role object. Employee-as-
+ *   Identity redesign: roles are multi-valued now, so this takes the
+ *   already-resolved number rather than one role's own field.
  * @returns {boolean} true for Platform Admin/Admin/Entity Admin/BU Admin
  */
-function isSeniorTier(role) {
-  return !!role && Number.isInteger(role.hierarchy_rank) && role.hierarchy_rank <= SENIOR_BYPASS_MAX_RANK;
+function isSeniorTier(hierarchyRank) {
+  return Number.isInteger(hierarchyRank) && hierarchyRank <= SENIOR_BYPASS_MAX_RANK;
 }
 
 /**
@@ -111,11 +115,32 @@ async function getEffectiveCapabilitiesForRoleIds(roleIds) {
   }, new Set());
 }
 
+/**
+ * Every active Role's id whose effective (own + inherited) capability set
+ * includes the given capability — the reverse of
+ * getEffectiveCapabilitiesForRoleIds(). Roles are a small, rarely-changing
+ * table, so this recomputes per call rather than caching.
+ *
+ * @param {string} capabilityKey
+ * @returns {Promise<number[]>}
+ */
+async function getRoleIdsWithCapability(capabilityKey) {
+  const roles = await Role.findAll({ where: { is_deleted: false }, attributes: ['id'] });
+  const eligible = await Promise.all(
+    roles.map(async (role) => {
+      const capabilities = await getEffectiveCapabilities(role.id);
+      return hasCapability(capabilities, capabilityKey) ? role.id : null;
+    })
+  );
+  return eligible.filter((id) => id !== null);
+}
+
 module.exports = {
   SENIOR_BYPASS_MAX_RANK,
   getRoleById,
   getEffectiveCapabilities,
   getEffectiveCapabilitiesForRoleIds,
+  getRoleIdsWithCapability,
   hasCapability,
   isSeniorTier,
 };

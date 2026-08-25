@@ -1,9 +1,10 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { Entity, Company } = require('../models');
+const companyAccessControlService = require('./companyAccessControlService');
 const managerEmployeeMappingRepository = require('../repositories/managerEmployeeMappingRepository');
 const teamMappingRepository = require('../repositories/teamMappingRepository');
+const employeeRepository = require('../repositories/employeeRepository');
 
 /**
  * Centralized Employee object-level authorization (fixes the GET
@@ -25,7 +26,17 @@ const teamMappingRepository = require('../repositories/teamMappingRepository');
  * src/config/roleHierarchy.js and roleHierarchyService.js); no new RBAC
  * concept is introduced here:
  *   1 Platform Admin  - never reaches business routes (auth.js blocks it).
- *   2 Admin           - platform-wide, no single company (resolveCompany.js).
+ *   2 Admin           - scoped to their own sub-hierarchy: their OWN
+ *                       Employee Master record (an Admin is also an
+ *                       Employee and must appear in Employee Master like
+ *                       anyone else), plus Employees they directly created,
+ *                       plus every Employee in a Company
+ *                       under an Entity they own (transitively, via Entity
+ *                       Admins they created) — the same scope
+ *                       requireAdmin.js/entityRepository.findIdsOwnedByAdmin()
+ *                       already give Admin for Company/Entity Master, so a
+ *                       second, unrelated Admin account never sees the
+ *                       first Admin's Employees.
  *   3 Entity Admin    - scoped to Companies under Entities they own.
  *   4 BU Admin        - scoped to their own Company.
  *   5 Project Admin   - scoped to their own Company (no Project Admin ->
@@ -73,37 +84,47 @@ const teamMappingRepository = require('../repositories/teamMappingRepository');
 const resolveEmployeeAccessWhere = async ({ userId, employeeId, companyId, hierarchyRank, roleNames = [] }) => {
   const hasRole = (name) => roleNames.some((r) => (r || '').toLowerCase() === name);
 
-  // Admin (rank 2) — platform-wide, the same "manage everything within
-  // their own scope" bypass roleHierarchyService.isSeniorTier grants for
-  // capability checks, generalized to object-level access: Admin's own
-  // scope IS the whole platform (no single company_id — resolveCompany.js).
+  // Admin (rank 2) — scoped to their OWN sub-hierarchy, not the whole
+  // platform: reuses entityRepository.findIdsOwnedByAdmin() (the same
+  // "Entities this Admin owns, transitively via Entity Admins they
+  // created" resolution requireAdmin.js/requireEntityAdminOrAdmin.js
+  // already use for Company/Entity Master), so a second, unrelated Admin
+  // account never sees the first Admin's Employees. Three components,
+  // unioned:
+  //   - the Admin's own Employee Master record (an Admin is also an
+  //     Employee and must be listed/fetchable like any other, not hidden
+  //     because of their Admin role);
+  //   - every Employee this Admin directly created (Entity Admins/BU
+  //     Admins/BU Heads minted via employeeService.create — these often
+  //     have company_id NULL, so they'd be invisible to the company_id-IN
+  //     clause below on their own);
+  //   - every Employee belonging to a Company under an Entity this Admin
+  //     owns (transitively) — the regular business Employees within that
+  //     sub-hierarchy.
   if (hierarchyRank === 2) {
-    return {};
+    const ownWhere = { [Op.or]: [{ id: employeeId }, { created_by: employeeId }] };
+    const companyIds = await companyAccessControlService.resolveOwnedCompanyIds(hierarchyRank, employeeId);
+    if (companyIds.length === 0) {
+      return ownWhere;
+    }
+    return { [Op.or]: [ownWhere, await employeeRepository.employeeScope(companyIds)] };
   }
 
   // Entity Admin (rank 3) — every Company under an Entity they own.
   if (hierarchyRank === 3) {
-    const entities = await Entity.findAll({
-      where: { entity_admin_user_id: userId, is_deleted: false },
-      attributes: ['id'],
-    });
-    const entityIds = entities.map((e) => e.id);
-    if (entityIds.length === 0) return { id: -1 };
-
-    const companies = await Company.findAll({
-      where: { entity_id: { [Op.in]: entityIds }, is_deleted: false },
-      attributes: ['id'],
-    });
-    const companyIds = companies.map((c) => c.id);
+    const companyIds = await companyAccessControlService.resolveOwnedCompanyIds(hierarchyRank, employeeId);
     if (companyIds.length === 0) return { id: -1 };
-
-    return { company_id: { [Op.in]: companyIds } };
+    return employeeRepository.employeeScope(companyIds);
   }
 
   // BU Admin / Project Admin / HR — own Company only. See the KNOWN GAP
   // note above for why Project Admin/BU Admin stop at company-wide.
+  // employeeScope() (not a bare company_id filter) because a target
+  // Employee created after the Employee-Business-Unit redesign never gets
+  // its own company_id populated — see employeeRepository.js's doc comment
+  // on employeeScope() — a bare company_id match would 404/hide them.
   if (hierarchyRank === 4 || hierarchyRank === 5 || hasRole('hr')) {
-    return companyId ? { company_id: companyId } : { id: -1 };
+    return companyId ? employeeRepository.employeeScope(companyId) : { id: -1 };
   }
 
   // Everyone else (Service PO Admin, Manager, Employee, and anyone holding
@@ -118,14 +139,14 @@ const resolveEmployeeAccessWhere = async ({ userId, employeeId, companyId, hiera
   if (employeeId) employeeIds.add(employeeId);
 
   const [managedDirectly, spaTeam] = await Promise.all([
-    managerEmployeeMappingRepository.findByManager(userId, companyId),
-    teamMappingRepository.findByServicePOAdmin(userId, companyId),
+    managerEmployeeMappingRepository.findByManager(employeeId, companyId),
+    teamMappingRepository.findByServicePOAdmin(employeeId, companyId),
   ]);
   managedDirectly.forEach((m) => employeeIds.add(m.employee_id));
 
   if (spaTeam.length > 0) {
-    const managerUserIds = spaTeam.map((t) => t.manager_user_id);
-    const teamMappings = await managerEmployeeMappingRepository.findByManagerUserIds(managerUserIds, companyId);
+    const managerEmployeeIds = spaTeam.map((t) => t.manager_employee_id);
+    const teamMappings = await managerEmployeeMappingRepository.findByManagerEmployeeIds(managerEmployeeIds, companyId);
     teamMappings.forEach((m) => employeeIds.add(m.employee_id));
   }
 
@@ -133,7 +154,7 @@ const resolveEmployeeAccessWhere = async ({ userId, employeeId, companyId, hiera
     return { id: -1 };
   }
 
-  return { id: { [Op.in]: [...employeeIds] }, company_id: companyId };
+  return { id: { [Op.in]: [...employeeIds] }, ...(await employeeRepository.employeeScope(companyId)) };
 };
 
 module.exports = { resolveEmployeeAccessWhere };

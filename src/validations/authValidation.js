@@ -38,6 +38,48 @@ const loginSchema = Joi.object({
 });
 
 /**
+ * POST /auth/select-role
+ * Completes Role-Based Login for an employee holding multiple active
+ * roles — see authService.selectRole().
+ */
+const selectRoleSchema = Joi.object({
+  loginTicket: Joi.string()
+    .trim()
+    .required()
+    .messages({
+      'string.empty': 'Login ticket is required.',
+      'any.required': 'Login ticket is required.',
+    }),
+
+  roleId: Joi.number()
+    .integer()
+    .positive()
+    .required()
+    .messages({
+      'number.base': 'roleId must be a number.',
+      'any.required': 'roleId is required.',
+    }),
+});
+
+/**
+ * POST /auth/microsoft
+ *
+ * Body carries ONLY the raw Microsoft ID token — the frontend must never
+ * send email/role/employeeId/etc. directly; only claims that survive
+ * microsoftAuthService's signature/issuer/audience/tenant verification are
+ * ever trusted (see authService.loginWithMicrosoft()).
+ */
+const microsoftLoginSchema = Joi.object({
+  idToken: Joi.string()
+    .trim()
+    .required()
+    .messages({
+      'string.empty': 'idToken is required.',
+      'any.required': 'idToken is required.',
+    }),
+});
+
+/**
  * POST /auth/refresh-token
  */
 const refreshTokenSchema = Joi.object({
@@ -179,6 +221,8 @@ const resetPasswordSchema = Joi.object({
 
 module.exports = {
   loginSchema,
+  microsoftLoginSchema,
+  selectRoleSchema,
   refreshTokenSchema,
   changePasswordSchema,
   directChangePasswordSchema,

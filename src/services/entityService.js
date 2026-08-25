@@ -1,7 +1,6 @@
 'use strict';
 
 const entityRepository = require('../repositories/entityRepository');
-const userRepository = require('../repositories/userRepository');
 const roleRepository = require('../repositories/roleRepository');
 const { generateEntityCode } = require('../helpers/codeGenerator');
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
@@ -22,33 +21,45 @@ const logger = require('../utils/logger');
  */
 
 /**
- * Validate an entity_admin_user_id being assigned/reassigned to an Entity:
- * must exist, hold the "Entity Admin" role, and have been created by THIS
- * Admin — an Admin may only assign Entities to Entity Admins they
- * themselves created, never someone else's. Reuses the same created_by
- * relationship the earlier Entity Admin/BU Admin scope fix introduced.
+ * Validate an entity_admin_employee_id being assigned/reassigned to an
+ * Entity: must exist, hold an active "Entity Admin" role, and have been
+ * created by THIS Admin — an Admin may only assign Entities to Entity
+ * Admins they themselves created, never someone else's.
  *
- * @param {number|null|undefined} entityAdminUserId
+ * @param {number|null|undefined} entityAdminEmployeeId
  * @param {number} actorId - the calling Admin
  * @returns {Promise<void>}
  */
-async function assertValidEntityAdminAssignment(entityAdminUserId, actorId) {
-  if (entityAdminUserId === undefined || entityAdminUserId === null) {
+async function assertValidEntityAdminAssignment(entityAdminEmployeeId, actorId) {
+  if (entityAdminEmployeeId === undefined || entityAdminEmployeeId === null) {
     return;
   }
 
-  const [user, entityAdminRole] = await Promise.all([
-    userRepository.findById(entityAdminUserId),
+  const { Employee, Role } = require('../models');
+  const [employee, entityAdminRole] = await Promise.all([
+    Employee.findOne({
+      where: { id: entityAdminEmployeeId, is_deleted: false },
+      include: [{
+        model: Role,
+        as: 'roles',
+        attributes: ['role_name'],
+        through: { attributes: ['status'] },
+      }],
+    }),
     roleRepository.findByName('Entity Admin'),
   ]);
 
-  if (!user || !entityAdminRole || user.role_id !== entityAdminRole.id) {
+  const holdsEntityAdmin = !!employee && !!entityAdminRole && (employee.roles || []).some(
+    (role) => role.role_name === entityAdminRole.role_name && role.EmployeeRole && role.EmployeeRole.status === 'active'
+  );
+
+  if (!holdsEntityAdmin) {
     const err = new Error('Entity Admin not found.');
     err.statusCode = 404;
     throw err;
   }
 
-  if (user.created_by !== actorId) {
+  if (employee.created_by !== actorId) {
     const err = new Error('You can only assign an Entity to an Entity Admin you created.');
     err.statusCode = 403;
     throw err;
@@ -99,7 +110,7 @@ const getById = async (id, entityIds = []) => {
 
 /**
  * Create a new Entity. created_by is always the calling user (Admin or
- * Entity Admin). entity_admin_user_id resolution branches on the caller:
+ * Entity Admin). entity_admin_employee_id resolution branches on the caller:
  *   - Entity Admin: always forced to their own actorId — never trusted
  *     from the request body, since an Entity Admin must only ever create
  *     an Entity for themselves, not assign one to someone else.
@@ -107,7 +118,7 @@ const getById = async (id, entityIds = []) => {
  *     (assertValidEntityAdminAssignment), or left unassigned for a later
  *     reassignment via update() — unchanged from before.
  *
- * @param {object} data - { entity_name, [entity_code], [status], [entity_admin_user_id] }
+ * @param {object} data - { entity_name, [entity_code], [status], [entity_admin_employee_id] }
  * @param {number} actorId - the calling Admin or Entity Admin
  * @param {object} req
  * @param {boolean} [isEntityAdmin] - true when the caller is an Entity Admin
@@ -118,8 +129,8 @@ const create = async (data, actorId, req, isEntityAdmin = false) => {
   if (isEntityAdmin) {
     entityAdminUserId = actorId;
   } else {
-    await assertValidEntityAdminAssignment(data.entity_admin_user_id, actorId);
-    entityAdminUserId = data.entity_admin_user_id || null;
+    await assertValidEntityAdminAssignment(data.entity_admin_employee_id, actorId);
+    entityAdminUserId = data.entity_admin_employee_id || null;
   }
 
   let entity_code = data.entity_code || generateEntityCode();
@@ -142,7 +153,7 @@ const create = async (data, actorId, req, isEntityAdmin = false) => {
   const payload = {
     ...data,
     entity_code,
-    entity_admin_user_id: entityAdminUserId,
+    entity_admin_employee_id: entityAdminUserId,
     created_by: actorId,
     updated_by: actorId,
   };
@@ -155,7 +166,7 @@ const create = async (data, actorId, req, isEntityAdmin = false) => {
     'entities',
     entity.id,
     null,
-    { entity_code: entity.entity_code, entity_name: entity.entity_name, entity_admin_user_id: entity.entity_admin_user_id },
+    { entity_code: entity.entity_code, entity_name: entity.entity_name, entity_admin_employee_id: entity.entity_admin_employee_id },
     getIpAddress(req)
   );
 
@@ -166,7 +177,7 @@ const create = async (data, actorId, req, isEntityAdmin = false) => {
 
 /**
  * @param {number} id
- * @param {object} data - may include entity_admin_user_id to (re)assign
+ * @param {object} data - may include entity_admin_employee_id to (re)assign
  * @param {number} userId - the calling Admin
  * @param {object} req
  * @param {number[]} entityIds - the caller's allowed Entity IDs (req.entityIds)
@@ -189,15 +200,15 @@ const update = async (id, data, userId, req, entityIds) => {
     }
   }
 
-  if (data.entity_admin_user_id !== undefined && data.entity_admin_user_id !== existing.entity_admin_user_id) {
-    await assertValidEntityAdminAssignment(data.entity_admin_user_id, userId);
+  if (data.entity_admin_employee_id !== undefined && data.entity_admin_employee_id !== existing.entity_admin_employee_id) {
+    await assertValidEntityAdminAssignment(data.entity_admin_employee_id, userId);
   }
 
   const oldValues = {
     entity_code: existing.entity_code,
     entity_name: existing.entity_name,
     status: existing.status,
-    entity_admin_user_id: existing.entity_admin_user_id,
+    entity_admin_employee_id: existing.entity_admin_employee_id,
   };
 
   const payload = { ...data, updated_by: userId };

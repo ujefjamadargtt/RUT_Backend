@@ -4,9 +4,20 @@ const serviceCategoryService = require('../services/serviceCategoryService');
 const { sendSuccess, sendCreated, sendNoContent, sendNotFound, sendError } = require('../utils/response');
 const logger = require('../utils/logger');
 
+/**
+ * The object-level scoping context Service Category reads/writes need for
+ * company-less actors (Admin/Entity Admin) — see companyAccessControlService.js.
+ * Built only from server-verified req fields, never from body/query.
+ *
+ * @param {import('express').Request} req
+ */
+function buildAuthContext(req) {
+  return { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId };
+}
+
 const getAllServiceCategories = async (req, res) => {
   try {
-    const categories = await serviceCategoryService.getAll(req.query, req.companyId);
+    const categories = await serviceCategoryService.getAll(req.query, buildAuthContext(req));
     return sendSuccess(res, categories, 'Service categories fetched successfully.');
   } catch (error) {
     logger.error('getAllServiceCategories error', { error: error.message });
@@ -19,7 +30,7 @@ const getServiceCategoryById = async (req, res) => {
     const id = parseInt(req.params.id, 10);
     if (isNaN(id) || id < 1) return sendError(res, 'Invalid service category ID.', 400);
 
-    const category = await serviceCategoryService.getById(id, req.companyId);
+    const category = await serviceCategoryService.getById(id, buildAuthContext(req));
     return sendSuccess(res, category, 'Service category fetched successfully.');
   } catch (error) {
     if (error.statusCode === 404) return sendNotFound(res, 'Service category');
@@ -30,7 +41,7 @@ const getServiceCategoryById = async (req, res) => {
 
 const createServiceCategory = async (req, res) => {
   try {
-    const category = await serviceCategoryService.create(req.body, req.userId, req.companyId);
+    const category = await serviceCategoryService.create(req.body, req.userId, buildAuthContext(req));
     return sendCreated(res, category, 'Service category created successfully.');
   } catch (error) {
     if (error.statusCode === 409) return sendError(res, error.message, 409);
@@ -44,7 +55,7 @@ const updateServiceCategory = async (req, res) => {
     const id = parseInt(req.params.id, 10);
     if (isNaN(id) || id < 1) return sendError(res, 'Invalid service category ID.', 400);
 
-    const category = await serviceCategoryService.update(id, req.body, req.userId, req.companyId);
+    const category = await serviceCategoryService.update(id, req.body, req.userId, buildAuthContext(req));
     return sendSuccess(res, category, 'Service category updated successfully.');
   } catch (error) {
     if (error.statusCode === 404) return sendNotFound(res, 'Service category');
@@ -59,7 +70,7 @@ const deleteServiceCategory = async (req, res) => {
     const id = parseInt(req.params.id, 10);
     if (isNaN(id) || id < 1) return sendError(res, 'Invalid service category ID.', 400);
 
-    await serviceCategoryService.delete(id, req.userId, req.companyId);
+    await serviceCategoryService.delete(id, req.userId, buildAuthContext(req));
     return sendNoContent(res);
   } catch (error) {
     if (error.statusCode === 404) return sendNotFound(res, 'Service category');

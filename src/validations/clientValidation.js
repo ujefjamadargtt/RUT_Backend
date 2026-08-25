@@ -12,6 +12,15 @@ const clientCodePattern = /^[A-Z0-9_-]{2,20}$/;
  * POST /clients — Create new client
  */
 const createClientSchema = Joi.object({
+  // Only meaningful for a company-less actor (Admin/Entity Admin/Platform
+  // Admin — req.companyId is undefined for them by design). A BU-scoped
+  // actor's own req.companyId always wins over this field, so it can't be
+  // used to create a Client in a company the caller doesn't belong to; see
+  // clientService.resolveCreateCompanyId().
+  company_id: Joi.number().integer().positive().optional().messages({
+    'number.base': 'Business Unit (company_id) must be a number.',
+  }),
+
   client_code: Joi.string()
     .trim()
     .uppercase()

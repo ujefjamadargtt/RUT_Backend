@@ -14,8 +14,8 @@ const { Model, DataTypes } = require('sequelize');
 module.exports = (sequelize) => {
   class ManagerEmployeeMapping extends Model {
     static associate(models) {
-      ManagerEmployeeMapping.belongsTo(models.User, {
-        foreignKey: 'manager_user_id',
+      ManagerEmployeeMapping.belongsTo(models.Employee, {
+        foreignKey: 'manager_employee_id',
         as: 'manager',
       });
       ManagerEmployeeMapping.belongsTo(models.Employee, {
@@ -40,15 +40,15 @@ module.exports = (sequelize) => {
           key: 'id',
         },
       },
-      manager_user_id: {
+      manager_employee_id: {
         type: DataTypes.INTEGER,
         allowNull: false,
         references: {
-          model: 'users',
+          model: 'employees',
           key: 'id',
         },
         validate: {
-          notNull: { msg: 'Manager user is required.' },
+          notNull: { msg: 'Manager employee is required.' },
         },
       },
       employee_id: {

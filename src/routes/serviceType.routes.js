@@ -18,6 +18,12 @@ const Joi = require('joi');
 // ─── Inline validation schemas (service types are simple) ─────────────────────
 
 const createServiceTypeSchema = Joi.object({
+  // Only meaningful for a company-less actor (Admin/Entity Admin) — see
+  // companyAccessControlService.resolveCreateCompanyId(). A BU-scoped
+  // actor's own req.companyId always wins over this field.
+  company_id: Joi.number().integer().positive().optional().messages({
+    'number.base': 'Business Unit (company_id) must be a number.',
+  }),
   service_type_name: Joi.string()
     .trim()
     .min(2)

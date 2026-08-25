@@ -28,6 +28,10 @@ module.exports = (sequelize) => {
     }
   }
 
+  // NOTE: EmployeeWorkLog.hasMany(EmployeeWorkLogTimeEntry, { as: 'timeEntries' })
+  // is declared in models/index.js (alongside every other cross-model
+  // association in this codebase), not here.
+
   EmployeeWorkLog.init(
     {
       id: {
@@ -94,31 +98,18 @@ module.exports = (sequelize) => {
           isDate: { msg: 'Work date must be a valid date.' },
         },
       },
-      // Optional time-of-day pair within work_date (no date component is
-      // stored here — work_date already represents the date). Nullable so
-      // every pre-existing row (and any non-time-based entry) keeps working
-      // unchanged; `hours` remains the source of truth for those. When both
-      // are present, employeeTimesheetService.js always (re)computes `hours`
-      // from them server-side — see resolveHoursAndTimes() — never trusting
-      // a caller-supplied hours value alongside a time pair. The isAfterStartTime
-      // check here is a defense-in-depth backstop (mirrors the DB CHECK
-      // constraint); the service layer's calculateHoursFromTimes() is the
-      // authoritative validation.
-      start_time: {
-        type: DataTypes.TIME,
-        allowNull: true,
-      },
-      end_time: {
-        type: DataTypes.TIME,
-        allowNull: true,
-        validate: {
-          isAfterStartTime(value) {
-            if (value && this.start_time && value <= this.start_time) {
-              throw new Error('End time must be greater than start time.');
-            }
-          },
-        },
-      },
+      // start_time/end_time used to live directly on this row (a single
+      // pair, added by database/migrations/20260860_add_work_log_start_end_time.sql)
+      // but that can't represent multiple disjoint time segments against the
+      // SAME Module/Task on the SAME date. Superseded by the
+      // `timeEntries` association (EmployeeWorkLogTimeEntry, one row per
+      // segment) — see database/migrations/
+      // 20260886_backfill_and_drop_worklog_start_end_time.sql, which
+      // migrated every historical non-null pair into that table before
+      // dropping these two columns here. `hours` below is always the
+      // authoritative total (the SUM of this row's timeEntries when any
+      // exist — see employeeTimesheetService.resolveHoursAndTimeEntries —
+      // or a plain caller-supplied value for a non-time-based entry).
       hours: {
         type: DataTypes.DECIMAL(6, 2),
         allowNull: false,
@@ -157,10 +148,16 @@ module.exports = (sequelize) => {
         },
       },
       // 'pending'  - entered by the employee, awaiting approval (or Sync,
-      //              if approval isn't required for this employee).
+      //              if approval isn't required for this employee). Also
+      //              the state a 'rejected' row returns to on Resubmit.
       // 'approved' - approved (by a Manager, or automatically because
       //              approval isn't required for this employee) but Sync
       //              has not run yet. Eligible for Sync.
+      // 'rejected' - a Manager rejected this PENDING row (see
+      //              rejection_remark/rejected_by/rejected_at below). Only
+      //              reachable from 'pending', and only leaves via Resubmit
+      //              (-> 'pending', never directly to 'approved') or the
+      //              Employee deleting it.
       // 'synced'   - included in a completed Sync run; the corresponding
       //              official record now lives in `timesheets`, linked via
       //              timesheet_import_id. Synced rows are read-only.
@@ -169,8 +166,28 @@ module.exports = (sequelize) => {
         allowNull: false,
         defaultValue: 'pending',
         validate: {
-          isIn: { args: [['pending', 'approved', 'synced']], msg: 'Status must be pending, approved, or synced.' },
+          isIn: {
+            args: [['pending', 'approved', 'rejected', 'synced']],
+            msg: 'Status must be pending, approved, rejected, or synced.',
+          },
         },
+      },
+      // Set together whenever a Manager rejects this row (see
+      // managerSelfServiceService.rejectWorkLogEntry). Deliberately NOT
+      // cleared on Resubmit (status back to 'pending') — the most recent
+      // rejection stays visible to the Employee even while the row is
+      // pending again; the full history also survives in audit_logs.
+      rejection_remark: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+      },
+      rejected_by: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
+      rejected_at: {
+        type: DataTypes.DATE,
+        allowNull: true,
       },
       synced_at: {
         type: DataTypes.DATE,

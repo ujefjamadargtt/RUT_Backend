@@ -24,6 +24,7 @@ const {
   listMyTeamTimesheetsQuerySchema,
   approvalSummaryQuerySchema,
   bulkApproveTimesheetsSchema,
+  rejectWorkLogSchema,
 } = require('../validations/managerSelfServiceValidation');
 const controller = require('../controllers/managerSelfServiceController');
 
@@ -160,12 +161,12 @@ router.get(
  * /my-team/timesheets/{id}/approve:
  *   put:
  *     summary: >
- *       Approve one pending timesheet entry belonging to one of the
- *       calling Manager's own mapped Employees. Reuses the existing
- *       is_publish publish mechanism (timesheetRepository.publishById) —
- *       not a new approval mechanism, just a Manager-scoped entry point
- *       into the same one. Activates the previously-seeded-but-unused
- *       manager.approve_timesheets capability.
+ *       Approve ONE pending Employee Work Log entry belonging to one of the
+ *       calling Manager's own mapped Employees — the same
+ *       `employee_work_logs` id space {id}/reject below uses (this is NOT
+ *       an official-Timesheet id; the entry needn't be synced yet).
+ *       Symmetric with reject: same table, same ownership check, same
+ *       pending-only guard.
  *     tags: [My Team]
  *     security:
  *       - bearerAuth: []
@@ -176,19 +177,65 @@ router.get(
  *         schema: { type: integer }
  *     responses:
  *       200:
- *         description: Timesheet approved (is_publish set to true)
+ *         description: Work log entry approved (status set to 'approved')
  *       403:
- *         description: This timesheet's Employee is not mapped to the caller
+ *         description: This entry's Employee is not mapped to the caller
  *       404:
  *         description: Not found
  *       409:
- *         description: Already approved
+ *         description: Entry is not currently pending
  */
 router.put(
   '/timesheets/:id/approve',
   authenticate,
   authorize('manager.approve_timesheets'),
   controller.approveTimesheet
+);
+
+/**
+ * @swagger
+ * /my-team/timesheets/{id}/reject:
+ *   put:
+ *     summary: >
+ *       Reject one pending Employee Work Log entry belonging to one of the
+ *       calling Manager's own mapped Employees. A remark is mandatory.
+ *       Only a currently-'pending' entry can be rejected; the Employee can
+ *       then Resubmit it (back to 'pending') or delete it.
+ *     tags: [My Team]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [remark]
+ *             properties:
+ *               remark: { type: string, example: "Hours entered do not match the project activity." }
+ *     responses:
+ *       200:
+ *         description: Work log entry rejected (status set to 'rejected', remark stored)
+ *       403:
+ *         description: This entry's Employee is not mapped to the caller
+ *       404:
+ *         description: Not found
+ *       409:
+ *         description: Entry is not currently pending
+ *       422:
+ *         description: remark is missing or empty
+ */
+router.put(
+  '/timesheets/:id/reject',
+  authenticate,
+  authorize('manager.approve_timesheets'),
+  validate(rejectWorkLogSchema),
+  controller.rejectWorkLogEntry
 );
 
 /**

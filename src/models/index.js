@@ -36,6 +36,9 @@ const Company                = require('./Company')(sequelize);
 const Entity                 = require('./Entity')(sequelize);
 const Role                   = require('./Role')(sequelize);
 const Employee               = require('./Employee')(sequelize);
+const EmployeeRole           = require('./EmployeeRole')(sequelize);
+const EmployeeBusinessUnit   = require('./EmployeeBusinessUnit')(sequelize);
+const EmployeeLoginSession   = require('./EmployeeLoginSession')(sequelize);
 const User                   = require('./User')(sequelize);
 const Client                 = require('./Client')(sequelize);
 const Project                = require('./Project')(sequelize);
@@ -58,6 +61,7 @@ const TimesheetImportHistory = require('./TimesheetImportHistory')(sequelize);
 const TimesheetImportError   = require('./TimesheetImportError')(sequelize);
 const Notification           = require('./Notification')(sequelize);
 const FormMaster             = require('./FormMaster')(sequelize);
+const Category                = require('./Category')(sequelize);
 const RoleFormMapping        = require('./RoleFormMapping')(sequelize);
 const RoleCapability         = require('./RoleCapability')(sequelize);
 const AiInsightJob           = require('./AiInsightJob')(sequelize);
@@ -67,12 +71,11 @@ const TeamMapping            = require('./TeamMapping')(sequelize);
 const ManagerEmployeeMapping = require('./ManagerEmployeeMapping')(sequelize);
 const ManagerServicePOMapping = require('./ManagerServicePOMapping')(sequelize);
 const EmployeeWorkLog        = require('./EmployeeWorkLog')(sequelize);
+const EmployeeWorkLogTimeEntry = require('./EmployeeWorkLogTimeEntry')(sequelize);
 const PasswordResetOtp       = require('./PasswordResetOtp')(sequelize);
 const PasswordResetHistory   = require('./PasswordResetHistory')(sequelize);
-const UserAdditionalRole     = require('./UserAdditionalRole')(sequelize);
 const CostBudget             = require('./CostBudget')(sequelize);
 const ResourceBudget         = require('./ResourceBudget')(sequelize);
-const BuHeadCompanyMapping   = require('./BuHeadCompanyMapping')(sequelize);
 
 // ---------------------------------------------------------------------------
 // Associations
@@ -114,24 +117,16 @@ TimesheetImportError.belongsTo(Company,   { foreignKey: 'company_id', as: 'compa
 AiInsight.belongsTo(Company,              { foreignKey: 'company_id', as: 'company' });
 AiInsightJob.belongsTo(Company,           { foreignKey: 'company_id', as: 'company' });
 
-// Entity <-> User (ownership) and Entity <-> Company — the new tenancy
+// Entity <-> Employee (ownership) and Entity <-> Company — the tenancy
 // tier: Platform Admin -> Entity Admin (owns Entities) -> Entity ->
-// Company (BU Admin). One User (an Entity Admin) may own several
-// Entities; each Entity has exactly one owner at a time.
-Entity.belongsTo(User, { foreignKey: 'entity_admin_user_id', as: 'entityAdmin' });
-User.hasMany(Entity, { foreignKey: 'entity_admin_user_id', as: 'ownedEntities' });
+// Company (BU Admin). One Employee (an Entity Admin) may own several
+// Entities; each Entity has exactly one owner at a time. Employee-keyed
+// since login/identity moved off User Master — see database/migrations/
+// 20260875_add_entities_entity_admin_employee_id.sql.
+Entity.belongsTo(Employee, { foreignKey: 'entity_admin_employee_id', as: 'entityAdmin' });
+Employee.hasMany(Entity, { foreignKey: 'entity_admin_employee_id', as: 'ownedEntities' });
 Entity.hasMany(Company, { foreignKey: 'entity_id', as: 'companies' });
 Company.belongsTo(Entity, { foreignKey: 'entity_id', as: 'entity' });
-
-// BU Head <-> Company (many-to-many via bu_head_company_mappings) — a BU
-// Head User may be mapped to several Companies, and a Company may have more
-// than one BU Head. See database/migrations/
-// 20260863_create_bu_head_company_mappings.sql and resolveCompany.js (which
-// verifies the request-selected Company against this same mapping).
-User.hasMany(BuHeadCompanyMapping, { foreignKey: 'bu_head_user_id', as: 'buHeadCompanyMappings' });
-BuHeadCompanyMapping.belongsTo(User, { foreignKey: 'bu_head_user_id', as: 'buHead' });
-Company.hasMany(BuHeadCompanyMapping, { foreignKey: 'company_id', as: 'buHeadMappings' });
-BuHeadCompanyMapping.belongsTo(Company, { foreignKey: 'company_id', as: 'company' });
 
 // Role <-> User: users.role_id is the sole PRIMARY role and the sole
 // source of truth for hierarchy rank / company-entity scoping / the
@@ -141,28 +136,52 @@ BuHeadCompanyMapping.belongsTo(Company, { foreignKey: 'company_id', as: 'company
 Role.hasMany(User, { foreignKey: 'role_id', as: 'users' });
 User.belongsTo(Role, { foreignKey: 'role_id', as: 'role' });
 
-// Role <-> User (ADDITIONAL, operational-only roles) — a purely additive
-// capability grant on top of the primary role above; NEVER read for
-// hierarchy/scoping decisions, only unioned into effective-capability
-// checks. See src/services/roleHierarchyService.js's
-// getEffectiveCapabilitiesForRoleIds() and
-// database/migrations/20260850_add_user_additional_roles.sql. Deliberately
-// a separate join table (user_additional_roles), not a revival of the
-// dropped user_roles table, so the two can never be confused.
-User.belongsToMany(Role, {
-  through: UserAdditionalRole,
-  foreignKey: 'user_id',
+// Role <-> Employee (many-to-many via employee_roles) — replaces the old
+// single users.role_id + user_additional_roles split now that login lives
+// on Employee. No primary/additional distinction — every consumer treats
+// the set uniformly (effective hierarchy rank = MIN across active rows,
+// see roleHierarchyService.js). See database/migrations/
+// 20260865_create_employee_roles.sql.
+Employee.belongsToMany(Role, {
+  through: EmployeeRole,
+  foreignKey: 'employee_id',
   otherKey: 'role_id',
-  as: 'additionalRoles',
+  as: 'roles',
 });
-Role.belongsToMany(User, {
-  through: UserAdditionalRole,
+Role.belongsToMany(Employee, {
+  through: EmployeeRole,
   foreignKey: 'role_id',
-  otherKey: 'user_id',
-  as: 'usersWithAdditionalRole',
+  otherKey: 'employee_id',
+  as: 'employeesWithRole',
 });
-UserAdditionalRole.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
-UserAdditionalRole.belongsTo(Role, { foreignKey: 'role_id', as: 'role' });
+EmployeeRole.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
+EmployeeRole.belongsTo(Role, { foreignKey: 'role_id', as: 'role' });
+
+// Company ("Business Unit") <-> Employee (many-to-many via
+// employee_business_units) — replaces the old single users.company_id
+// column and the BU-Head-only bu_head_company_mappings mechanism. This is
+// the table resolveCompany.js reads to resolve a request's active BU. See
+// database/migrations/20260866_create_employee_business_units.sql.
+Employee.belongsToMany(Company, {
+  through: EmployeeBusinessUnit,
+  foreignKey: 'employee_id',
+  otherKey: 'business_unit_id',
+  as: 'businessUnits',
+});
+Company.belongsToMany(Employee, {
+  through: EmployeeBusinessUnit,
+  foreignKey: 'business_unit_id',
+  otherKey: 'employee_id',
+  as: 'employeesInBusinessUnit',
+});
+EmployeeBusinessUnit.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
+EmployeeBusinessUnit.belongsTo(Company, { foreignKey: 'business_unit_id', as: 'businessUnit' });
+
+// Employee <-> EmployeeLoginSession — refresh-token store for
+// Employee-based login. See database/migrations/
+// 20260879_create_employee_login_sessions.sql.
+Employee.hasMany(EmployeeLoginSession, { foreignKey: 'employee_id', as: 'loginSessions' });
+EmployeeLoginSession.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
 
 // Role self-referencing inheritance edge (see roleHierarchyService.js) —
 // only ever set for the two edges the RBAC spec states (Service PO Admin <-
@@ -204,6 +223,16 @@ FormMaster.hasMany(RoleFormMapping, { foreignKey: 'form_id', as: 'roleFormMappin
 RoleFormMapping.belongsTo(Role, { foreignKey: 'role_id', as: 'role' });
 RoleFormMapping.belongsTo(FormMaster, { foreignKey: 'form_id', as: 'form' });
 
+// FormMaster (module row) <-> Category <-> FormMaster (form row) — the
+// optional Module -> Category -> Form layer. module_id points at the
+// module's OWN form_master row id; category_id (on a form row only) points
+// at the category. See database/migrations/
+// 20260881_add_form_master_categories.sql.
+FormMaster.hasMany(Category, { foreignKey: 'module_id', as: 'categories' });
+Category.belongsTo(FormMaster, { foreignKey: 'module_id', as: 'module' });
+Category.hasMany(FormMaster, { foreignKey: 'category_id', as: 'forms' });
+FormMaster.belongsTo(Category, { foreignKey: 'category_id', as: 'category' });
+
 // User <-> AuditLog
 User.hasMany(AuditLog, { foreignKey: 'user_id', as: 'auditLogs' });
 AuditLog.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
@@ -242,20 +271,20 @@ ServiceType.belongsTo(ServiceCategory, { foreignKey: 'service_category_id', as: 
 // Three distinct mapping tables, each a strict "one owner" or plain
 // many-to-many relationship — see the individual model files for the exact
 // cardinality each one enforces at the DB level.
-TeamMapping.belongsTo(User, { foreignKey: 'service_po_admin_user_id', as: 'servicePOAdmin' });
-TeamMapping.belongsTo(User, { foreignKey: 'manager_user_id', as: 'manager' });
+TeamMapping.belongsTo(Employee, { foreignKey: 'service_po_admin_employee_id', as: 'servicePOAdmin' });
+TeamMapping.belongsTo(Employee, { foreignKey: 'manager_employee_id', as: 'manager' });
 TeamMapping.belongsTo(Company, { foreignKey: 'company_id', as: 'company' });
-User.hasMany(TeamMapping, { foreignKey: 'service_po_admin_user_id', as: 'managedTeamMappings' });
+Employee.hasMany(TeamMapping, { foreignKey: 'service_po_admin_employee_id', as: 'managedTeamMappings' });
 
-ManagerEmployeeMapping.belongsTo(User, { foreignKey: 'manager_user_id', as: 'manager' });
+ManagerEmployeeMapping.belongsTo(Employee, { foreignKey: 'manager_employee_id', as: 'manager' });
 ManagerEmployeeMapping.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
 ManagerEmployeeMapping.belongsTo(Company, { foreignKey: 'company_id', as: 'company' });
-User.hasMany(ManagerEmployeeMapping, { foreignKey: 'manager_user_id', as: 'managedEmployeeMappings' });
+Employee.hasMany(ManagerEmployeeMapping, { foreignKey: 'manager_employee_id', as: 'managedEmployeeMappings' });
 
-ManagerServicePOMapping.belongsTo(User, { foreignKey: 'manager_user_id', as: 'manager' });
+ManagerServicePOMapping.belongsTo(Employee, { foreignKey: 'manager_employee_id', as: 'manager' });
 ManagerServicePOMapping.belongsTo(ServicePO, { foreignKey: 'service_po_id', as: 'servicePO' });
 ManagerServicePOMapping.belongsTo(Company, { foreignKey: 'company_id', as: 'company' });
-User.hasMany(ManagerServicePOMapping, { foreignKey: 'manager_user_id', as: 'grantedServicePOMappings' });
+Employee.hasMany(ManagerServicePOMapping, { foreignKey: 'manager_employee_id', as: 'grantedServicePOMappings' });
 
 // Default Category/Type Master + per-company mapping tables — does NOT
 // replace ServiceCategory/ServiceType above; see DefaultCategory.js's doc.
@@ -339,6 +368,24 @@ EmployeeWorkLog.belongsTo(SubProject, { foreignKey: 'sub_project_id', as: 'subPr
 TimesheetImportHistory.hasMany(EmployeeWorkLog, { foreignKey: 'timesheet_import_id', as: 'syncedWorkLogs', onDelete: 'SET NULL' });
 EmployeeWorkLog.belongsTo(TimesheetImportHistory, { foreignKey: 'timesheet_import_id', as: 'importHistory', onDelete: 'SET NULL' });
 
+// The Manager who rejected this row — see rejection_remark/rejected_by/
+// rejected_at on EmployeeWorkLog. rejected_by is populated from req.userId,
+// which since the identity redesign is an alias for req.employeeId (see
+// middlewares/auth.js), i.e. this column holds an Employee id, not a
+// users.id — must join against Employee, not User. No reverse hasMany,
+// matching the imported_by/importer association above (a "who acted on
+// this" FK, not a listable collection).
+EmployeeWorkLog.belongsTo(Employee, { foreignKey: 'rejected_by', as: 'rejectedByEmployee' });
+
+// EmployeeWorkLog <-> EmployeeWorkLogTimeEntry — the detailed Start Time/
+// End Time segments backing one Daily Work Log row (see
+// EmployeeWorkLogTimeEntry.js and database/migrations/
+// 20260885_create_employee_work_log_time_entries.sql). ON DELETE CASCADE
+// matches the FK: deleting a work log row (e.g. the Daily REPLACE SAVE
+// flow's delete-then-reinsert) always deletes its time entries with it.
+EmployeeWorkLog.hasMany(EmployeeWorkLogTimeEntry, { foreignKey: 'employee_work_log_id', as: 'timeEntries', onDelete: 'CASCADE' });
+EmployeeWorkLogTimeEntry.belongsTo(EmployeeWorkLog, { foreignKey: 'employee_work_log_id', as: 'workLog' });
+
 // Service PO Hierarchy — Parent/Child nodes belonging to exactly one
 // Service PO (max depth 2: Service PO -> Parent -> Child; a CHILD can never
 // itself be a parent_hierarchy_id target — enforced in
@@ -401,6 +448,9 @@ module.exports = {
   Entity,
   Role,
   Employee,
+  EmployeeRole,
+  EmployeeBusinessUnit,
+  EmployeeLoginSession,
   User,
   Client,
   Project,
@@ -423,6 +473,7 @@ module.exports = {
   TimesheetImportError,
   Notification,
   FormMaster,
+  Category,
   RoleFormMapping,
   RoleCapability,
   AiInsightJob,
@@ -432,10 +483,9 @@ module.exports = {
   ManagerEmployeeMapping,
   ManagerServicePOMapping,
   EmployeeWorkLog,
+  EmployeeWorkLogTimeEntry,
   PasswordResetOtp,
   PasswordResetHistory,
-  UserAdditionalRole,
   CostBudget,
   ResourceBudget,
-  BuHeadCompanyMapping,
 };

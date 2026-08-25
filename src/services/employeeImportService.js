@@ -3,7 +3,9 @@
 const xlsx = require('xlsx');
 const { sequelize, Role } = require('../models');
 const employeeRepository = require('../repositories/employeeRepository');
-const userRepository = require('../repositories/userRepository');
+const employeeRoleRepository = require('../repositories/employeeRoleRepository');
+const employeeServicePOMappingService = require('./employeeServicePOMappingService');
+const { resolveOptionalCreateCompanyId } = require('./companyAccessControlService');
 const logger = require('../utils/logger');
 
 // Bulk-imported logins all get this same default password rather than a
@@ -57,13 +59,14 @@ const HEADER_MAP = {
 const CODE_RE = /^[A-Z0-9_/#-]{2,20}$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-// Employee is pure business data (see database/migrations/
-// 20260842_employees_drop_login_columns.sql); a row only gets a linked
-// User/login account when an "Email ID" column is present and populated —
-// same convention as employeeService.create(), minus Manager assignment,
-// which this file's format doesn't have columns for. HR can assign a
-// Manager afterwards via PUT /employees/:id. Rows with no email import as
-// business-data-only, same as before.
+// Employee is the sole login identity (email/password live natively on
+// `employees` — see database/migrations/20260864_add_employee_login_columns.sql,
+// same as employeeService.create()); a row only gets login credentials
+// (email/password + the "Employee" role grant) when an "Email ID" column
+// is present and populated, minus Manager assignment, which this file's
+// format doesn't have columns for. HR can assign a Manager afterwards via
+// PUT /employees/:id. Rows with no email import as business-data-only,
+// with no login at all.
 
 function normaliseHeader(raw) {
   return String(raw || '').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -285,10 +288,24 @@ function validateRow(raw, existingCodes, seenCodes, existingEmails, seenEmails) 
  *
  * @param {string} filePath - Absolute path to the saved upload file
  * @param {number} userId   - ID of the authenticated user performing the import
- * @param {number} companyId
+ * @param {import('express').Request} req - for resolveOptionalCreateCompanyId:
+ *   a BU-scoped actor's own req.companyId always wins. A company-less
+ *   Admin/Entity Admin may optionally supply `company_id` in the multipart
+ *   form body (validated against their own owned Companies), but it is NOT
+ *   required — Business Unit assignment for an Admin-driven import is
+ *   deliberately deferred to a later step (map BUs via the ordinary Employee
+ *   Master edit / Role & BU Mapping screen after the employees exist), so
+ *   omitting it simply imports every row with company_id = NULL rather than
+ *   erroring.
  * @returns {Promise<{ total, imported, skipped, error_rows, credentials }>}
  */
-async function importEmployees(filePath, userId, companyId) {
+async function importEmployees(filePath, userId, req) {
+  const bodyCompanyId = req.body && req.body.company_id ? parseInt(req.body.company_id, 10) : undefined;
+  const companyId = await resolveOptionalCreateCompanyId(
+    { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId },
+    bodyCompanyId
+  );
+
   // 1. Parse Excel / CSV
   const rawRows = parseEmployeeFile(filePath);
 
@@ -303,7 +320,7 @@ async function importEmployees(filePath, userId, companyId) {
   // N+1 queries.
   const existingForCompany = await employeeRepository.findAllForImport(companyId);
   const existingCodes = new Set(existingForCompany.map((e) => e.employee_code.toUpperCase()));
-  const existingEmails = new Set(await userRepository.findAllEmails());
+  const existingEmails = new Set(await employeeRepository.findAllEmails());
 
   // 3. Validate all rows; track codes/emails seen within this file to catch duplicates
   const seenCodes = new Set();
@@ -335,9 +352,11 @@ async function importEmployees(filePath, userId, companyId) {
     }
   }
 
-  // 5. Insert valid rows — Employee always; a linked User too (role =
-  // Employee, temporary password) when the row carried an email, both in
-  // one transaction so a failed User insert doesn't leave an orphan Employee.
+  // 5. Insert valid rows — Employee always; a native login (email/password
+  // directly on the Employee row — Employee is the sole login identity
+  // now, see this file's header comment) plus the "Employee" role grant
+  // when the row carried an Email ID, both in one transaction so a failed
+  // role-grant insert doesn't leave a half-created login.
   let importedCount = 0;
   const dbErrors = [];
   const credentials = [];
@@ -348,24 +367,18 @@ async function importEmployees(filePath, userId, companyId) {
       await sequelize.transaction(async (transaction) => {
         const employee = await employeeRepository.create({
           ...employeeFields,
+          ...(email ? { email, password: DEFAULT_IMPORT_PASSWORD } : {}),
           company_id: companyId,
           created_by: userId,
           updated_by: userId,
         }, { transaction });
 
         if (email) {
-          await userRepository.create({
-            email,
-            password: DEFAULT_IMPORT_PASSWORD,
-            role_id: employeeRole.id,
-            employee_id: employee.id,
-            company_id: companyId,
-            status: 'active',
-            created_by: userId,
-            updated_by: userId,
-          }, { transaction });
+          await employeeRoleRepository.replaceForEmployee(employee.id, [employeeRole.id], userId, transaction);
           credentials.push({ employee_code: employee.employee_code, email, temporaryPassword: DEFAULT_IMPORT_PASSWORD });
         }
+
+        await employeeServicePOMappingService.autoMapCentralisedServicePOs(employee.id, companyId, userId, transaction);
       });
       importedCount++;
     } catch (dbErr) {

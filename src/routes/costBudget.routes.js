@@ -21,6 +21,15 @@ const {
 } = require('../validations/costBudgetValidation');
 
 // ─── All routes require authentication ────────────────────────────────────────
+// Admin/Entity Admin (ranks 2-3) are scoped here the same way as
+// Resource Budget (see resourceBudgetService.js's resolveScope()): the
+// service resolves their full owned-Company-id ARRAY and validates the
+// submitted Service PO against it, then uses THAT Service PO's own
+// company_id for the rest of the operation — never a pre-selected single
+// BU. A pre-selected single BU (the resolveCompanyContextForCompanyLessActors
+// middleware used elsewhere) is wrong here: this module has no Service PO
+// dropdown of its own, so the PO the caller picks may legitimately belong
+// to any of their owned Companies, not just whichever one a header names.
 router.use(authenticate);
 
 /**

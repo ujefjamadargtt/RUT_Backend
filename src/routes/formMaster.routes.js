@@ -12,8 +12,10 @@ const {
   listModulesSchema,
   reorderModulesSchema,
   reorderFormsSchema,
+  moveFormSchema,
 } = require('../validations/formMasterValidation');
 const formMasterController = require('../controllers/formMasterController');
+const categoryRoutes = require('./category.routes');
 
 /**
  * @swagger
@@ -80,6 +82,29 @@ router.get(
   validate(listModulesSchema, 'query'),
   formMasterController.getModules
 );
+
+/**
+ * @swagger
+ * /forms/hierarchy:
+ *   get:
+ *     summary: Get the full Module -> Category -> Form tree
+ *     tags: [Forms]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Every module, each with its categories (and their forms) and its own uncategorized forms
+ */
+router.get(
+  '/hierarchy',
+  authenticate,
+  formMasterController.getHierarchy
+);
+
+// Category management — nested here (not mounted separately in app.js) so
+// /forms/categories/* is matched before this router's own /:id routes
+// below, exactly like /forms/modules above.
+router.use('/categories', categoryRoutes);
 
 /**
  * @swagger
@@ -208,11 +233,15 @@ router.get(
  *                 example: "Reports"
  *                 description: Omit or send null to create a module instead of a form.
  *               status: { type: string, enum: [active, inactive], default: active }
+ *               category_id:
+ *                 type: integer
+ *                 nullable: true
+ *                 description: Only meaningful when module_name is set (creating a form). Assigns the new form directly under this category instead of straight under the module; omit/null for Module -> Form.
  *     responses:
  *       201:
  *         description: Form/module created
  *       400:
- *         description: Referenced module does not exist
+ *         description: Referenced module (or category) does not exist, or category belongs to a different module
  *       409:
  *         description: A module/form with this name already exists
  *       422:
@@ -266,6 +295,51 @@ router.put(
   authenticate,
   validate(updateFormSchema),
   formMasterController.update
+);
+
+/**
+ * @swagger
+ * /forms/{id}/move:
+ *   put:
+ *     summary: Move a form between Module/Category/another Category (never renames or (de)activates it)
+ *     tags: [Forms]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               module_id:
+ *                 type: integer
+ *                 description: Move to a different module (by its module row's own id). Omit to keep the current module.
+ *               category_id:
+ *                 type: integer
+ *                 nullable: true
+ *                 description: Assign/reassign a category, or null to move directly under the module.
+ *             example: { "module_id": 1, "category_id": null }
+ *     responses:
+ *       200:
+ *         description: Form moved
+ *       400:
+ *         description: Destination module/category does not exist, category belongs to a different module, or attempted to move a module row
+ *       404:
+ *         description: Form not found
+ *       409:
+ *         description: A form with this name already exists in the destination module
+ */
+router.put(
+  '/:id/move',
+  authenticate,
+  validate(moveFormSchema),
+  formMasterController.move
 );
 
 /**

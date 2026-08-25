@@ -77,7 +77,7 @@ const listByServicePO = async (req, res) => {
       return sendError(res, 'Invalid Service PO ID.', 400);
     }
 
-    const records = await costBudgetService.listByServicePO(servicePOId, req.companyId);
+    const records = await costBudgetService.listByServicePO(servicePOId, req);
     return sendSuccess(res, records, 'Cost budgets fetched successfully.');
   } catch (error) {
     if (error.statusCode === 404) {
@@ -93,7 +93,7 @@ const listByServicePO = async (req, res) => {
  */
 const list = async (req, res) => {
   try {
-    const records = await costBudgetService.list(req.query, req.companyId);
+    const records = await costBudgetService.list(req.query, req);
     return sendSuccess(res, records, 'Cost budgets fetched successfully.');
   } catch (error) {
     logger.error('list (CostBudget) error', { error: error.message, query: req.query });

@@ -12,6 +12,17 @@ const poCodePattern = /^[A-Z0-9_/-]{2,30}$/;
  * POST /service-pos — Create new Service PO
  */
 const createServicePOSchema = Joi.object({
+  // Business Unit is mandatory for a Service PO, but only meaningful IN
+  // THIS FIELD for a company-less actor (Admin/Entity Admin) — a BU-scoped
+  // actor's own req.companyId always wins and is never expected in the
+  // body at all (same Joi-optional-but-service-enforced pattern as
+  // clientValidation.js/createServiceTypeSchema). See
+  // companyAccessControlService.resolveCreateCompanyId(), which is what
+  // actually enforces "required" for a company-less actor with a 400.
+  company_id: Joi.number().integer().positive().optional().messages({
+    'number.base': 'Business Unit (company_id) must be a number.',
+  }),
+
   service_po_code: Joi.string()
     .trim()
     .uppercase()
@@ -54,17 +65,17 @@ const createServicePOSchema = Joi.object({
       'any.required': 'Project is required.',
     }),
 
-  // Employee Master ID — never a User Master ID. Mandatory on create per
-  // the Client -> Project -> Service PO -> Delivery Head flow; see
-  // updateServicePOSchema below for why it's optional on update.
+  // Employee Master ID — never a User Master ID. NULL by default on
+  // create — the frontend no longer collects a Delivery Head at Service PO
+  // creation time; it's assigned later via update (see updateServicePOSchema).
   delivery_head_employee_id: Joi.number()
     .integer()
     .positive()
-    .required()
+    .optional()
+    .allow(null)
     .messages({
       'number.base': 'Delivery Head employee ID must be a number.',
       'number.positive': 'Delivery Head employee ID must be a positive integer.',
-      'any.required': 'Delivery Head is required.',
     }),
 
   service_type_id: Joi.number()
@@ -98,26 +109,24 @@ const createServicePOSchema = Joi.object({
       'any.required': 'Start date is required.',
     }),
 
+  // Required for a normal Service PO. A CENTRALISED Service PO
+  // (is_centralised: true) has no fixed end — it's an ongoing, BU-less PO
+  // every applicable employee is auto-mapped to — so end_date is optional
+  // for it, same "relax only for centralised" treatment company_id gets
+  // above. Still validated for shape/ordering whenever one IS supplied.
   end_date: Joi.date()
     .iso()
     .min(Joi.ref('start_date'))
-    .required()
+    .when('is_centralised', {
+      is: true,
+      then: Joi.optional().allow(null),
+      otherwise: Joi.required(),
+    })
     .messages({
       'date.base': 'End date must be a valid date.',
       'date.format': 'End date must be in ISO format (YYYY-MM-DD).',
       'date.min': 'End date must be on or after the start date.',
       'any.required': 'End date is required.',
-    }),
-
-  expected_man_hours: Joi.number()
-    .precision(2)
-    .min(0)
-    .max(9_999_999_999)
-    .optional()
-    .allow(null)
-    .messages({
-      'number.base': 'Expected man hours must be a number.',
-      'number.min': 'Expected man hours cannot be negative.',
     }),
 
   is_billable: Joi.boolean()
@@ -152,17 +161,6 @@ const createServicePOSchema = Joi.object({
       'any.only': 'Invoice frequency must be one of: monthly, milestone-based, internal-no-invoice, poc, yearly-amc.',
     }),
 
-  invoice_amount: Joi.number()
-    .precision(2)
-    .min(0)
-    .max(999_999_999_999_999)
-    .optional()
-    .allow(null)
-    .messages({
-      'number.base': 'Invoice amount must be a number.',
-      'number.min': 'Invoice amount cannot be negative.',
-    }),
-
   status: Joi.string()
     .trim()
     .lowercase()
@@ -170,6 +168,12 @@ const createServicePOSchema = Joi.object({
     .default('pending')
     .messages({
       'any.only': 'Status must be one of: in-progress, completed, on-hold, pending, cancelled, closed.',
+    }),
+
+  is_centralised: Joi.boolean()
+    .default(false)
+    .messages({
+      'boolean.base': 'is_centralised must be a boolean (true or false).',
     }),
 });
 
@@ -229,13 +233,6 @@ const updateServicePOSchema = Joi.object({
     })
     .optional(),
 
-  expected_man_hours: Joi.number()
-    .precision(2)
-    .min(0)
-    .max(9_999_999_999)
-    .optional()
-    .allow(null),
-
   is_billable: Joi.boolean().optional(),
 
   account_manager: Joi.string()
@@ -258,22 +255,17 @@ const updateServicePOSchema = Joi.object({
       'any.only': 'Invoice frequency must be one of: monthly, milestone-based, internal-no-invoice, poc, yearly-amc.',
     }),
 
-  invoice_amount: Joi.number()
-    .precision(2)
-    .min(0)
-    .max(999_999_999_999_999)
-    .optional()
-    .allow(null)
-    .messages({
-      'number.base': 'Invoice amount must be a number.',
-      'number.min': 'Invoice amount cannot be negative.',
-    }),
-
   status: Joi.string()
     .trim()
     .lowercase()
     .valid('in-progress', 'completed', 'on-hold', 'pending', 'cancelled', 'closed')
     .optional(),
+
+  is_centralised: Joi.boolean()
+    .optional()
+    .messages({
+      'boolean.base': 'is_centralised must be a boolean (true or false).',
+    }),
 })
   .min(1)
   .messages({

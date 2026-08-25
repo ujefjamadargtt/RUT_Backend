@@ -4,6 +4,7 @@ const express = require('express');
 const router = express.Router();
 
 const authenticate = require('../middlewares/auth');
+const resolveCompany = require('../middlewares/resolveCompany');
 const authorize = require('../middlewares/authorize');
 const { validate } = require('../middlewares/validateRequest');
 const {
@@ -146,6 +147,31 @@ router.get(
 
 /**
  * @swagger
+ * /employees/eligible-managers:
+ *   get:
+ *     summary: Get employees eligible for Primary/Secondary Manager selection
+ *     description: >
+ *       Active employees in the caller's scope holding a role capable of
+ *       managing Employees (Manager, Service PO Admin, Project Admin, or
+ *       anything with manager.view_mapped_employees in its effective
+ *       capability set) — the same eligibility rule enforced when the
+ *       Employee Create/Edit form actually saves a Primary/Secondary
+ *       Manager, so every value offered here is guaranteed acceptable.
+ *     tags: [Employees]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Eligible Manager employee list
+ */
+router.get(
+  '/eligible-managers',
+  authenticate,
+  employeeController.getEligibleManagers
+);
+
+/**
+ * @swagger
  * /employees:
  *   get:
  *     summary: List employees with pagination, search, and filters
@@ -208,6 +234,81 @@ router.get(
   '/:id',
   authenticate,
   employeeController.getById
+);
+
+/**
+ * @swagger
+ * /employees/{id}/mappings:
+ *   get:
+ *     summary: Get an employee's current Role & Business Unit mappings
+ *     description: >
+ *       Dedicated data source for the Action → Role & BU Mapping screen
+ *       (moved out of the Employee Drawer). Returns the SAME data
+ *       GET /employees/{id} already carries (role_ids/roles/
+ *       business_unit_ids/business_units) as a lighter-weight, mapping-only
+ *       payload — reuses the same employee_roles/employee_business_units
+ *       tables and the same object-level access check, not a separate
+ *       mapping mechanism.
+ *     tags: [Employees]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Employee's current role/BU mappings
+ *       404:
+ *         description: Not found
+ */
+router.get(
+  '/:id/mappings',
+  authenticate,
+  employeeController.getMappings
+);
+
+/**
+ * @swagger
+ * /employees/{id}/business-units:
+ *   get:
+ *     summary: Get an employee's mapped Business Units ("Mapped BUs")
+ *     description: >
+ *       Dedicated data source for loading Mapped BUs by empId — the login
+ *       response no longer carries this data; the frontend fetches it
+ *       here using the employee id from the login/select-role response.
+ *     tags: [Employees]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Employee's mapped Business Units
+ *       404:
+ *         description: Not found
+ */
+router.get(
+  '/:id/business-units',
+  authenticate.authenticateIdentity,
+  (req, res, next) => {
+    // Self-lookup ("what are MY mapped BUs") must work even before the
+    // caller has an active BU/company context to put in X-Company-Id —
+    // that's the whole point of this endpoint for a multi-BU actor (see
+    // employeeService.getBusinessUnits' doc comment). Looking up SOME OTHER
+    // employee's BUs still needs the normal company-scoped authorization,
+    // so resolveCompany runs exactly as on every other route in that case.
+    const requestedId = parseInt(req.params.id, 10);
+    if (!isNaN(requestedId) && requestedId === req.employeeId) {
+      return next();
+    }
+    return resolveCompany(req, res, next);
+  },
+  employeeController.getBusinessUnits
 );
 
 /**

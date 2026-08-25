@@ -5,7 +5,7 @@ const fs = require('fs');
 const xlsx = require('xlsx');
 const { Readable } = require('stream');
 const { Op } = require('sequelize');
-const { Employee, ServicePO, ServiceType, SubProject, sequelize } = require('../models');
+const { Employee, ServicePO, ServiceType, SubProject, Company, sequelize } = require('../models');
 const timesheetRepository = require('../repositories/timesheetRepository');
 const timesheetImportRepository = require('../repositories/timesheetImportRepository');
 const { createAuditLog } = require('../middlewares/auditLog');
@@ -772,11 +772,20 @@ const validateRows = async (rows, companyId) => {
   // minimise N+1 queries. Without the company_id filter, an employee_code
   // or service_po_name valid in another company would silently resolve
   // here even for a different company's upload — this was a real,
-  // confirmed cross-tenant bug.
+  // confirmed cross-tenant bug. The employee lookup also ORs in an active
+  // employee_business_units membership for this company — an Employee
+  // whose legacy company_id is null but who holds a real BU grant here
+  // (common for an Admin-created Employee) must still resolve, or every
+  // row for them fails with a false "not found in the system".
   const [allEmployees, allPOs] = await Promise.all([
     Employee.findAll({
-      where: { status: 'active', is_deleted: false, company_id: companyId },
+      where: {
+        status: 'active',
+        is_deleted: false,
+        [Op.or]: [{ company_id: companyId }, { '$businessUnits.id$': companyId }],
+      },
       attributes: ['id', 'full_name', 'employee_code', 'status'],
+      include: [{ model: Company, as: 'businessUnits', attributes: [], through: { attributes: [] } }],
     }),
     ServicePO.findAll({
       where: {
@@ -1592,10 +1601,17 @@ const validateImportHoursLimit = async ({ employeeId, timesheetImportId, hoursRe
  *    the caller actually supplies it ("if applicable").
  *
  * @param {object} data - { employee_id, service_po_id, sub_project_id?, client_id?, service_type_id?, service_category_id? }
+ * @param {number|number[]} companyId
+ * @param {{ skipPOCompanyScope?: boolean }} [options] - set skipPOCompanyScope
+ *   when the caller (employeeTimesheetService/employeeMonthlyWorkLogService)
+ *   has already confirmed an active employee_servicepo_mapping row for this
+ *   exact employee+PO pair (assertProjectMapped) — see
+ *   timesheetRepository.findEligibleServicePOById()'s doc comment for why
+ *   that mapping is sufficient authorization even across Business Units.
  * @returns {Promise<{ employee: object, po: object }>} the resolved records
  * @throws {Error} statusCode 422 — mirrors the wording/status validateRows() uses for the same failures
  */
-const resolveManualEntryReferences = async (data, companyId) => {
+const resolveManualEntryReferences = async (data, companyId, options = {}) => {
   const employee = await timesheetRepository.findEligibleEmployeeById(data.employee_id, companyId);
   if (!employee) {
     const err = new Error(`Employee #${data.employee_id} was not found or is not active.`);
@@ -1603,7 +1619,11 @@ const resolveManualEntryReferences = async (data, companyId) => {
     throw err;
   }
 
-  const po = await timesheetRepository.findEligibleServicePOById(data.service_po_id, companyId);
+  const po = await timesheetRepository.findEligibleServicePOById(
+    data.service_po_id,
+    companyId,
+    { skipCompanyScope: options.skipPOCompanyScope }
+  );
   if (!po) {
     const err = new Error(
       `Service PO #${data.service_po_id} was not found or is not available for timesheet logging.`

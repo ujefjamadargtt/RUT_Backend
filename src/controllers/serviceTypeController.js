@@ -16,12 +16,23 @@ const logger = require('../utils/logger');
  */
 
 /**
+ * The object-level scoping context Service Type reads/writes need for
+ * company-less actors (Admin/Entity Admin) — see companyAccessControlService.js.
+ * Built only from server-verified req fields, never from body/query.
+ *
+ * @param {import('express').Request} req
+ */
+function buildAuthContext(req) {
+  return { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId };
+}
+
+/**
  * GET /api/v1/service-types
  * Return all service types.
  */
 const getAllServiceTypes = async (req, res) => {
   try {
-    const serviceTypes = await serviceTypeService.getAll(req.query, req.companyId);
+    const serviceTypes = await serviceTypeService.getAll(req.query, buildAuthContext(req));
     return sendSuccess(res, serviceTypes, 'Service types fetched successfully.');
   } catch (error) {
     logger.error('getAllServiceTypes error', { error: error.message, stack: error.stack });
@@ -39,7 +50,7 @@ const getServiceTypeById = async (req, res) => {
       return sendError(res, 'Invalid service type ID.', 400);
     }
 
-    const serviceType = await serviceTypeService.getById(id, req.companyId);
+    const serviceType = await serviceTypeService.getById(id, buildAuthContext(req));
     return sendSuccess(res, serviceType, 'Service type fetched successfully.');
   } catch (error) {
     if (error.statusCode === 404) {
@@ -55,7 +66,7 @@ const getServiceTypeById = async (req, res) => {
  */
 const createServiceType = async (req, res) => {
   try {
-    const serviceType = await serviceTypeService.create(req.body, req.userId, req.companyId);
+    const serviceType = await serviceTypeService.create(req.body, req.userId, buildAuthContext(req));
     return sendCreated(res, serviceType, 'Service type created successfully.');
   } catch (error) {
     if (error.statusCode === 409) {
@@ -76,7 +87,7 @@ const updateServiceType = async (req, res) => {
       return sendError(res, 'Invalid service type ID.', 400);
     }
 
-    const serviceType = await serviceTypeService.update(id, req.body, req.userId, req.companyId);
+    const serviceType = await serviceTypeService.update(id, req.body, req.userId, buildAuthContext(req));
     return sendSuccess(res, serviceType, 'Service type updated successfully.');
   } catch (error) {
     if (error.statusCode === 404) {
@@ -95,7 +106,7 @@ const deleteServiceType = async (req, res) => {
     const id = parseInt(req.params.id, 10);
     if (isNaN(id) || id < 1) return sendError(res, 'Invalid service type ID.', 400);
 
-    await serviceTypeService.delete(id, req.userId, req.companyId);
+    await serviceTypeService.delete(id, req.userId, buildAuthContext(req));
     return sendNoContent(res);
   } catch (error) {
     if (error.statusCode === 404) return sendNotFound(res, 'Service type');

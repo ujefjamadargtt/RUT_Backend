@@ -12,6 +12,48 @@ const logger = require('../utils/logger');
  * a standalone, company-scoped master entity a Service PO belongs to).
  */
 
+/**
+ * Builds a `company_id` WHERE fragment. Accepts a single number (BU-scoped
+ * actor's own `req.companyId`), an array (a company-less actor's resolved
+ * list of owned Company ids — see
+ * companyAccessControlService.resolveActorCompanyScope; empty array
+ * correctly matches nothing), or `null` (a Project created with no
+ * Business Unit — see projectService.js's resolveOptionalCreateCompanyId()
+ * usage — matches only OTHER BU-less Projects, e.g. for the create-time
+ * duplicate-name/code check). Same pattern as clientRepository.js.
+ *
+ * `createdBy`, when given alongside the ARRAY form, additionally matches a
+ * Project this SAME company-less actor created with no Business Unit at
+ * all (company_id NULL — resolveOptionalCreateCompanyId's documented
+ * "defer BU assignment" path for Admin/Entity Admin). Without this, `company_id
+ * IN (ownedCompanyIds)` can never match a NULL row (SQL IN never matches
+ * NULL) — an Admin's own just-created, still-unassigned Project would be
+ * permanently invisible to their own list/detail/update/delete calls, which
+ * all resolve their scope through this same array form. Same "let the actor
+ * see their own not-yet-company-scoped record" fix already applied to
+ * Employee (employeeAccessControlService.resolveEmployeeAccessWhere's rank-2
+ * `created_by` branch) and to manager_employee_mappings
+ * (managerEmployeeMappingRepository.companyScopeOrNull).
+ *
+ * @param {number|number[]|null} companyId
+ * @param {number|null} [createdBy]
+ * @returns {object}
+ */
+function companyScope(companyId, createdBy = null) {
+  if (Array.isArray(companyId)) {
+    if (createdBy != null) {
+      return {
+        [Op.or]: [
+          { company_id: { [Op.in]: companyId } },
+          { company_id: null, created_by: createdBy },
+        ],
+      };
+    }
+    return { company_id: { [Op.in]: companyId } };
+  }
+  return { company_id: companyId };
+}
+
 const CLIENT_INCLUDE = {
   model: Client,
   as: 'client',
@@ -28,11 +70,16 @@ const CLIENT_INCLUDE = {
  * @returns {Promise<{ rows: Project[], count: number }>}
  */
 const findAll = async (filters = {}, pagination = {}, sort = {}) => {
-  const { search, status, client_id: clientId, companyId } = filters;
+  const { search, status, client_id: clientId, companyId, createdBy } = filters;
   const { limit = 10, offset = 0 } = pagination;
   const { sortBy = 'project_name', sortOrder = 'ASC' } = sort;
 
-  const where = { company_id: companyId, is_deleted: false };
+  // companyScope(), when createdBy is given, may itself be an [Op.or]
+  // fragment (in-scope-companies OR my-own-unscoped-record) — kept in its
+  // own [Op.and] entry rather than spread into `where` directly, so the
+  // search filter below (which needs its own, unrelated Op.or) can never
+  // collide with and overwrite it under the same object key.
+  const where = { is_deleted: false, [Op.and]: [companyScope(companyId, createdBy)] };
 
   if (status && status !== 'all') {
     where.status = status;
@@ -43,10 +90,12 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
   }
 
   if (search && search.trim()) {
-    where[Op.or] = [
-      { project_name: { [Op.iLike]: `%${search.trim()}%` } },
-      { project_code: { [Op.iLike]: `%${search.trim()}%` } },
-    ];
+    where[Op.and].push({
+      [Op.or]: [
+        { project_name: { [Op.iLike]: `%${search.trim()}%` } },
+        { project_code: { [Op.iLike]: `%${search.trim()}%` } },
+      ],
+    });
   }
 
   const allowedSortColumns = ['project_name', 'project_code', 'created_at', 'status'];
@@ -69,14 +118,37 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
  * Find a single project by primary key.
  *
  * @param {number} id
- * @param {number} companyId
+ * @param {number|number[]|null} companyId
+ * @param {number|null} [createdBy] - see companyScope()'s doc comment
  * @returns {Promise<Project|null>}
  */
-const findById = async (id, companyId) => {
+const findById = async (id, companyId, createdBy = null) => {
   return Project.findOne({
-    where: { id, company_id: companyId, is_deleted: false },
+    where: { id, ...companyScope(companyId, createdBy), is_deleted: false },
     include: [CLIENT_INCLUDE],
-    attributes: ['id', 'client_id', 'project_code', 'project_name', 'project_description', 'status', 'created_at', 'updated_at', 'created_by', 'updated_by'],
+    attributes: ['id', 'client_id', 'project_code', 'project_name', 'project_description', 'status', 'company_id', 'created_at', 'updated_at', 'created_by', 'updated_by'],
+  });
+};
+
+/**
+ * Find a single project by primary key with NO company filter — the caller
+ * MUST independently verify the returned row is actually within its own
+ * authorized reach before using it. Exists for cross-entity FK validation
+ * (e.g. servicePOService.create()'s Project check) where a strict
+ * companyId-scoped findById() would wrongly 404 a Project that has no
+ * Business Unit assigned yet at all (company_id NULL — same "defer BU
+ * assignment" case findById()'s own companyScope() doc comment describes)
+ * even though it's genuinely available to attach. Same idiom as
+ * clientRepository.findByIdUnscoped().
+ *
+ * @param {number} id
+ * @returns {Promise<Project|null>}
+ */
+const findByIdUnscoped = async (id) => {
+  return Project.findOne({
+    where: { id, is_deleted: false },
+    include: [CLIENT_INCLUDE],
+    attributes: ['id', 'client_id', 'project_code', 'project_name', 'project_description', 'status', 'company_id', 'created_at', 'updated_at', 'created_by', 'updated_by'],
   });
 };
 
@@ -92,6 +164,23 @@ const findByCode = async (code, companyId) => {
   return Project.findOne({
     where: { project_code: code, company_id: companyId },
     attributes: ['id', 'project_code', 'project_name', 'status'],
+  });
+};
+
+/**
+ * Find a project by its name (case-insensitive, trimmed), scoped to one
+ * company — uniqueness of the human-readable name, alongside the
+ * machine-facing code uniqueness findByCode() already enforces. Excludes
+ * soft-deleted rows — a deleted project's name is free to reuse.
+ *
+ * @param {string} name
+ * @param {number} companyId
+ * @returns {Promise<Project|null>}
+ */
+const findByName = async (name, companyId) => {
+  return Project.findOne({
+    where: { project_name: { [Op.iLike]: name.trim() }, company_id: companyId, is_deleted: false },
+    attributes: ['id', 'project_code', 'project_name'],
   });
 };
 
@@ -115,7 +204,7 @@ const create = async (data) => {
  */
 const update = async (id, data, companyId) => {
   const [affectedRows, [updated]] = await Project.update(data, {
-    where: { id, company_id: companyId },
+    where: { id, ...companyScope(companyId) },
     returning: true,
   });
 
@@ -137,7 +226,7 @@ const update = async (id, data, companyId) => {
 const softDelete = async (id, updatedBy, companyId) => {
   const [affectedRows] = await Project.update(
     { status: 'inactive', is_deleted: true, updated_by: updatedBy },
-    { where: { id, company_id: companyId } }
+    { where: { id, ...companyScope(companyId) } }
   );
   return affectedRows > 0;
 };
@@ -146,13 +235,14 @@ const softDelete = async (id, updatedBy, companyId) => {
  * Return all projects with status = 'active', ordered by name.
  * Used for dropdown lists.
  *
- * @param {number} companyId
+ * @param {number|number[]|null} companyId
+ * @param {number|null} [createdBy] - see companyScope()'s doc comment
  * @returns {Promise<Project[]>}
  */
-const getActiveProjects = async (companyId) => {
+const getActiveProjects = async (companyId, createdBy = null) => {
   return Project.findAll({
-    where: { status: 'active', is_deleted: false, company_id: companyId },
-    attributes: ['id', 'project_code', 'project_name'],
+    where: { status: 'active', is_deleted: false, ...companyScope(companyId, createdBy) },
+    attributes: ['id', 'project_code', 'project_name', 'company_id'],
     order: [['project_name', 'ASC']],
   });
 };
@@ -173,7 +263,7 @@ const countServicePOsByProject = async (projectId, companyId) => {
     where: {
       project_id: projectId,
       is_deleted: false,
-      company_id: companyId,
+      ...companyScope(companyId),
     },
   });
 };
@@ -195,7 +285,7 @@ const countServicePOsByProjectIds = async (projectIds, companyId) => {
     where: {
       project_id: { [Op.in]: projectIds },
       is_deleted: false,
-      company_id: companyId,
+      ...companyScope(companyId),
     },
     group: ['project_id'],
     raw: true,
@@ -207,7 +297,9 @@ const countServicePOsByProjectIds = async (projectIds, companyId) => {
 module.exports = {
   findAll,
   findById,
+  findByIdUnscoped,
   findByCode,
+  findByName,
   create,
   update,
   softDelete,

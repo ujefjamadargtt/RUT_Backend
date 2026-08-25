@@ -177,7 +177,11 @@ async function getTimesheetSummary(query, companyId) {
 }
 
 /**
- * Service PO Utilisation Report
+ * Service PO Hours Report — actual hours logged per PO. Used to also
+ * classify utilisation_pct/utilisation_status (actual hours vs
+ * expected_man_hours); that field was retired, so this now returns only
+ * the raw hours logged. See database/migrations/
+ * 20260884_drop_service_pos_invoice_amount_and_expected_man_hours.sql.
  *
  * @param {object} query - req.query
  * @returns {Promise<{ data: object[], meta: object }>}
@@ -199,20 +203,7 @@ async function getServicePOUtilisation(query, companyId) {
 
   const meta = getPaginationMeta(count, page, limit);
 
-  // Classify utilisation for quick scanning
-  const enriched = rows.map((row) => {
-    const pct = parseFloat(row.utilisation_pct);
-    let utilisation_status = 'no_data';
-    if (!isNaN(pct)) {
-      if (pct >= 100) utilisation_status = 'over_utilized';
-      else if (pct >= 75) utilisation_status = 'on_track';
-      else if (pct >= 50) utilisation_status = 'moderate';
-      else utilisation_status = 'under_utilized';
-    }
-    return { ...row, utilisation_status };
-  });
-
-  return { data: enriched, meta };
+  return { data: rows, meta };
 }
 
 /**
@@ -604,22 +595,14 @@ async function getServicePOSummary(query, companyId) {
   const pageTotals = rows.reduce(
     (acc, row) => {
       acc.total_po_value                += round2(row.po_value);
-      acc.total_expected_man_hours      += round2(row.expected_man_hours);
       acc.total_hours_delivered         += round2(row.hours_delivered_before_month);
-      acc.total_available_hours         += round2(row.available_hours);
       acc.total_monthly_billable_amount += round2(row.monthly_billable_amount);
-      acc.total_invoiced_amount         += round2(row.invoiced_amount);
-      acc.total_unbilled_amount         += round2(row.unbilled_amount);
       return acc;
     },
     {
       total_po_value: 0,
-      total_expected_man_hours: 0,
       total_hours_delivered: 0,
-      total_available_hours: 0,
       total_monthly_billable_amount: 0,
-      total_invoiced_amount: 0,
-      total_unbilled_amount: 0,
     }
   );
 
@@ -628,12 +611,8 @@ async function getServicePOSummary(query, companyId) {
     meta,
     summary: {
       total_po_value:                     round2(pageTotals.total_po_value),
-      total_expected_man_hours:           round2(pageTotals.total_expected_man_hours),
       total_hours_delivered_before_month: round2(pageTotals.total_hours_delivered),
-      total_available_hours:              round2(pageTotals.total_available_hours),
       total_monthly_billable_amount:      round2(pageTotals.total_monthly_billable_amount),
-      total_invoiced_amount:              round2(pageTotals.total_invoiced_amount),
-      total_unbilled_amount:              round2(pageTotals.total_unbilled_amount),
     },
   };
 }
@@ -704,9 +683,7 @@ async function getInvoicePOSummary(query, companyId) {
   const pageTotals = rows.reduce(
     (acc, row) => {
       acc.total_po_value                += round2(row.po_value);
-      acc.total_expected_man_hours      += round2(row.expected_man_hours);
       acc.total_hours_delivered         += round2(row.hours_delivered_before_month);
-      acc.total_available_hours         += round2(row.available_hours);
       acc.total_monthly_billable_amount += round2(row.monthly_billable_amount);
       acc.total_invoiced_amount         += round2(row.invoiced_amount);
       acc.total_billed_amount           += round2(row.billed_amount);
@@ -715,9 +692,7 @@ async function getInvoicePOSummary(query, companyId) {
     },
     {
       total_po_value: 0,
-      total_expected_man_hours: 0,
       total_hours_delivered: 0,
-      total_available_hours: 0,
       total_monthly_billable_amount: 0,
       total_invoiced_amount: 0,
       total_billed_amount: 0,
@@ -730,9 +705,7 @@ async function getInvoicePOSummary(query, companyId) {
     meta,
     summary: {
       total_po_value:                     round2(pageTotals.total_po_value),
-      total_expected_man_hours:           round2(pageTotals.total_expected_man_hours),
       total_hours_delivered_before_month: round2(pageTotals.total_hours_delivered),
-      total_available_hours:              round2(pageTotals.total_available_hours),
       total_monthly_billable_amount:      round2(pageTotals.total_monthly_billable_amount),
       total_invoiced_amount:              round2(pageTotals.total_invoiced_amount),
       total_billed_amount:                round2(pageTotals.total_billed_amount),

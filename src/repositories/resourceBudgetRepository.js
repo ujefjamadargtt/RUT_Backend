@@ -22,12 +22,29 @@ const servicePOInclude = {
 };
 
 /**
+ * Builds a `company_id` WHERE fragment — Op.in-aware for an array (a
+ * company-less Admin/Entity Admin's resolved owned-Company-id scope, see
+ * companyAccessControlService.resolveActorCompanyScope), plain equality for
+ * a number. No "omit when undefined" fallback — every function below must
+ * always be company-scoped.
+ *
+ * @param {number|number[]} companyId
+ * @returns {object}
+ */
+function companyScope(companyId) {
+  if (Array.isArray(companyId)) {
+    return { company_id: { [Op.in]: companyId } };
+  }
+  return { company_id: companyId };
+}
+
+/**
  * @param {number} id
- * @param {number} companyId
+ * @param {number|number[]} companyId
  * @returns {Promise<ResourceBudget|null>}
  */
 const findById = async (id, companyId) => {
-  return ResourceBudget.findOne({ where: { id, company_id: companyId }, include: [employeeInclude, servicePOInclude] });
+  return ResourceBudget.findOne({ where: { id, ...companyScope(companyId) }, include: [employeeInclude, servicePOInclude] });
 };
 
 /**
@@ -42,7 +59,7 @@ const findById = async (id, companyId) => {
  */
 const findOne = async (empId, servicePOId, month, year, companyId, transaction) => {
   return ResourceBudget.findOne({
-    where: { emp_id: empId, service_po_id: servicePOId, month, year, company_id: companyId },
+    where: { emp_id: empId, service_po_id: servicePOId, month, year, ...companyScope(companyId) },
     transaction,
   });
 };
@@ -55,7 +72,7 @@ const findOne = async (empId, servicePOId, month, year, companyId, transaction) 
  */
 const findByServicePO = async (servicePOId, companyId) => {
   return ResourceBudget.findAll({
-    where: { service_po_id: servicePOId, company_id: companyId },
+    where: { service_po_id: servicePOId, ...companyScope(companyId) },
     include: [employeeInclude, servicePOInclude],
     order: [['year', 'DESC'], ['month', 'DESC'], ['emp_id', 'ASC']],
   });
@@ -68,7 +85,7 @@ const findByServicePO = async (servicePOId, companyId) => {
  * @returns {Promise<ResourceBudget[]>}
  */
 const findAll = async (filters, companyId) => {
-  const where = { company_id: companyId };
+  const where = { ...companyScope(companyId) };
   if (filters.emp_id !== undefined) where.emp_id = filters.emp_id;
   if (filters.month !== undefined) where.month = filters.month;
   if (filters.year !== undefined) where.year = filters.year;
@@ -95,7 +112,7 @@ const findAll = async (filters, companyId) => {
  * @returns {Promise<number>}
  */
 const sumActiveHoursForEmployeeMonth = async (empId, month, year, companyId, exclude = {}, transaction) => {
-  const where = { emp_id: empId, month, year, company_id: companyId, status: 'active' };
+  const where = { emp_id: empId, month, year, ...companyScope(companyId), status: 'active' };
   if (exclude.excludeId !== undefined && exclude.excludeId !== null) {
     where.id = { [Op.ne]: exclude.excludeId };
   }
@@ -131,7 +148,7 @@ const create = async (data, options) => {
  */
 const update = async (id, data, companyId, transaction) => {
   const [affectedRows, [updated]] = await ResourceBudget.update(data, {
-    where: { id, company_id: companyId },
+    where: { id, ...companyScope(companyId) },
     returning: true,
     transaction,
   });
@@ -151,7 +168,7 @@ const update = async (id, data, companyId, transaction) => {
  */
 const isEmployeeMappedToServicePO = async (empId, servicePOId, companyId) => {
   const mapping = await EmployeeServicePOMapping.findOne({
-    where: { employee_id: empId, service_po_id: servicePOId, company_id: companyId, status: 'active' },
+    where: { employee_id: empId, service_po_id: servicePOId, ...companyScope(companyId), status: 'active' },
   });
   return !!mapping;
 };
@@ -167,7 +184,7 @@ const isEmployeeMappedToServicePO = async (empId, servicePOId, companyId) => {
  */
 const findMappedEmployees = async (servicePOId, companyId) => {
   const mappings = await EmployeeServicePOMapping.findAll({
-    where: { service_po_id: servicePOId, company_id: companyId, status: 'active' },
+    where: { service_po_id: servicePOId, ...companyScope(companyId), status: 'active' },
     include: [employeeInclude],
     order: [[{ model: Employee, as: 'employee' }, 'full_name', 'ASC']],
   });

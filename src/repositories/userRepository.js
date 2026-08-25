@@ -9,12 +9,18 @@ const { User, Employee, Role, sequelize } = require('../models');
  */
 
 /**
- * Standard include config for user queries: joins employee, PRIMARY role,
- * and ADDITIONAL role data. users.role_id (the `role` include) remains the
- * sole source of truth for hierarchy/scoping — the `additionalRoles`
- * include is a purely additive capability grant, never read for those
- * decisions. See database/migrations/20260850_add_user_additional_roles.sql
- * and roleHierarchyService.getEffectiveCapabilitiesForRoleIds().
+ * Standard include config for user queries: joins employee and the User's
+ * own PRIMARY role (users.role_id, the `role` include) — the sole source
+ * of truth for hierarchy/scoping. There is no User-level ADDITIONAL role
+ * association anymore: the old `user_additional_roles` many-to-many
+ * (database/migrations/20260850_add_user_additional_roles.sql) was dropped
+ * by the RBAC redesign — multi-role assignment now lives exclusively on
+ * Employee via EmployeeRole (see models/index.js's
+ * Employee.belongsToMany(Role, { as: 'roles' }), and
+ * roleHierarchyService.getEffectiveCapabilitiesForRoleIds()). Including a
+ * stale `additionalRoles` alias here throws a Sequelize association error;
+ * see platformAdminRepository.findAllEmployeesWithRolesAndBUs's doc comment
+ * for the same bug found and fixed at that call site.
  */
 const DEFAULT_INCLUDE = [
   {
@@ -27,13 +33,6 @@ const DEFAULT_INCLUDE = [
     model: Role,
     as: 'role',
     attributes: ['id', 'role_name', 'permission', 'status', 'hierarchy_rank', 'inherits_role_id'],
-    required: false,
-  },
-  {
-    model: Role,
-    as: 'additionalRoles',
-    attributes: ['id', 'role_name', 'permission', 'status', 'hierarchy_rank', 'inherits_role_id'],
-    through: { attributes: [] },
     required: false,
   },
 ];

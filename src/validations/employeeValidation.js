@@ -14,11 +14,10 @@ const passwordField = Joi.string().min(8).max(72).messages({
   'string.max': 'Password cannot exceed 72 characters.',
 });
 
-// The User account's login email — Employee itself carries no email/password
-// anymore (see database/migrations/20260842_employees_drop_login_columns.sql);
-// every Employee authenticates through its auto-created, linked User row
-// (users.email/users.password) instead.
-const userEmailField = Joi.string()
+// Employee's own native login email — Employee is the sole login identity
+// now (Employee-as-Identity redesign, database/migrations/
+// 20260864-20260880); there is no more linked User account.
+const employeeEmailField = Joi.string()
   .trim()
   .lowercase()
   .email({ tlds: { allow: false } })
@@ -29,7 +28,15 @@ const userEmailField = Joi.string()
   });
 
 const managerIdField = Joi.number().integer().positive().messages({
-  'number.base': 'Must be a positive integer user ID.',
+  'number.base': 'Must be a positive integer employee ID.',
+});
+
+const roleIdsField = Joi.array().items(Joi.number().integer().positive()).messages({
+  'array.base': 'role_ids must be an array of role IDs.',
+});
+
+const businessUnitIdsField = Joi.array().items(Joi.number().integer().positive()).messages({
+  'array.base': 'business_unit_ids must be an array of Business Unit (Company) IDs.',
 });
 
 const experienceField = Joi.number()
@@ -130,10 +137,9 @@ const createEmployeeSchema = Joi.object({
       'any.only': 'Status must be either "active" or "inactive".',
     }),
 
-  // ── Linked User account (login) — see database/migrations/
-  // 20260842_employees_drop_login_columns.sql. HR always gets one User
-  // record created automatically for this Employee.
-  email: userEmailField.required().messages({
+  // ── Native login credentials — see database/migrations/
+  // 20260864_add_employee_login_columns.sql.
+  email: employeeEmailField.required().messages({
     'any.required': 'Email is required to create the Employee\'s login account.',
   }),
 
@@ -141,13 +147,27 @@ const createEmployeeSchema = Joi.object({
   // ONCE in the create response (never retrievable again).
   password: passwordField.optional(),
 
+  // ── Roles (employee_roles) — optional; omitted/empty defaults to the
+  // single "Employee" role (see employeeService.js's
+  // resolveDefaultRoleIds()). At most one supplied role may be senior-tier
+  // (Platform Admin/Admin/Entity Admin/BU Admin) — enforced in
+  // employeeService.js.
+  role_ids: roleIdsField.optional(),
+
+  // ── Business Units (employee_business_units) — fully optional. BU
+  // mapping is done separately (a dedicated mapping flow, not this form) —
+  // the caller's own company_id is still auto-injected if present (see
+  // employeeService.js's resolveBusinessUnitIds()), but an Employee can be
+  // created with no BUs at all.
+  business_unit_ids: businessUnitIdsField.optional(),
+
   // ── Manager assignment — both optional. When provided, must belong to
   // the same Company (enforced in employeeService.js) and hold a role
   // capable of managing Employees (Manager or above). An Employee can be
   // created with no manager assigned yet and have one set later via update.
-  primary_manager_user_id: managerIdField.optional().allow(null),
-  secondary_manager_user_id: managerIdField.optional().allow(null)
-    .invalid(Joi.ref('primary_manager_user_id'))
+  primary_manager_employee_id: managerIdField.optional().allow(null),
+  secondary_manager_employee_id: managerIdField.optional().allow(null)
+    .invalid(Joi.ref('primary_manager_employee_id'))
     .messages({
       'any.invalid': 'Secondary Manager must be different from the Primary Manager.',
     }),
@@ -222,15 +242,20 @@ const updateEmployeeSchema = Joi.object({
     }),
 
   // Reassign Primary/Secondary Manager — same validation as create (same
-  // company, capable role). Pass secondary_manager_user_id: null to clear it.
-  primary_manager_user_id: managerIdField.optional(),
-  secondary_manager_user_id: managerIdField.optional().allow(null),
+  // company, capable role). Pass secondary_manager_employee_id: null to clear it.
+  primary_manager_employee_id: managerIdField.optional(),
+  secondary_manager_employee_id: managerIdField.optional().allow(null),
 
-  // Updates the linked User account's login email (Employee itself carries
-  // no email column — see userEmailField above). Validated for uniqueness
-  // against other users in employeeService.js, same as User Master's own
-  // email-change flow.
-  email: userEmailField.optional(),
+  // Full-replace (diff-sync) semantics — resending role_ids/business_unit_ids
+  // replaces the employee's ENTIRE set; omitting either leaves it untouched.
+  // An explicitly empty role_ids defaults back to the "Employee" role
+  // rather than being rejected (see employeeService.js's resolveDefaultRoleIds()).
+  role_ids: roleIdsField.optional(),
+  business_unit_ids: businessUnitIdsField.optional(),
+
+  // Updates the Employee's own native login email. Validated for
+  // uniqueness against other employees in employeeService.js.
+  email: employeeEmailField.optional(),
 
   // Changing this updates the employee's approval configuration — see
   // src/utils/timesheetPublishPolicy.js. Only affects NEW timesheets

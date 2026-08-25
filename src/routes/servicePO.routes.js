@@ -236,8 +236,6 @@ router.get(
  *               end_date:
  *                 type: string
  *                 format: date
- *               expected_man_hours:
- *                 type: number
  *               is_billable:
  *                 type: boolean
  *               account_manager:
@@ -251,9 +249,6 @@ router.get(
  *                 type: string
  *                 enum: [monthly, milestone-based, internal-no-invoice, poc, yearly-amc]
  *                 description: How often the client is invoiced
- *               invoice_amount:
- *                 type: number
- *                 description: Invoice amount for billing
  *     responses:
  *       201:
  *         description: Service PO created
@@ -293,7 +288,6 @@ router.post(
  *               po_value:           { type: number }
  *               start_date:         { type: string, format: date }
  *               end_date:           { type: string, format: date }
- *               expected_man_hours: { type: number }
  *               is_billable:        { type: boolean }
  *               account_manager:
  *                 type: string
@@ -303,9 +297,6 @@ router.post(
  *               invoice_frequency:
  *                 type: string
  *                 enum: [monthly, milestone-based, internal-no-invoice, poc, yearly-amc]
- *               invoice_amount:
- *                 type: number
- *                 description: Invoice amount for billing
  *     responses:
  *       200:
  *         description: Service PO updated
@@ -452,7 +443,7 @@ router.delete(
  * @swagger
  * /service-pos/{id}/utilisation:
  *   get:
- *     summary: Get utilisation data for a Service PO
+ *     summary: Get total hours logged for a Service PO
  *     tags: [ServicePOs]
  *     security:
  *       - bearerAuth: []
@@ -463,7 +454,7 @@ router.delete(
  *         schema: { type: integer }
  *     responses:
  *       200:
- *         description: Utilisation breakdown with percentage, logged hours, and remaining hours
+ *         description: service_po_id, service_po_code, service_po_name, total_hours_logged
  */
 router.get(
   '/:id/utilisation',

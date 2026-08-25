@@ -130,7 +130,8 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data) => {
 
     const { po } = await timesheetService.resolveManualEntryReferences(
       { employee_id: employeeId, service_po_id: line.service_po_id, sub_project_id: line.sub_project_id },
-      companyId
+      companyId,
+      { skipPOCompanyScope: true }
     );
 
     const hierarchyNode = await employeeTimesheetService.resolveHierarchyNode(line.hierarchy_node_id, line.service_po_id);

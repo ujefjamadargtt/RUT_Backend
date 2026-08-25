@@ -4,6 +4,13 @@ const serviceTypeRepository = require('../repositories/serviceTypeRepository');
 const serviceCategoryRepository = require('../repositories/serviceCategoryRepository');
 const logger = require('../utils/logger');
 
+// Service Types are now a single GLOBAL master (company_id IS NULL rows —
+// see database/migrations/20260890_seed_global_service_types_categories.sql),
+// shared by every Business Unit instead of being duplicated per-BU. Every
+// operation below targets that one global set; `authContext`/any
+// body-supplied `company_id` is no longer used to scope it.
+const GLOBAL_COMPANY_ID = null;
+
 /**
  * Throw a clean 422 if service_category_id is set but doesn't refer to a
  * real, non-deleted category for this company. Without this check, a bad ID
@@ -36,11 +43,11 @@ const assertCategoryExists = async (serviceCategoryId, companyId) => {
  * @param {object} query - { search, service_category_id }
  * @returns {Promise<ServiceType[]>}
  */
-const getAll = async (query = {}, companyId) => {
+const getAll = async (query = {}, authContext) => {
   return serviceTypeRepository.findAll({
     search: query.search,
     service_category_id: query.service_category_id,
-    companyId,
+    companyId: GLOBAL_COMPANY_ID,
   });
 };
 
@@ -48,10 +55,11 @@ const getAll = async (query = {}, companyId) => {
  * Return a single service type by ID.
  *
  * @param {number} id
+ * @param {object} authContext - { companyId, hierarchyRank, employeeId }
  * @returns {Promise<ServiceType>}
  */
-const getById = async (id, companyId) => {
-  const serviceType = await serviceTypeRepository.findById(id, companyId);
+const getById = async (id, authContext) => {
+  const serviceType = await serviceTypeRepository.findById(id, GLOBAL_COMPANY_ID);
 
   if (!serviceType) {
     const err = new Error('Service type not found.');
@@ -66,11 +74,18 @@ const getById = async (id, companyId) => {
  * Create a new service type.
  * Enforces uniqueness of service_type_name (case-insensitive).
  *
- * @param {object} data   - { service_type_name }
+ * @param {object} data   - { service_type_name, [company_id] }
  * @param {number} userId
+ * @param {object} authContext - { companyId, hierarchyRank, employeeId }
  * @returns {Promise<ServiceType>}
  */
-const create = async (data, userId, companyId) => {
+const create = async (data, userId, authContext) => {
+  // `company_id` may still be sent by an older client — accepted but
+  // ignored now that Service Type is a single global master.
+  const { company_id: _bodyCompanyId, ...fields } = data;
+  const companyId = GLOBAL_COMPANY_ID;
+  data = fields;
+
   const existing = await serviceTypeRepository.findByName(data.service_type_name, companyId);
   if (existing) {
     const err = new Error(`Service type "${data.service_type_name}" already exists.`);
@@ -119,10 +134,11 @@ const create = async (data, userId, companyId) => {
  * @param {number} id
  * @param {object} data   - { service_type_name }
  * @param {number} userId
+ * @param {object} authContext - { companyId, hierarchyRank, employeeId }
  * @returns {Promise<ServiceType>}
  */
-const update = async (id, data, userId, companyId) => {
-  const existing = await serviceTypeRepository.findById(id, companyId);
+const update = async (id, data, userId, authContext) => {
+  const existing = await serviceTypeRepository.findById(id, GLOBAL_COMPANY_ID);
   if (!existing) {
     const err = new Error('Service type not found.');
     err.statusCode = 404;
@@ -133,7 +149,7 @@ const update = async (id, data, userId, companyId) => {
     data.service_type_name &&
     data.service_type_name.trim().toLowerCase() !== existing.service_type_name.toLowerCase()
   ) {
-    const conflict = await serviceTypeRepository.findByName(data.service_type_name, companyId);
+    const conflict = await serviceTypeRepository.findByName(data.service_type_name, existing.company_id);
     if (conflict) {
       const err = new Error(`Service type "${data.service_type_name}" already exists.`);
       err.statusCode = 409;
@@ -141,25 +157,25 @@ const update = async (id, data, userId, companyId) => {
     }
   }
 
-  await assertCategoryExists(data.service_category_id, companyId);
+  await assertCategoryExists(data.service_category_id, existing.company_id);
 
   const payload = { ...data, updated_by: userId };
-  const updated = await serviceTypeRepository.update(id, payload, companyId);
+  const updated = await serviceTypeRepository.update(id, payload, existing.company_id);
 
   logger.info('Service type updated', { serviceTypeId: id, userId });
 
   return updated;
 };
 
-const deleteServiceType = async (id, userId, companyId) => {
-  const existing = await serviceTypeRepository.findById(id, companyId);
+const deleteServiceType = async (id, userId, authContext) => {
+  const existing = await serviceTypeRepository.findById(id, GLOBAL_COMPANY_ID);
   if (!existing) {
     const err = new Error('Service type not found.');
     err.statusCode = 404;
     throw err;
   }
 
-  await serviceTypeRepository.softDelete(id, userId, companyId);
+  await serviceTypeRepository.softDelete(id, userId, existing.company_id);
 
   logger.info('Service type soft-deleted', { serviceTypeId: id, userId });
 };

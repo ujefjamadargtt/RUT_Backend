@@ -7,18 +7,25 @@ const { TIME_PATTERN } = require('../helpers/workLogTimeHelper');
  * Employee Timesheet Validation Schemas (Employee Self Timesheet module)
  */
 
-// start_time/end_time must be supplied together (or not at all) — chronological
-// ordering (end > start) is deliberately NOT checked here; that's the service
-// layer's job (employeeTimesheetService.resolveHoursAndTimes /
-// workLogTimeHelper.calculateHoursFromTimes), which returns a plain 400 with
-// the exact "End time must be greater than start time." message rather than
-// a 422 VALIDATION_ERROR envelope.
-function assertTimePairing(value, helpers) {
-  if (Boolean(value.start_time) !== Boolean(value.end_time)) {
-    return helpers.message('start_time and end_time must be provided together.');
-  }
-  return value;
-}
+/**
+ * One Start Time/End Time segment within a `time_entries` array — see
+ * EmployeeWorkLogTimeEntry.js. Chronological ordering (end_time > start_time)
+ * and cross-segment overlap are deliberately NOT checked here; that's the
+ * service layer's job (employeeTimesheetService.resolveHoursAndTimeEntries /
+ * workLogTimeHelper.calculateHoursFromTimes/assertNoOverlappingEntries),
+ * which returns a plain 400 with a specific message rather than a generic
+ * 422 VALIDATION_ERROR envelope.
+ */
+const timeEntrySchema = Joi.object({
+  start_time: Joi.string().pattern(TIME_PATTERN).required().messages({
+    'any.required': 'start_time is required for every time entry.',
+    'string.pattern.base': 'start_time must be in HH:MM (24-hour) format.',
+  }),
+  end_time: Joi.string().pattern(TIME_PATTERN).required().messages({
+    'any.required': 'end_time is required for every time entry.',
+    'string.pattern.base': 'end_time must be in HH:MM (24-hour) format.',
+  }),
+});
 
 /**
  * A single line item within a POST /employee-timesheets/entries REPLACE SAVE
@@ -37,16 +44,19 @@ const dailyEntryLineSchema = Joi.object({
   // are logged against — see servicePOHierarchyService.js. Purely a tag
   // alongside service_po_id, which stays the required/authoritative field.
   hierarchy_node_id: Joi.number().integer().positive().optional().allow(null),
-  // Optional time-of-day pair (24-hour "HH:MM" or "HH:MM:SS"), within the
-  // shared timesheet_date. When both are given, `hours` below is ignored —
-  // the service layer always recalculates it server-side from this pair.
-  start_time: Joi.string().pattern(TIME_PATTERN).optional().allow(null).messages({
-    'string.pattern.base': 'start_time must be in HH:MM (24-hour) format.',
+  // One or more Start Time/End Time segments against this Module/Task on
+  // this date (see EmployeeWorkLogTimeEntry.js) — e.g. [{09:30-10:20},
+  // {14:00-15:00}] both under the same Module. When given, `hours` below is
+  // ignored — the service layer always recalculates it server-side as the
+  // sum of every segment's own duration (see resolveHoursAndTimeEntries).
+  time_entries: Joi.array().items(timeEntrySchema).min(1).optional().messages({
+    'array.min': 'time_entries must contain at least one entry.',
   }),
-  end_time: Joi.string().pattern(TIME_PATTERN).optional().allow(null).messages({
-    'string.pattern.base': 'end_time must be in HH:MM (24-hour) format.',
-  }),
-  hours: Joi.number().positive().max(12).required().messages({
+  hours: Joi.number().positive().max(12).when('time_entries', {
+    is: Joi.array().min(1).required(),
+    then: Joi.optional(),
+    otherwise: Joi.required(),
+  }).messages({
     'any.required': 'Hours is required.',
     'number.base': 'Hours must be a number.',
     'number.positive': 'Hours must be greater than 0.',
@@ -57,7 +67,7 @@ const dailyEntryLineSchema = Joi.object({
     'string.min': 'Description cannot be empty.',
     'string.max': 'Description cannot exceed 2000 characters.',
   }),
-}).custom(assertTimePairing, 'start-end-time-pairing');
+});
 
 /**
  * POST /employee-timesheets/entries
@@ -86,17 +96,15 @@ const updateEntrySchema = Joi.object({
   service_po_id: Joi.number().integer().positive().optional(),
   sub_project_id: Joi.number().integer().positive().optional().allow(null),
   hierarchy_node_id: Joi.number().integer().positive().optional().allow(null),
-  // Optional — omitting both leaves the existing entry's start_time/end_time
-  // (and hours) untouched. Supplying one changes JUST that one, merged
-  // against whatever the entry already has — see
-  // employeeTimesheetService.updateEntry()'s effective-start/end-time
-  // resolution. Passing null for both explicitly clears them (reverts to a
-  // plain hours-only entry).
-  start_time: Joi.string().pattern(TIME_PATTERN).optional().allow(null).messages({
-    'string.pattern.base': 'start_time must be in HH:MM (24-hour) format.',
-  }),
-  end_time: Joi.string().pattern(TIME_PATTERN).optional().allow(null).messages({
-    'string.pattern.base': 'end_time must be in HH:MM (24-hour) format.',
+  // Replace this entry's ENTIRE Start Time/End Time breakdown with exactly
+  // these segments — see EmployeeWorkLogTimeEntry.js. Omitting this field
+  // entirely leaves the existing breakdown (if any) untouched, same
+  // "omit = don't change" convention as every other field here. An explicit
+  // empty array IS accepted here (unlike the create path's `.min(1)`) as
+  // "clear the breakdown, revert to a plain hours-only entry" — see
+  // updateEntry()'s doc comment.
+  time_entries: Joi.array().items(timeEntrySchema).optional().messages({
+    'array.base': 'time_entries must be an array.',
   }),
   hours: Joi.number().positive().max(12).optional().messages({
     'number.positive': 'Hours must be greater than 0.',
@@ -155,10 +163,63 @@ const dailyQuerySchema = Joi.object({
   }),
 });
 
+/**
+ * POST /employee-timesheets/time-entries — the dedicated "Time Entry" form
+ * (separate from the Daily Work Log's REPLACE SAVE). ADDITIVE, not a
+ * replace: the given `time_entries` segments are appended to whatever this
+ * Module/Task/date already has (find-or-create the employee_work_logs row,
+ * then add these segments to its breakdown) — see
+ * employeeTimesheetService.addTimeEntries()'s doc comment for why this has
+ * to be a genuinely separate operation from replaceDailyEntries/updateEntry
+ * (both of those REPLACE a line's entire time_entries set; this form must
+ * never require the caller to resend segments already saved earlier in the
+ * day, on this or a previous request).
+ */
+const addTimeEntriesSchema = Joi.object({
+  work_date: Joi.date().iso().required().messages({
+    'any.required': 'work_date is required.',
+    'date.format': 'work_date must be in ISO format (YYYY-MM-DD).',
+  }),
+  service_po_id: Joi.number().integer().positive().required().messages({
+    'any.required': 'Service PO is required.',
+    'number.base': 'Service PO must be a number.',
+  }),
+  sub_project_id: Joi.number().integer().positive().optional().allow(null),
+  hierarchy_node_id: Joi.number().integer().positive().optional().allow(null),
+  time_entries: Joi.array().items(timeEntrySchema).min(1).required().messages({
+    'any.required': 'time_entries is required.',
+    'array.min': 'time_entries must contain at least one entry.',
+  }),
+  // Required only when this Module/Task has no existing entry yet for this
+  // date — employeeTimesheetService.addTimeEntries() enforces that at the
+  // service layer (where it can check), not here. When the entry already
+  // exists, omitting this leaves its current description untouched.
+  description: Joi.string().trim().min(1).max(2000).optional().messages({
+    'string.min': 'Description cannot be empty.',
+    'string.max': 'Description cannot exceed 2000 characters.',
+  }),
+});
+
+/**
+ * GET /employee-timesheets/entries — the Employee's own flat work log
+ * list (id, status, rejection_remark, etc.) backing the Employee Work Log
+ * list/history view.
+ */
+const listEntriesQuerySchema = Joi.object({
+  page: Joi.number().integer().min(1).default(1),
+  limit: Joi.number().integer().min(1).max(200).default(20),
+  startDate: Joi.date().iso().optional(),
+  endDate: Joi.date().iso().optional(),
+  status: Joi.string().valid('pending', 'approved', 'rejected', 'synced').optional(),
+  poId: Joi.number().integer().positive().optional(),
+});
+
 module.exports = {
   replaceDailyEntriesSchema,
   updateEntrySchema,
+  addTimeEntriesSchema,
   monthYearQuerySchema,
   monthlySummaryQuerySchema,
   dailyQuerySchema,
+  listEntriesQuerySchema,
 };

@@ -4,6 +4,7 @@ const servicePOHierarchyRepository = require('../repositories/servicePOHierarchy
 const servicePORepository = require('../repositories/servicePORepository');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
 const servicePOHierarchyDTO = require('../dtos/servicePOHierarchyDTO');
+const { resolveActorCompanyScope } = require('./companyAccessControlService');
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
 const logger = require('../utils/logger');
 
@@ -39,12 +40,40 @@ function badRequestError(message) {
 }
 
 /**
+ * Resolve the caller's effective Company scope from `req` the same way
+ * servicePOService.js does — a plain number for a BU-scoped actor's own
+ * `req.companyId`, or a (possibly empty) array of owned Company ids for a
+ * company-less Admin/Entity Admin (see companyAccessControlService).
+ * `req.companyId` is `undefined` for those actors (resolveCompany.js
+ * exempts ranks 1-3 from single-BU resolution), and passing `undefined`
+ * straight through to a repository's `company_id` WHERE clause throws a
+ * Sequelize "invalid undefined value" error — this is what let every
+ * hierarchy route 500 for Admin/Entity Admin callers before this existed.
+ *
+ * @param {object} req
+ * @returns {Promise<number|number[]>}
+ */
+async function resolveScope(req) {
+  return resolveActorCompanyScope({
+    companyId: req.companyId,
+    hierarchyRank: req.hierarchyRank,
+    employeeId: req.employeeId,
+  });
+}
+
+/**
  * Confirm the Service PO exists, isn't soft-deleted, and belongs to this
  * company — the gate every servicePoId-scoped hierarchy operation starts
  * with.
+ *
+ * `createdBy` is passed through to servicePORepository.findById()'s
+ * companyScope() so a Centralised (BU-less, company_id NULL) Service PO's
+ * own creator can still resolve it here — without it, companyScope() has no
+ * fallback for a NULL company_id at all, and even the PO's own creator gets
+ * a false "Service PO not found" on every hierarchy route.
  */
-async function assertServicePOExists(servicePOId, companyId) {
-  const po = await servicePORepository.findById(servicePOId, companyId);
+async function assertServicePOExists(servicePOId, companyId, createdBy) {
+  const po = await servicePORepository.findById(servicePOId, companyId, createdBy);
   if (!po) {
     throw notFoundError(`Service PO #${servicePOId} was not found.`);
   }
@@ -54,14 +83,15 @@ async function assertServicePOExists(servicePOId, companyId) {
 /**
  * Load a hierarchy node by its own id and confirm it belongs to a Service
  * PO in the caller's company — the gate the flat (no servicePoId in the
- * URL) rename/delete routes use instead of assertServicePOExists.
+ * URL) rename/delete routes use instead of assertServicePOExists. Same
+ * `createdBy` fallback as assertServicePOExists() above.
  */
-async function loadNodeForCompany(hierarchyId, companyId) {
+async function loadNodeForCompany(hierarchyId, companyId, createdBy) {
   const node = await servicePOHierarchyRepository.findById(hierarchyId);
   if (!node) {
     throw notFoundError(`Hierarchy node #${hierarchyId} was not found.`);
   }
-  const po = await servicePORepository.findById(node.service_po_id, companyId);
+  const po = await servicePORepository.findById(node.service_po_id, companyId, createdBy);
   if (!po) {
     // Either the PO doesn't exist, is soft-deleted, or belongs to another
     // company — in every case this node is not visible to this caller.
@@ -74,11 +104,12 @@ async function loadNodeForCompany(hierarchyId, companyId) {
  * GET /api/v1/service-pos/:servicePoId/hierarchy
  *
  * @param {number} servicePOId
- * @param {number} companyId
+ * @param {object} req
  * @returns {Promise<Array<object>>}
  */
-const getTree = async (servicePOId, companyId) => {
-  await assertServicePOExists(servicePOId, companyId);
+const getTree = async (servicePOId, req) => {
+  const companyId = await resolveScope(req);
+  await assertServicePOExists(servicePOId, companyId, req.employeeId);
   const rows = await servicePOHierarchyRepository.findByServicePO(servicePOId);
   return servicePOHierarchyDTO.toTree(rows);
 };
@@ -94,8 +125,8 @@ const getTree = async (servicePOId, companyId) => {
  * @returns {Promise<object>} node DTO
  */
 const createParent = async (servicePOId, data, userId, req) => {
-  const companyId = req.companyId;
-  await assertServicePOExists(servicePOId, companyId);
+  const companyId = await resolveScope(req);
+  await assertServicePOExists(servicePOId, companyId, req.employeeId);
 
   const node = await servicePOHierarchyRepository.create({
     service_po_id: servicePOId,
@@ -129,8 +160,8 @@ const createParent = async (servicePOId, data, userId, req) => {
  * @returns {Promise<object>} node DTO
  */
 const createChild = async (servicePOId, parentId, data, userId, req) => {
-  const companyId = req.companyId;
-  await assertServicePOExists(servicePOId, companyId);
+  const companyId = await resolveScope(req);
+  await assertServicePOExists(servicePOId, companyId, req.employeeId);
 
   const parent = await servicePOHierarchyRepository.findByIdAndServicePO(parentId, servicePOId);
   if (!parent) {
@@ -174,8 +205,8 @@ const createChild = async (servicePOId, parentId, data, userId, req) => {
  * @returns {Promise<object>} node DTO
  */
 const rename = async (hierarchyId, data, userId, req) => {
-  const companyId = req.companyId;
-  const existing = await loadNodeForCompany(hierarchyId, companyId);
+  const companyId = await resolveScope(req);
+  const existing = await loadNodeForCompany(hierarchyId, companyId, req.employeeId);
 
   const payload = { updated_by: userId };
   if (data.node_name !== undefined) payload.node_name = data.node_name;
@@ -212,8 +243,8 @@ const rename = async (hierarchyId, data, userId, req) => {
  * @returns {Promise<void>}
  */
 const remove = async (hierarchyId, userId, req) => {
-  const companyId = req.companyId;
-  const existing = await loadNodeForCompany(hierarchyId, companyId);
+  const companyId = await resolveScope(req);
+  const existing = await loadNodeForCompany(hierarchyId, companyId, req.employeeId);
 
   let idsToDelete = [hierarchyId];
   if (existing.node_type === 'PARENT') {

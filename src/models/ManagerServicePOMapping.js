@@ -14,8 +14,8 @@ const { Model, DataTypes } = require('sequelize');
 module.exports = (sequelize) => {
   class ManagerServicePOMapping extends Model {
     static associate(models) {
-      ManagerServicePOMapping.belongsTo(models.User, {
-        foreignKey: 'manager_user_id',
+      ManagerServicePOMapping.belongsTo(models.Employee, {
+        foreignKey: 'manager_employee_id',
         as: 'manager',
       });
       ManagerServicePOMapping.belongsTo(models.ServicePO, {
@@ -40,15 +40,15 @@ module.exports = (sequelize) => {
           key: 'id',
         },
       },
-      manager_user_id: {
+      manager_employee_id: {
         type: DataTypes.INTEGER,
         allowNull: false,
         references: {
-          model: 'users',
+          model: 'employees',
           key: 'id',
         },
         validate: {
-          notNull: { msg: 'Manager user is required.' },
+          notNull: { msg: 'Manager employee is required.' },
         },
       },
       service_po_id: {
@@ -88,7 +88,7 @@ module.exports = (sequelize) => {
       createdAt: 'created_at',
       updatedAt: 'updated_at',
       indexes: [
-        { unique: true, fields: ['manager_user_id', 'service_po_id'], name: 'uq_manager_servicepo_mappings' },
+        { unique: true, fields: ['manager_employee_id', 'service_po_id'], name: 'uq_manager_servicepo_mappings' },
       ],
     }
   );

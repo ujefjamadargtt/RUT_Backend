@@ -1,11 +1,28 @@
 'use strict';
 
+const { Op } = require('sequelize');
 const { CostBudget, ServicePO, Client } = require('../models');
 
 /**
  * Cost Budget Repository
  * All direct database interaction for cost_budget_master. No business logic.
  */
+
+/**
+ * Builds a `company_id` WHERE fragment — Op.in-aware for an array (a
+ * company-less Admin/Entity Admin's resolved owned-Company-id scope, see
+ * companyAccessControlService.resolveActorCompanyScope), plain equality for
+ * a number. Same pattern as resourceBudgetRepository.js.
+ *
+ * @param {number|number[]} companyId
+ * @returns {object}
+ */
+function companyScope(companyId) {
+  if (Array.isArray(companyId)) {
+    return { company_id: { [Op.in]: companyId } };
+  }
+  return { company_id: companyId };
+}
 
 const servicePOInclude = {
   model: ServicePO,
@@ -27,7 +44,7 @@ const servicePOInclude = {
  * @returns {Promise<CostBudget|null>}
  */
 const findById = async (id, companyId) => {
-  return CostBudget.findOne({ where: { id, company_id: companyId }, include: [servicePOInclude] });
+  return CostBudget.findOne({ where: { id, ...companyScope(companyId) }, include: [servicePOInclude] });
 };
 
 /**
@@ -40,7 +57,7 @@ const findById = async (id, companyId) => {
  * @returns {Promise<CostBudget|null>}
  */
 const findOne = async (servicePOId, month, year, companyId) => {
-  return CostBudget.findOne({ where: { service_po_id: servicePOId, month, year, company_id: companyId } });
+  return CostBudget.findOne({ where: { service_po_id: servicePOId, month, year, ...companyScope(companyId) } });
 };
 
 /**
@@ -51,7 +68,7 @@ const findOne = async (servicePOId, month, year, companyId) => {
  */
 const findByServicePO = async (servicePOId, companyId) => {
   return CostBudget.findAll({
-    where: { service_po_id: servicePOId, company_id: companyId },
+    where: { service_po_id: servicePOId, ...companyScope(companyId) },
     include: [servicePOInclude],
     order: [['year', 'DESC'], ['month', 'DESC']],
   });
@@ -64,7 +81,7 @@ const findByServicePO = async (servicePOId, companyId) => {
  * @returns {Promise<CostBudget[]>}
  */
 const findAll = async (filters, companyId) => {
-  const where = { company_id: companyId };
+  const where = { ...companyScope(companyId) };
   if (filters.service_po_id !== undefined) where.service_po_id = filters.service_po_id;
   if (filters.month !== undefined) where.month = filters.month;
   if (filters.year !== undefined) where.year = filters.year;
@@ -92,7 +109,7 @@ const create = async (data) => {
  */
 const update = async (id, data, companyId) => {
   const [affectedRows, [updated]] = await CostBudget.update(data, {
-    where: { id, company_id: companyId },
+    where: { id, ...companyScope(companyId) },
     returning: true,
   });
   return affectedRows === 0 ? null : updated;

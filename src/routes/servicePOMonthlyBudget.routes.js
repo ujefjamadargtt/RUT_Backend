@@ -11,6 +11,7 @@ const express = require('express');
 const router = express.Router();
 
 const authenticate = require('../middlewares/auth');
+const resolveCompanyContextForCompanyLessActors = require('../middlewares/resolveCompanyContextForCompanyLessActors');
 const authorize = require('../middlewares/authorize');
 const { validate } = require('../middlewares/validateRequest');
 const servicePOMonthlyBudgetController = require('../controllers/servicePOMonthlyBudgetController');
@@ -21,6 +22,11 @@ const {
 
 // ─── All routes require authentication ────────────────────────────────────────
 router.use(authenticate);
+// Admin/Entity Admin (ranks 2-3) have no single req.companyId from
+// authenticate alone — this module reads req.companyId directly, so resolve
+// ONE Business Unit context for them too (see
+// resolveCompanyContextForCompanyLessActors.js for the contract).
+router.use(resolveCompanyContextForCompanyLessActors);
 
 // ─── Current month (Service PO Manager screen) — before / to keep it explicit ─
 /**

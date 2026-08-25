@@ -5,9 +5,11 @@ const platformAdminRepository = require('../repositories/platformAdminRepository
 /**
  * Platform Admin Organization Overview — assembles the three independent
  * reads from platformAdminRepository (Companies/BUs, Projects+ServicePOs,
- * Users) into one plain-JSON payload. Pure mapping only; every relationship
- * (BU->Entity, Project->Client/ServicePO, ServicePO->Client/Company/
- * hierarchy, User->Employee/Company/Role) is read straight off the FK-based
+ * Employees) into one plain-JSON payload (the `users` key is kept for
+ * frontend compatibility, even though its rows are Employees now — see
+ * mapUser's doc comment). Pure mapping only; every relationship (BU->Entity,
+ * Project->Client/ServicePO, ServicePO->Client/Company/hierarchy,
+ * Employee->Role/BusinessUnit->Entity) is read straight off the FK-based
  * Sequelize associations already loaded by the repository — never inferred
  * from names. Read-only, cross-tenant by design (Platform Admin only).
  */
@@ -84,51 +86,71 @@ function mapProject(project) {
 }
 
 /**
- * A User's BU comes from its own company_id when set (the field the rest of
- * the app treats as authoritative for scoping — see resolveCompany.js);
- * Platform Admin/Admin/Entity Admin have none, so this falls back to the
- * linked Employee's company for any login tied to an Employee record
- * instead of silently reporting no BU.
+ * An Employee can hold more than one active Business Unit membership (see
+ * EmployeeBusinessUnit) — collapsed here into a single display-friendly
+ * field: `ids` (every BU's own id, for anyone filtering/linking by id) and
+ * a comma-separated `name` string (per product decision — multiple BUs are
+ * shown as "BU One, BU Two" rather than an array of objects). Returns null
+ * when the employee holds no active BU, rather than an empty-string name.
  */
-function resolveUserCompany(user) {
-  if (user.company) return user.company;
-  if (user.employee && user.employee.company) return user.employee.company;
-  return null;
+function formatBusinessUnits(businessUnits) {
+  if (!businessUnits || businessUnits.length === 0) return null;
+  return {
+    ids: businessUnits.map((bu) => bu.id),
+    name: businessUnits.map((bu) => bu.company_name).join(', '),
+  };
 }
 
-function mapUser(user) {
-  const company = resolveUserCompany(user);
-  const entity = company ? company.entity : null;
-
-  const roleMap = new Map();
-  if (user.role) roleMap.set(user.role.id, user.role.role_name);
-  for (const role of user.additionalRoles || []) {
-    roleMap.set(role.id, role.role_name);
-  }
-
+/**
+ * Same comma-separated collapsing as formatBusinessUnits, but for the
+ * DISTINCT Entities behind an employee's Business Units — several BUs can
+ * share the same parent Entity, which must only be listed once (dedupe by
+ * entity id, not one entry per BU).
+ */
+function formatEntities(businessUnits) {
+  const entities = (businessUnits || []).map((bu) => bu.entity).filter(Boolean);
+  const uniqueById = [...new Map(entities.map((entity) => [entity.id, entity])).values()];
+  if (uniqueById.length === 0) return null;
   return {
-    user_id: user.id,
-    employee_id: user.employee_id,
-    name: user.employee ? user.employee.full_name : null,
-    email: user.email,
-    roles: [...roleMap.entries()].map(([id, name]) => ({ id, name })),
-    status: user.status,
-    bu: company ? { id: company.id, name: company.company_name } : null,
-    entity: entity ? { id: entity.id, name: entity.entity_name } : null,
+    ids: uniqueById.map((entity) => entity.id),
+    name: uniqueById.map((entity) => entity.entity_name).join(', '),
+  };
+}
+
+/**
+ * Maps one Employee (the sole login identity since the Employee-as-Identity
+ * redesign — see platformAdminRepository.findAllEmployeesWithRolesAndBUs's
+ * doc comment) into this endpoint's `users` array shape. Field names
+ * (`user_id`, `employee_id`) are kept exactly as before this redesign for
+ * frontend compatibility, even though both now resolve to the same
+ * Employee id — there is no separate User identity left to distinguish.
+ *
+ * @param {import('../models').Employee} employee
+ */
+function mapUser(employee) {
+  return {
+    user_id: employee.id,
+    employee_id: employee.id,
+    name: employee.full_name,
+    email: employee.email,
+    roles: (employee.roles || []).map((role) => ({ id: role.id, name: role.role_name })),
+    status: employee.status,
+    bu: formatBusinessUnits(employee.businessUnits),
+    entity: formatEntities(employee.businessUnits),
   };
 }
 
 const getOrganizationOverview = async () => {
-  const [companies, projects, users] = await Promise.all([
+  const [companies, projects, employees] = await Promise.all([
     platformAdminRepository.findAllCompaniesWithEntity(),
     platformAdminRepository.findAllProjectsWithServicePOs(),
-    platformAdminRepository.findAllUsersWithRoles(),
+    platformAdminRepository.findAllEmployeesWithRolesAndBUs(),
   ]);
 
   return {
     business_units: companies.map(mapCompany),
     projects_service_pos: projects.map(mapProject),
-    users: users.map(mapUser),
+    users: employees.map(mapUser),
   };
 };
 

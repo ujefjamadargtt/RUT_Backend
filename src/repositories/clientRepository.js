@@ -11,6 +11,48 @@ const logger = require('../utils/logger');
  */
 
 /**
+ * Builds a `company_id` WHERE fragment. Accepts:
+ *   - a single number: the caller's own `req.companyId` (BU-scoped actor) —
+ *     `{ company_id: companyId }`, unchanged from before.
+ *   - an array: a company-less actor's (Admin/Entity Admin) RESOLVED list of
+ *     owned Company ids (see companyAccessControlService.resolveOwnedCompanyIds)
+ *     — `{ company_id: { [Op.in]: companyId } }`. An empty array correctly
+ *     matches NOTHING (not "unrestricted") — this is what stops one Admin's
+ *     Clients from leaking into an unrelated Admin's view.
+ *   - `null`: a company-less actor's Client created with no Business Unit
+ *     (see clientService.js's resolveOptionalCreateCompanyId() usage) —
+ *     `{ company_id: null }`, matching only OTHER BU-less Clients (e.g. for
+ *     the create-time duplicate-name/code check), never "everything."
+ *   - `{ ownedCompanyIds, createdBy }`: from
+ *     companyAccessControlService.resolveActorRecordAccessScope() — a
+ *     company-less actor's owned-Company Clients UNIONED with their OWN
+ *     Clients that have no Business Unit at all (`company_id IS NULL AND
+ *     created_by = createdBy`), since plain `IN (...)` never matches NULL
+ *     and would otherwise hide an Admin's own just-created BU-less Client
+ *     from themselves forever.
+ * Never call this with a bare `undefined` — that's a real caller-scope bug,
+ * distinct from an intentional `null`.
+ *
+ * @param {number|number[]|null|{ownedCompanyIds: number[], createdBy: number|null}} companyId
+ * @returns {object}
+ */
+function companyScope(companyId) {
+  if (Array.isArray(companyId)) {
+    return { company_id: { [Op.in]: companyId } };
+  }
+  if (companyId && typeof companyId === 'object') {
+    const { ownedCompanyIds, createdBy } = companyId;
+    return {
+      [Op.or]: [
+        { company_id: { [Op.in]: ownedCompanyIds } },
+        { company_id: null, created_by: createdBy },
+      ],
+    };
+  }
+  return { company_id: companyId };
+}
+
+/**
  * Retrieve a paginated, filtered, sorted list of clients.
  *
  * @param {object} filters       - { search, status, industry }
@@ -23,7 +65,7 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
   const { limit = 10, offset = 0 } = pagination;
   const { sortBy = 'client_name', sortOrder = 'ASC' } = sort;
 
-  const where = { company_id: companyId };
+  const where = { ...companyScope(companyId) };
 
   // Status filter — omit clause when 'all' is requested
   if (status && status !== 'all') {
@@ -66,8 +108,30 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
  */
 const findById = async (id, companyId) => {
   return Client.findOne({
-    where: { id, company_id: companyId },
-    attributes: ['id', 'client_code', 'client_name', 'industry', 'status', 'created_at', 'updated_at', 'created_by', 'updated_by'],
+    where: { id, ...companyScope(companyId) },
+    attributes: ['id', 'client_code', 'client_name', 'industry', 'status', 'company_id', 'created_at', 'updated_at', 'created_by', 'updated_by'],
+  });
+};
+
+/**
+ * Find a single client by primary key with NO company filter — the caller
+ * MUST independently verify the returned row is actually within its own
+ * authorized reach before using it (same "fetch unscoped, then check"
+ * pattern as servicePOService.js's assertValidDeliveryHead()). Exists for
+ * projectService.create()'s company-less-Project case: a company-less
+ * actor's Client can either belong to one of their owned Companies OR have
+ * no Business Unit at all (`company_id: null`) — companyScope()'s array
+ * form alone can't express "IN (...) OR IS NULL" (SQL `IN` never matches
+ * NULL), so the ordinary scoped findById() would wrongly 404 a BU-less
+ * Client that's genuinely this actor's own.
+ *
+ * @param {number} id
+ * @returns {Promise<Client|null>}
+ */
+const findByIdUnscoped = async (id) => {
+  return Client.findOne({
+    where: { id },
+    attributes: ['id', 'client_code', 'client_name', 'industry', 'status', 'company_id', 'created_at', 'updated_at', 'created_by', 'updated_by'],
   });
 };
 
@@ -81,8 +145,24 @@ const findById = async (id, companyId) => {
  */
 const findByCode = async (code, companyId) => {
   return Client.findOne({
-    where: { client_code: code, company_id: companyId },
+    where: { client_code: code, ...companyScope(companyId) },
     attributes: ['id', 'client_code', 'client_name', 'industry', 'status'],
+  });
+};
+
+/**
+ * Find a client by its name (case-insensitive, trimmed), scoped to one
+ * company — uniqueness of the human-readable name, alongside the
+ * machine-facing code uniqueness findByCode() already enforces.
+ *
+ * @param {string} name
+ * @param {number} companyId
+ * @returns {Promise<Client|null>}
+ */
+const findByName = async (name, companyId) => {
+  return Client.findOne({
+    where: { client_name: { [Op.iLike]: name.trim() }, ...companyScope(companyId) },
+    attributes: ['id', 'client_code', 'client_name'],
   });
 };
 
@@ -106,7 +186,7 @@ const create = async (data) => {
  */
 const update = async (id, data, companyId) => {
   const [affectedRows, [updated]] = await Client.update(data, {
-    where: { id, company_id: companyId },
+    where: { id, ...companyScope(companyId) },
     returning: true,
   });
 
@@ -128,7 +208,7 @@ const update = async (id, data, companyId) => {
 const softDelete = async (id, updatedBy, companyId) => {
   const [affectedRows] = await Client.update(
     { status: 'inactive', updated_by: updatedBy },
-    { where: { id, company_id: companyId } }
+    { where: { id, ...companyScope(companyId) } }
   );
   return affectedRows > 0;
 };
@@ -142,8 +222,8 @@ const softDelete = async (id, updatedBy, companyId) => {
  */
 const getActiveClients = async (companyId) => {
   return Client.findAll({
-    where: { status: 'active', company_id: companyId },
-    attributes: ['id', 'client_code', 'client_name', 'industry'],
+    where: { status: 'active', ...companyScope(companyId) },
+    attributes: ['id', 'client_code', 'client_name', 'industry', 'company_id'],
     order: [['client_name', 'ASC']],
   });
 };
@@ -161,7 +241,7 @@ const countActivePOsByClient = async (clientId, companyId) => {
     where: {
       client_id: clientId,
       status: 'active',
-      company_id: companyId,
+      ...companyScope(companyId),
     },
   });
 };
@@ -169,7 +249,9 @@ const countActivePOsByClient = async (clientId, companyId) => {
 module.exports = {
   findAll,
   findById,
+  findByIdUnscoped,
   findByCode,
+  findByName,
   create,
   update,
   softDelete,

@@ -16,6 +16,28 @@ const { ManagerEmployeeMapping } = require('../models');
  */
 
 /**
+ * A `company_id` WHERE fragment that also matches a row whose own
+ * company_id is NULL — manager_employee_mappings rows created (or
+ * backfilled) while the creating actor's own companyId was unresolved
+ * (a company-less Admin/Entity Admin — see employeeService.upsertManagerMapping)
+ * ended up with company_id left NULL. A bare `company_id: companyId` equality
+ * filter never matches NULL, which silently hides an otherwise perfectly
+ * active, correctly-manager_employee_id-matched mapping row from its own
+ * Manager's "My Employees" list — the exact bug this was written to close
+ * (a real Manager, with a real active mapping, whose /my-team/employees
+ * came back empty because their mapping row's company_id was NULL while
+ * req.companyId was a real number). Same "don't let a legacy/backfilled
+ * NULL column hide an in-scope row" principle as employeeRepository.
+ * employeeScope(), applied to this table's own company_id column instead of
+ * (re)deriving scope from employee_business_units.
+ * @param {number|null|undefined} companyId
+ * @returns {object}
+ */
+function companyScopeOrNull(companyId) {
+  return companyId == null ? {} : { company_id: { [Op.or]: [companyId, null] } };
+}
+
+/**
  * Every active mapping row for a company — used to flag which Employees
  * already have a Manager when building a "Map Employees" drawer.
  *
@@ -24,7 +46,7 @@ const { ManagerEmployeeMapping } = require('../models');
  */
 const findAllMappingsInCompany = async (companyId) => {
   return ManagerEmployeeMapping.findAll({
-    where: { company_id: companyId, status: 'active' },
+    where: { ...companyScopeOrNull(companyId), status: 'active' },
   });
 };
 
@@ -38,7 +60,7 @@ const findAllMappingsInCompany = async (companyId) => {
  */
 const findByManager = async (managerUserId, companyId) => {
   return ManagerEmployeeMapping.findAll({
-    where: { manager_user_id: managerUserId, company_id: companyId, status: 'active' },
+    where: { manager_employee_id: managerUserId, ...companyScopeOrNull(companyId), status: 'active' },
   });
 };
 
@@ -78,14 +100,14 @@ const findByEmployeeIds = async (employeeIds) => {
  * findByEmployeeIds() above — one query for every Manager on the team,
  * never one query per Manager.
  *
- * @param {number[]} managerUserIds
+ * @param {number[]} managerEmployeeIds
  * @param {number} companyId
  * @returns {Promise<ManagerEmployeeMapping[]>}
  */
-const findByManagerUserIds = async (managerUserIds, companyId) => {
-  if (!managerUserIds || managerUserIds.length === 0) return [];
+const findByManagerEmployeeIds = async (managerEmployeeIds, companyId) => {
+  if (!managerEmployeeIds || managerEmployeeIds.length === 0) return [];
   return ManagerEmployeeMapping.findAll({
-    where: { manager_user_id: { [Op.in]: managerUserIds }, company_id: companyId, status: 'active' },
+    where: { manager_employee_id: { [Op.in]: managerEmployeeIds }, ...companyScopeOrNull(companyId), status: 'active' },
   });
 };
 
@@ -113,7 +135,7 @@ const findByEmployeeAndType = async (employeeId, mappingType) => {
  */
 const findByManagerAndEmployee = async (managerUserId, employeeId, companyId) => {
   return ManagerEmployeeMapping.findOne({
-    where: { manager_user_id: managerUserId, employee_id: employeeId, company_id: companyId, status: 'active' },
+    where: { manager_employee_id: managerUserId, employee_id: employeeId, ...companyScopeOrNull(companyId), status: 'active' },
   });
 };
 
@@ -139,7 +161,7 @@ module.exports = {
   findByManager,
   findAllByEmployee,
   findByEmployeeIds,
-  findByManagerUserIds,
+  findByManagerEmployeeIds,
   findByEmployeeAndType,
   findByManagerAndEmployee,
   create,

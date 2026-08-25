@@ -44,11 +44,13 @@ function forbiddenError(message) {
 const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 
 // Priority order for combining several rows'/nodes' statuses into one —
-// "pending" wins over "approved" wins over "synced", i.e. the unit/node is
-// only as settled as its least-settled underlying row. Uses exactly the
-// three statuses the employee_work_logs.status column actually allows (see
+// "rejected" wins over "pending" wins over "approved" wins over "synced",
+// i.e. the unit/node is only as settled as its least-settled underlying
+// row, and a rejected row (needs employee action) must never be masked by
+// an approved/synced sibling in the same bucket. Uses exactly the four
+// statuses the employee_work_logs.status column actually allows (see
 // EmployeeWorkLog.js) — no new statuses invented.
-const STATUS_PRIORITY = ['pending', 'approved', 'synced'];
+const STATUS_PRIORITY = ['rejected', 'pending', 'approved', 'synced'];
 
 function combineStatuses(statuses) {
   if (!statuses || statuses.length === 0) return null;

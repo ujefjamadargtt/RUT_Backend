@@ -1,8 +1,8 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { Role, User } = require('../models');
-const userAdditionalRoleRepository = require('./userAdditionalRoleRepository');
+const { Role } = require('../models');
+const employeeRoleRepository = require('./employeeRoleRepository');
 
 /**
  * Role Repository
@@ -100,36 +100,33 @@ const update = async (id, data) => {
 };
 
 /**
- * Count the number of active users assigned to a given role.
- * Used before deletion to guard against orphaned users.
+ * Count the number of employees actively holding a given role (both
+ * roles.status and employee_roles.status must be 'active').
+ * Used before deletion to guard against orphaned employees.
  * @param {number} roleId
  * @returns {Promise<number>}
  */
 const countUsersByRole = async (roleId) => {
-  return User.count({ where: { status: 'active', role_id: roleId } });
+  const { EmployeeRole } = require('../models');
+  return EmployeeRole.count({ where: { role_id: roleId, status: 'active' } });
 };
 
 /**
- * Check whether a role currently has ANY user assigned to it — either as
- * their PRIMARY role (users.role_id, the sole source of truth for
- * hierarchy/scoping — see database/migrations/20260840_collapse_user_roles.sql)
- * or as an ADDITIONAL operational role (user_additional_roles — see
- * database/migrations/20260850_add_user_additional_roles.sql) —
- * regardless of the user's active/inactive status. Used as the hard-delete
- * guard in roleService.delete(): a role with even one inactive user still
- * pointing at it (either way) must not be deleted. user_additional_roles.role_id
- * has ON DELETE CASCADE, so without this check, deleting a role only ever
- * held as someone's additional role would silently drop that grant with no
- * guard and no audit trail.
+ * Check whether a role currently has ANY employee assigned to it
+ * (employee_roles — the sole source of an employee's roles now, no
+ * primary/additional split — see database/migrations/
+ * 20260865_create_employee_roles.sql), regardless of grant status.
+ * Used as the hard-delete guard in roleService.delete(): a role with even
+ * one inactive grant still pointing at it must not be deleted.
+ * employee_roles.role_id has ON DELETE CASCADE, so without this check,
+ * deleting a role would silently drop that grant with no guard and no
+ * audit trail.
  * @param {number} roleId
  * @returns {Promise<boolean>}
  */
 const hasAssignedUsers = async (roleId) => {
-  const [directCount, additionalCount] = await Promise.all([
-    User.count({ where: { role_id: roleId } }),
-    userAdditionalRoleRepository.countByRoleId(roleId),
-  ]);
-  return directCount > 0 || additionalCount > 0;
+  const count = await employeeRoleRepository.countByRoleId(roleId);
+  return count > 0;
 };
 
 /**

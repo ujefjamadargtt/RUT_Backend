@@ -13,6 +13,13 @@ const projectCodePattern = /^[A-Z0-9_-]{2,30}$/;
  * POST /projects — Create new project
  */
 const createProjectSchema = Joi.object({
+  // Only meaningful for a company-less actor (Admin/Entity Admin) — see
+  // companyAccessControlService.resolveCreateCompanyId(). A BU-scoped
+  // actor's own req.companyId always wins over this field.
+  company_id: Joi.number().integer().positive().optional().messages({
+    'number.base': 'Business Unit (company_id) must be a number.',
+  }),
+
   client_id: Joi.number()
     .integer()
     .positive()

@@ -33,7 +33,13 @@ function restore() {
 
 // ABC Service PO -> Parent 1 (-> Child 1, Child 2), Parent 2 (-> Child 3) —
 // matches the ticket's own hierarchy example.
-const FAKE_PO = { id: 293, service_po_name: 'ABC Service PO' };
+const FAKE_PO = { id: 293, service_po_name: 'ABC Service PO', company_id: 4 };
+
+// delete() now takes a req-like object (it resolves the actor's company
+// scope via companyAccessControlService.resolveActorCompanyScope — see
+// projectService.js's deleteProject() for the identical pattern) rather
+// than a bare companyId, so every call below passes this instead of `4`.
+const FAKE_REQ = { companyId: 4, hierarchyRank: 4, employeeId: 100 };
 const HIERARCHY_NODES = [
   { id: 1, node_type: 'PARENT' },
   { id: 2, node_type: 'CHILD' },
@@ -54,7 +60,7 @@ test('1. Work log exists on the Main Service PO (official timesheets table) -> d
   };
 
   await assert.rejects(
-    () => servicePOService.delete(293, 1, 4),
+    () => servicePOService.delete(293, 1, FAKE_REQ),
     (err) => {
       assert.equal(err.statusCode, 400);
       assert.equal(err.message, EXPECTED_MESSAGE);
@@ -79,7 +85,7 @@ test('2. Work log exists on a Parent hierarchy node (employee_work_logs) -> dele
   };
 
   await assert.rejects(
-    () => servicePOService.delete(293, 1, 4),
+    () => servicePOService.delete(293, 1, FAKE_REQ),
     (err) => {
       assert.equal(err.statusCode, 400);
       assert.equal(err.message, EXPECTED_MESSAGE);
@@ -103,7 +109,7 @@ test('3. Work log exists on a Child hierarchy node (employee_work_logs) -> delet
   };
 
   await assert.rejects(
-    () => servicePOService.delete(293, 1, 4),
+    () => servicePOService.delete(293, 1, FAKE_REQ),
     (err) => {
       assert.equal(err.statusCode, 400);
       assert.equal(err.message, EXPECTED_MESSAGE);
@@ -125,7 +131,7 @@ test('4. No work logs anywhere in the hierarchy -> delete succeeds', async () =>
     softDeleteCalledWith = { id, userId, companyId };
   };
 
-  await servicePOService.delete(293, 1, 4);
+  await servicePOService.delete(293, 1, FAKE_REQ);
 
   assert.deepEqual(softDeleteCalledWith, { id: 293, userId: 1, companyId: 4 });
 
@@ -141,7 +147,7 @@ test('Service PO not found -> 404, never reaches the work-log check', async () =
   };
 
   await assert.rejects(
-    () => servicePOService.delete(999, 1, 4),
+    () => servicePOService.delete(999, 1, FAKE_REQ),
     (err) => {
       assert.equal(err.statusCode, 404);
       return true;

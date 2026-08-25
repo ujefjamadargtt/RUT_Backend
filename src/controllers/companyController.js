@@ -6,14 +6,19 @@ const { getIpAddress } = require('../middlewares/auditLog');
 
 /**
  * Company Controller
- * Entity Admin only — every route here is gated by requireEntityAdmin
- * (repurposed from requirePlatformAdmin when Entity Admin was introduced).
- * Every call is scoped to req.entityIds (the caller's own owned Entities).
+ * Entity Admin/Admin — every route here except GET / is gated by
+ * requireEntityAdminOrAdmin and scoped to req.entityIds (the caller's own
+ * owned Entities). GET / (the "load BUs" dropdown, also used by the Service
+ * PO creation flow) additionally allows a BU Admin through — see
+ * company.routes.js's allowCompanyListing — in which case req.employeeBUsOnly
+ * is set and this returns only their own mapped BUs instead.
  */
 
 const getAll = async (req, res, next) => {
   try {
-    const companies = await companyService.getAll(req.query, req.entityIds);
+    const companies = req.employeeBUsOnly
+      ? await companyService.getAllForEmployee(req.query, req.employeeId)
+      : await companyService.getAll(req.query, req.entityIds);
     return sendSuccess(res, companies, 'Companies fetched successfully.');
   } catch (err) {
     next(err);
@@ -38,14 +43,14 @@ const getById = async (req, res, next) => {
 
 /**
  * POST /api/v1/companies
- * Creates a company, its first BU Admin, and that BU Admin's linked
- * Employee record in one transaction, under one of the calling Entity
- * Admin's own owned Entities.
+ * Creates a company under one of the calling Entity Admin's own owned
+ * Entities. Decoupled from admin-minting — assign a BU Admin afterward via
+ * ordinary Employee Master create/update (role_ids + business_unit_ids).
  */
 const create = async (req, res, next) => {
   try {
-    const result = await companyService.createWithAdmin(req.body, req.userId, getIpAddress(req), req.entityIds);
-    return sendCreated(res, result, 'Company and its first BU Admin (with linked Employee record) created successfully.');
+    const result = await companyService.create(req.body, req.userId, getIpAddress(req), req.entityIds);
+    return sendCreated(res, result, 'Company created successfully.');
   } catch (err) {
     if (err.statusCode === 409) {
       return sendError(res, err.message, 409);

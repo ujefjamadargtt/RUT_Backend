@@ -19,12 +19,29 @@ const logger = require('../utils/logger');
  */
 
 /**
+ * The object-level scoping context Client reads/writes need for
+ * company-less actors (Admin/Entity Admin) — see clientService.js's
+ * resolveActorCompanyScope()/resolveCreateCompanyId(). Built only from
+ * server-verified req fields, never from the request body/query.
+ *
+ * @param {import('express').Request} req
+ * @returns {{ companyId: number|null, hierarchyRank: number|null, employeeId: number|null }}
+ */
+function buildClientAuthContext(req) {
+  return {
+    companyId: req.companyId,
+    hierarchyRank: req.hierarchyRank,
+    employeeId: req.employeeId,
+  };
+}
+
+/**
  * GET /api/v1/clients
  * List clients with pagination, search, and filters.
  */
 const getAllClients = async (req, res) => {
   try {
-    const { data, meta } = await clientService.getAll(req.query, req.companyId);
+    const { data, meta } = await clientService.getAll(req.query, buildClientAuthContext(req));
     return sendPaginated(res, data, meta, 'Clients fetched successfully.');
   } catch (error) {
     logger.error('getAllClients error', { error: error.message, userId: req.userId });
@@ -43,7 +60,7 @@ const getClientById = async (req, res) => {
       return sendError(res, 'Invalid client ID.', 400);
     }
 
-    const client = await clientService.getById(id, req.companyId);
+    const client = await clientService.getById(id, buildClientAuthContext(req));
     return sendSuccess(res, client, 'Client fetched successfully.');
   } catch (error) {
     if (error.statusCode === 404) {
@@ -127,7 +144,7 @@ const deleteClient = async (req, res) => {
  */
 const getActiveClients = async (req, res) => {
   try {
-    const clients = await clientService.getActiveClients(req.companyId);
+    const clients = await clientService.getActiveClients(buildClientAuthContext(req));
     return sendSuccess(res, clients, 'Active clients fetched successfully.');
   } catch (error) {
     logger.error('getActiveClients error', { error: error.message });
@@ -143,7 +160,7 @@ const getActiveClients = async (req, res) => {
 const importClients = async (req, res) => {
   try {
     const { path: filePath } = req.file;
-    const result = await clientImportService.importClients(filePath, req.userId, req.companyId);
+    const result = await clientImportService.importClients(filePath, req.userId, req);
 
     const message =
       `Import complete. ${result.imported} client(s) imported, ` +

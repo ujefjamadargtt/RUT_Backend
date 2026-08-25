@@ -2,13 +2,14 @@
 
 const { sequelize } = require('../models');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
+const employeeWorkLogTimeEntryRepository = require('../repositories/employeeWorkLogTimeEntryRepository');
 const employeeRepository = require('../repositories/employeeRepository');
 const timesheetService = require('./timesheetService');
 const employeeServicePOMappingRepository = require('../repositories/employeeServicePOMappingRepository');
 const servicePOHierarchyRepository = require('../repositories/servicePOHierarchyRepository');
 const servicePOHierarchyDTO = require('../dtos/servicePOHierarchyDTO');
 const dateHelper = require('../helpers/dateHelper');
-const { calculateHoursFromTimes } = require('../helpers/workLogTimeHelper');
+const { calculateHoursFromTimes, assertNoOverlappingEntries, sumHours } = require('../helpers/workLogTimeHelper');
 const logger = require('../utils/logger');
 
 /**
@@ -81,10 +82,14 @@ function assertNotFutureDate(dateValue) {
 /**
  * Confirm the Service PO is actively mapped to this employee
  * (employee_servicepo_mapping, status = 'active') — the ONLY gate that
- * decides which projects an employee may log work against.
+ * decides which projects an employee may log work against. Intentionally
+ * not company-scoped (see findByEmployeeAndPO's doc comment) — an active
+ * mapping row is itself sufficient authorization even when the Service PO
+ * belongs to a different Business Unit than the employee's own (cross-BU
+ * resourcing, allowed since employeeServicePOMappingService.assign()).
  */
-async function assertProjectMapped(employeeId, servicePOId, companyId) {
-  const mapping = await employeeServicePOMappingRepository.findByEmployeeAndPO(employeeId, servicePOId, companyId);
+async function assertProjectMapped(employeeId, servicePOId) {
+  const mapping = await employeeServicePOMappingRepository.findByEmployeeAndPO(employeeId, servicePOId);
   if (!mapping || mapping.status !== 'active') {
     throw forbiddenError(`Service PO #${servicePOId} is not assigned to you.`);
   }
@@ -130,37 +135,45 @@ async function resolveHierarchyNode(hierarchyNodeId, servicePOId) {
 }
 
 /**
- * Resolve the authoritative hours + start_time/end_time for one CREATE line,
- * given whatever mix of hours/start_time/end_time the caller supplied. When
- * BOTH start_time and end_time are given, hours is ALWAYS recalculated from
- * them server-side — any caller-supplied hours value alongside a time pair
- * is discarded, never trusted, even if it happens to already be correct.
- * Supplying only one of start_time/end_time is rejected (Joi's
- * assertTimePairing already catches this for the create path, but this
- * function is the authoritative check — see updateEntry()'s own, similar
- * merge-with-existing logic below for the update path). Neither given at
- * all is the fully backward-compatible path: hours is used exactly as
- * supplied, start_time/end_time are stored as null.
+ * Validate (no overlaps) + compute the duration of every segment in a
+ * `time_entries` array (see EmployeeWorkLogTimeEntry.js), and their combined
+ * total — shared by the create (replaceDailyEntries) and update
+ * (updateEntry) paths so both compute this identically.
  *
- * @param {{ hours?: number, start_time?: string|null, end_time?: string|null }} line
- * @returns {{ hours: number, start_time: string|null, end_time: string|null }}
+ * @param {Array<{ start_time: string, end_time: string }>} timeEntries
+ * @returns {{ hours: number, resolvedEntries: Array<{ start_time: string, end_time: string, duration_hours: number }> }}
  */
-function resolveHoursAndTimes(line) {
-  const startTime = line.start_time || null;
-  const endTime = line.end_time || null;
+function resolveTimeEntries(timeEntries) {
+  assertNoOverlappingEntries(timeEntries);
 
-  if (startTime && !endTime) {
-    throw badRequestError('end_time is required when start_time is provided.');
-  }
-  if (endTime && !startTime) {
-    throw badRequestError('start_time is required when end_time is provided.');
-  }
+  const resolvedEntries = timeEntries.map((entry) => ({
+    start_time: entry.start_time,
+    end_time: entry.end_time,
+    duration_hours: calculateHoursFromTimes(entry.start_time, entry.end_time),
+  }));
 
-  if (startTime && endTime) {
-    return { hours: calculateHoursFromTimes(startTime, endTime), start_time: startTime, end_time: endTime };
-  }
+  return { hours: sumHours(resolvedEntries.map((entry) => entry.duration_hours)), resolvedEntries };
+}
 
-  return { hours: line.hours, start_time: null, end_time: null };
+/**
+ * Resolve the authoritative hours + time-entry breakdown for one CREATE
+ * line. When `time_entries` (one or more Start Time/End Time segments
+ * against this Module/Task/date — see EmployeeWorkLogTimeEntry.js) is
+ * given, hours is ALWAYS the sum of every segment's own duration — any
+ * caller-supplied `hours` on the same line is discarded, never trusted
+ * (Joi requires `hours` only when `time_entries` is absent, so this is the
+ * only other shape a line can take). Neither given is impossible (Joi's
+ * `.when()` rejects it); no `time_entries` at all is the plain hours-only
+ * path, used exactly as supplied.
+ *
+ * @param {{ hours?: number, time_entries?: Array }} line
+ * @returns {{ hours: number, resolvedEntries: Array }}
+ */
+function resolveHoursAndTimeEntries(line) {
+  if (line.time_entries && line.time_entries.length > 0) {
+    return resolveTimeEntries(line.time_entries);
+  }
+  return { hours: line.hours, resolvedEntries: [] };
 }
 
 /**
@@ -224,12 +237,12 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
     seenKeys.add(key);
   }
 
-  // Resolve the authoritative hours/start_time/end_time for every line FIRST
-  // — when a line supplies start_time+end_time, this recalculates hours from
-  // them (discarding whatever hours value the line also sent) — see
-  // resolveHoursAndTimes(). The 12-hour/day cap below, and everything
+  // Resolve the authoritative hours/time-entry breakdown for every line
+  // FIRST — when a line supplies time_entries, this recalculates hours as
+  // their sum (discarding whatever hours value the line also sent) — see
+  // resolveHoursAndTimeEntries(). The 12-hour/day cap below, and everything
   // downstream, uses these resolved values, never the raw line.hours.
-  const resolvedTimes = lines.map((line) => resolveHoursAndTimes(line));
+  const resolvedTimes = lines.map((line) => resolveHoursAndTimeEntries(line));
 
   // 12-hour/day cap, computed purely from this payload — the old rows for
   // this date are being replaced wholesale, so there is nothing left in the
@@ -250,10 +263,13 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
 
     // Reuse the Admin module's employee-active / PO-eligible-status /
     // sub-project-belongs-to-PO checks — these only query Employee/ServicePO,
-    // never `timesheets`.
+    // never `timesheets`. assertProjectMapped() above already authorized
+    // this exact PO for this employee, so skip its redundant company check
+    // (cross-BU resourcing).
     const { po } = await timesheetService.resolveManualEntryReferences(
       { employee_id: employeeId, service_po_id: line.service_po_id, sub_project_id: line.sub_project_id },
-      companyId
+      companyId,
+      { skipPOCompanyScope: true }
     );
 
     const hierarchyNode = await resolveHierarchyNode(line.hierarchy_node_id, line.service_po_id);
@@ -264,7 +280,7 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
   const insertedRows = await sequelize.transaction(async (transaction) => {
     await employeeWorkLogRepository.deleteByEmployeeAndDate(employeeId, dateStr, companyId, transaction);
 
-    return employeeWorkLogRepository.bulkCreate(
+    const rows = await employeeWorkLogRepository.bulkCreate(
       resolvedLines.map(({ line }, i) => ({
         employee_id: employeeId,
         service_po_id: line.service_po_id,
@@ -272,8 +288,6 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
         hierarchy_node_id: line.hierarchy_node_id || null,
         work_date: dateStr,
         hours: resolvedTimes[i].hours,
-        start_time: resolvedTimes[i].start_time,
-        end_time: resolvedTimes[i].end_time,
         description: line.description,
         company_id: companyId,
         status: 'pending',
@@ -282,6 +296,23 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
       })),
       transaction
     );
+
+    // The old rows for this date were just wiped above (deleteByEmployeeAndDate,
+    // same transaction), cascading away any of their own time entries with
+    // them — so every row created here starts with none, and only lines that
+    // supplied `time_entries` get any inserted now.
+    for (let i = 0; i < rows.length; i++) {
+      if (resolvedTimes[i].resolvedEntries.length > 0) {
+        await employeeWorkLogTimeEntryRepository.bulkCreate(
+          rows[i].id,
+          resolvedTimes[i].resolvedEntries.map((entry) => ({ ...entry, entry_date: dateStr })),
+          employeeId,
+          transaction
+        );
+      }
+    }
+
+    return rows;
   });
 
   // Approval happens BEFORE Sync (see managerSelfServiceService.
@@ -301,6 +332,7 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
 
   return insertedRows.map((row, i) => ({
     ...row.get({ plain: true }),
+    time_entries: resolvedTimes[i].resolvedEntries,
     service_po_breadcrumb: servicePOHierarchyDTO.buildBreadcrumb(
       resolvedLines[i].po.service_po_name,
       resolvedLines[i].hierarchyNode
@@ -334,25 +366,23 @@ const updateEntry = async (employeeId, companyId, id, data) => {
   const subProjectId = data.sub_project_id !== undefined ? data.sub_project_id : existing.sub_project_id;
   const hierarchyNodeId = data.hierarchy_node_id !== undefined ? data.hierarchy_node_id : existing.hierarchy_node_id;
 
-  // Effective start_time/end_time after merging this update against the
-  // existing row — a field not present in `data` keeps its existing value,
-  // exactly like every other field above. When the EFFECTIVE pair has both
-  // ends set (whether just-changed or untouched from before), hours is
-  // ALWAYS recalculated from them — a caller-supplied `hours` in `data` is
-  // discarded in that case, never trusted (same rule as create). Only when
-  // the effective record has no time pair at all does `data.hours` (or the
-  // existing hours) apply, preserving old hours-only entries untouched.
-  const startTime = (data.start_time !== undefined ? data.start_time : existing.start_time) || null;
-  const endTime = (data.end_time !== undefined ? data.end_time : existing.end_time) || null;
+  // Effective time_entries after merging this update against the existing
+  // row: an explicit array in `data` (including an empty one, which clears
+  // the breakdown) always wins; omitting the field entirely keeps whatever
+  // this row already has (already eager-loaded via findByIdForEmployee's
+  // include — see employeeWorkLogRepository.buildIncludes). When the
+  // effective set is non-empty, hours is ALWAYS recalculated as their sum —
+  // a caller-supplied `hours` in `data` is discarded in that case, never
+  // trusted (same rule as create). Only when the effective set is empty does
+  // `data.hours` (or the existing hours) apply.
+  const effectiveTimeEntries = data.time_entries !== undefined
+    ? data.time_entries
+    : (existing.timeEntries || []).map((entry) => ({ start_time: entry.start_time, end_time: entry.end_time }));
 
-  if (startTime && !endTime) {
-    throw badRequestError('end_time is required when start_time is provided.');
-  }
-  if (endTime && !startTime) {
-    throw badRequestError('start_time is required when end_time is provided.');
-  }
+  const { hours, resolvedEntries } = effectiveTimeEntries.length > 0
+    ? resolveTimeEntries(effectiveTimeEntries)
+    : { hours: data.hours ?? existing.hours, resolvedEntries: [] };
 
-  const hours = (startTime && endTime) ? calculateHoursFromTimes(startTime, endTime) : (data.hours ?? existing.hours);
   const dateStr = data.timesheet_date ? assertNotFutureDate(data.timesheet_date) : existing.work_date;
   await assertNoMonthlyLogForDate(employeeId, dateStr, companyId);
 
@@ -360,7 +390,8 @@ const updateEntry = async (employeeId, companyId, id, data) => {
 
   const { po } = await timesheetService.resolveManualEntryReferences(
     { employee_id: employeeId, service_po_id: servicePOId, sub_project_id: subProjectId },
-    companyId
+    companyId,
+    { skipPOCompanyScope: true }
   );
 
   const hierarchyNode = await resolveHierarchyNode(hierarchyNodeId, servicePOId);
@@ -375,28 +406,289 @@ const updateEntry = async (employeeId, companyId, id, data) => {
 
   await assertDailyCap(employeeId, dateStr, hours, companyId, id);
 
-  const updated = await employeeWorkLogRepository.update(id, {
-    service_po_id: servicePOId,
-    sub_project_id: subProjectId || null,
-    hierarchy_node_id: hierarchyNodeId || null,
-    work_date: dateStr,
-    hours,
-    start_time: startTime,
-    end_time: endTime,
-    description: data.description !== undefined ? data.description : existing.description,
-    updated_by: employeeId,
-    // Any edit invalidates a prior sync snapshot — revert unconditionally
-    // (a no-op if it was already 'pending') rather than diffing fields.
-    status: 'pending',
-    synced_at: null,
-    timesheet_import_id: null,
-  }, companyId);
+  const updated = await sequelize.transaction(async (transaction) => {
+    const row = await employeeWorkLogRepository.update(id, {
+      service_po_id: servicePOId,
+      sub_project_id: subProjectId || null,
+      hierarchy_node_id: hierarchyNodeId || null,
+      work_date: dateStr,
+      hours,
+      description: data.description !== undefined ? data.description : existing.description,
+      updated_by: employeeId,
+      // Any edit invalidates a prior sync snapshot — revert unconditionally
+      // to 'pending' (a no-op if it was already 'pending') EXCEPT when the
+      // entry is 'rejected': saving edits must NOT itself resubmit it — only
+      // the explicit Resubmit action (resubmitEntry) may move REJECTED ->
+      // PENDING (see EmployeeWorkLog.js's status doc comment). Editing a
+      // rejected entry corrects it while leaving the Resubmit click as a
+      // deliberate, separate step ("Edit -> Save Changes -> still REJECTED
+      // -> Resubmit -> PENDING").
+      status: existing.status === 'rejected' ? 'rejected' : 'pending',
+      synced_at: null,
+      timesheet_import_id: null,
+    }, companyId, transaction);
+
+    // Always replace-in-place: delete whatever this row's breakdown was
+    // (a no-op if it had none) and reinsert exactly `resolvedEntries` (a
+    // no-op if the effective set is empty) — simpler and just as correct as
+    // diffing, and matches this codebase's other REPLACE SAVE flows.
+    await employeeWorkLogTimeEntryRepository.deleteByWorkLogId(id, transaction);
+    if (resolvedEntries.length > 0) {
+      await employeeWorkLogTimeEntryRepository.bulkCreate(
+        id,
+        resolvedEntries.map((entry) => ({ ...entry, entry_date: dateStr })),
+        employeeId,
+        transaction
+      );
+    }
+
+    return row;
+  });
 
   logger.info('Employee work log entry updated', { workLogId: id, employeeId, companyId });
 
   return {
     ...updated.get({ plain: true }),
+    time_entries: resolvedEntries,
     service_po_breadcrumb: servicePOHierarchyDTO.buildBreadcrumb(po.service_po_name, hierarchyNode),
+  };
+};
+
+/**
+ * ADD one or more Start Time/End Time segments to a Module/Task's entry for
+ * one date — the dedicated Time Entry form, deliberately separate from the
+ * Daily Work Log form (replaceDailyEntries) and from updateEntry. Both of
+ * those REPLACE a line's entire `time_entries` set with whatever the caller
+ * sends; this is genuinely ADDITIVE — a caller adding a second segment
+ * later in the day (or in a whole separate session) never needs to resend
+ * the segments already saved earlier. That's the whole reason this exists
+ * as its own operation: e.g. Module M1 logged 01:00-02:00 earlier, Task T1
+ * logged 03:00-04:00 earlier, then a later call adds T1 04:00-06:00 — M1
+ * stays at its own 1h total, T1 becomes 1h + 2h = 3h. Neither call's
+ * segments are ever silently dropped by the other.
+ *
+ * Find-or-create the (employee, service_po_id, hierarchy_node_id,
+ * work_date) row: if it doesn't exist yet, this call creates it (like a
+ * single-line replaceDailyEntries) and `description` is required; if it
+ * already exists, only the NEW segments are inserted (old ones are left
+ * completely untouched in the DB — never deleted-and-reinserted), `hours`
+ * is recomputed as old total + new segments' total, and `description` is
+ * only changed if explicitly supplied.
+ *
+ * Overlap is checked across the COMBINED set (already-saved + new) — a new
+ * segment overlapping one saved by an earlier call is rejected, not
+ * silently allowed just because it wasn't part of THIS request.
+ *
+ * @param {number} employeeId
+ * @param {number} companyId
+ * @param {object} data - { work_date, service_po_id, sub_project_id?, hierarchy_node_id?, time_entries, description? }
+ * @returns {Promise<object>} the entry after the add, plus service_po_breadcrumb
+ */
+const addTimeEntries = async (employeeId, companyId, data) => {
+  const dateStr = assertNotFutureDate(data.work_date);
+  await assertNoMonthlyLogForDate(employeeId, dateStr, companyId);
+  await assertProjectMapped(employeeId, data.service_po_id, companyId);
+
+  const { po } = await timesheetService.resolveManualEntryReferences(
+    { employee_id: employeeId, service_po_id: data.service_po_id, sub_project_id: data.sub_project_id },
+    companyId,
+    { skipPOCompanyScope: true }
+  );
+  const hierarchyNode = await resolveHierarchyNode(data.hierarchy_node_id, data.service_po_id);
+
+  const existingRef = await employeeWorkLogRepository.checkDuplicate(
+    employeeId, data.service_po_id, data.hierarchy_node_id || null, dateStr, null, companyId
+  );
+  const existing = existingRef ? await employeeWorkLogRepository.findById(existingRef.id, companyId) : null;
+
+  if (!existing && data.description === undefined) {
+    throw badRequestError('description is required when logging this Module/Task for the first time on this date.');
+  }
+
+  const existingEntries = existing
+    ? (existing.timeEntries || []).map((entry) => ({ start_time: entry.start_time, end_time: entry.end_time }))
+    : [];
+
+  // Overlap-checked and hours-computed across the COMBINED set — a new
+  // segment overlapping one already saved is rejected even though it wasn't
+  // resent in THIS request.
+  const { hours: newTotalHours, resolvedEntries: combinedResolvedEntries } =
+    resolveTimeEntries([...existingEntries, ...data.time_entries]);
+  const newlyResolvedEntries = combinedResolvedEntries.slice(existingEntries.length);
+
+  await assertDailyCap(employeeId, dateStr, newTotalHours, companyId, existing ? existing.id : null);
+
+  const effectiveDescription = data.description !== undefined
+    ? data.description
+    : (existing ? existing.description : data.description);
+
+  const workLogId = await sequelize.transaction(async (transaction) => {
+    let id;
+    if (existing) {
+      await employeeWorkLogRepository.update(existing.id, {
+        hours: newTotalHours,
+        description: effectiveDescription,
+        updated_by: employeeId,
+        status: existing.status === 'rejected' ? 'rejected' : 'pending',
+        synced_at: null,
+        timesheet_import_id: null,
+      }, companyId, transaction);
+      id = existing.id;
+    } else {
+      const [row] = await employeeWorkLogRepository.bulkCreate([{
+        employee_id: employeeId,
+        service_po_id: data.service_po_id,
+        sub_project_id: data.sub_project_id || null,
+        hierarchy_node_id: data.hierarchy_node_id || null,
+        work_date: dateStr,
+        hours: newTotalHours,
+        description: effectiveDescription,
+        company_id: companyId,
+        status: 'pending',
+        created_by: employeeId,
+        updated_by: employeeId,
+      }], transaction);
+      id = row.id;
+    }
+
+    // Only the NEWLY added segments are inserted — whatever this row
+    // already had in employee_work_log_time_entries is left exactly as is.
+    await employeeWorkLogTimeEntryRepository.bulkCreate(
+      id,
+      newlyResolvedEntries.map((entry) => ({ ...entry, entry_date: dateStr })),
+      employeeId,
+      transaction
+    );
+
+    return id;
+  });
+
+  if (!existing) {
+    // Same "skip straight to approved when this employee doesn't require
+    // approval" step replaceDailyEntries applies on create — see its own
+    // doc comment. Only relevant the first time this Module/Task/date is
+    // logged; an existing row's status is deliberately left as computed
+    // above (reverted to 'pending' unless it was 'rejected').
+    const employee = await employeeRepository.findById(employeeId, companyId);
+    if (employee && !employee.is_timesheet_approval_required) {
+      await employeeWorkLogRepository.markApprovedByIds([workLogId], companyId);
+    }
+  }
+
+  logger.info('Employee added time entries to a work log', {
+    workLogId, employeeId, companyId, addedSegments: data.time_entries.length, newTotalHours,
+  });
+
+  return {
+    id: workLogId,
+    employee_id: employeeId,
+    service_po_id: data.service_po_id,
+    sub_project_id: data.sub_project_id || null,
+    hierarchy_node_id: data.hierarchy_node_id || null,
+    work_date: dateStr,
+    hours: newTotalHours,
+    description: effectiveDescription,
+    time_entries: combinedResolvedEntries,
+    service_po_breadcrumb: servicePOHierarchyDTO.buildBreadcrumb(po.service_po_name, hierarchyNode),
+  };
+};
+
+/**
+ * Employee "Resubmit" action — the only way a REJECTED entry becomes
+ * PENDING again (REJECTED -> PENDING is the sole valid transition out of
+ * 'rejected' besides deletion — see EmployeeWorkLog.js's status doc
+ * comment). The frontend never sends a status; the backend enforces it
+ * unconditionally on every resubmit, exactly per spec ("every resubmission
+ * must automatically change the status back to PENDING").
+ *
+ * Re-runs every business validation a fresh submission/edit already goes
+ * through (project mapping, employee-active/PO-eligible/sub-project
+ * ownership, hierarchy node ownership, 12-hour/day cap, Daily/Monthly
+ * mutual exclusion) against the row's CURRENT field values — a mapping or
+ * hierarchy node that was valid when this entry was first submitted may no
+ * longer be, so resubmitting must fail loudly rather than silently
+ * re-queue an entry that can no longer be approved. The employee edits the
+ * row first (via updateEntry, which already re-validates everything and
+ * reverts status to 'pending' itself — see its own doc comment) when a
+ * validation actually needs fixing; calling resubmit directly on an
+ * unedited-but-still-valid rejected row is the common case this exists for.
+ *
+ * @param {number} employeeId
+ * @param {number} companyId
+ * @param {number} id
+ * @returns {Promise<EmployeeWorkLog>}
+ */
+const resubmitEntry = async (employeeId, companyId, id) => {
+  const existing = await employeeWorkLogRepository.findByIdForEmployee(id, employeeId, companyId);
+  if (!existing) {
+    throw notFoundError(`Work log entry #${id} was not found.`);
+  }
+
+  if (existing.status !== 'rejected') {
+    throw conflictError(`Only a rejected work log entry can be resubmitted (current status: ${existing.status}).`);
+  }
+
+  await assertNoMonthlyLogForDate(employeeId, existing.work_date, companyId);
+  await assertProjectMapped(employeeId, existing.service_po_id, companyId);
+  await timesheetService.resolveManualEntryReferences(
+    { employee_id: employeeId, service_po_id: existing.service_po_id, sub_project_id: existing.sub_project_id },
+    companyId,
+    { skipPOCompanyScope: true }
+  );
+  await resolveHierarchyNode(existing.hierarchy_node_id, existing.service_po_id);
+  await assertDailyCap(employeeId, existing.work_date, existing.hours, companyId, id);
+
+  const updated = await employeeWorkLogRepository.resubmitById(id, companyId);
+
+  logger.info('Employee resubmitted a rejected work log entry', { workLogId: id, employeeId, companyId });
+
+  return updated;
+};
+
+/**
+ * Flat list of the calling Employee's OWN work log entries (id, status,
+ * rejection_remark/rejected_by/rejected_at included), for the Employee
+ * Work Log list/history view — the same employeeWorkLogRepository.findAll
+ * managerSelfServiceService.getTimesheets already uses for the Manager's
+ * equivalent view, scoped to req.employeeId instead of a Manager-chosen
+ * employee_id. This is how the Employee discovers which of their own
+ * entries are 'rejected' (and why), and their ids for resubmit/delete.
+ *
+ * @param {number} employeeId
+ * @param {number} companyId
+ * @param {object} query - startDate, endDate, status, poId, page, limit
+ * @returns {Promise<{ data, meta }>}
+ */
+const getEntries = async (employeeId, companyId, query) => {
+  const page = parseInt(query.page, 10) || 1;
+  const limit = parseInt(query.limit, 10) || 20;
+
+  const { rows, count } = await employeeWorkLogRepository.findAll(
+    {
+      employeeId,
+      companyId,
+      startDate: query.startDate,
+      endDate: query.endDate,
+      status: query.status,
+      poId: query.poId,
+    },
+    { limit, offset: (page - 1) * limit },
+    { sortBy: 'work_date', sortOrder: 'DESC' }
+  );
+
+  const data = rows.map((row) => {
+    const plain = row.toJSON();
+    return {
+      ...plain,
+      rejected_by_name: plain.rejectedByEmployee?.full_name || null,
+    };
+  });
+
+  const totalPages = Math.ceil(count / limit) || 0;
+
+  return {
+    data,
+    meta: { total: count, page, limit, totalPages, hasNext: page < totalPages, hasPrev: page > 1 },
   };
 };
 
@@ -459,17 +751,21 @@ const getCalendarSummary = async (employeeId, month, year, companyId) => {
 };
 
 /**
- * Load every currently-mapped Service PO (same source as '/projects') plus
- * the complete hierarchy (Parent/Child nodes) for all of them, in two
- * batched queries — shared by getDailyEntries and getMonthlySummary so both
- * build the identical Service PO -> Parent -> Child tree shape.
+ * Load every currently-mapped Service PO (same source as '/projects', via
+ * findAllByEmployee() — no company filter, see its doc comment for why:
+ * this is always the caller's OWN employeeId, and a mapping to a Service PO
+ * under a different Business Unit than the employee's own home company must
+ * still be included, cross-BU resourcing) plus the complete hierarchy
+ * (Parent/Child nodes) for all of them, in two batched queries — shared by
+ * getDailyEntries and getMonthlySummary so both build the identical Service
+ * PO -> Parent -> Child tree shape.
  *
  * @param {number} employeeId
  * @param {number} companyId
  * @returns {Promise<{ mappedPOs: Array<object>, hierarchyRowsByPOId: Map<string, ServicePOHierarchy[]> }>}
  */
 const loadMappedPOsWithHierarchy = async (employeeId, companyId) => {
-  const mappings = await employeeServicePOMappingRepository.findByEmployee(employeeId, companyId, 'active');
+  const mappings = await employeeServicePOMappingRepository.findAllByEmployee(employeeId, 'active');
   const mappedPOs = mappings
     .map((m) => m.servicePO)
     .filter(Boolean)
@@ -710,12 +1006,20 @@ const getMonthlySummaryByServicePO = async (employeeId, month, year, companyId) 
  * hours against a Parent OR a Child, not just the PO itself. All mapped
  * POs' hierarchies are fetched in one batched query, not one call per PO.
  *
+ * Uses findAllByEmployee() (no company filter) rather than findByEmployee()
+ * — this is always called with the caller's OWN employeeId (never another
+ * employee's), so every one of their active mappings must be listed here,
+ * including a Service PO mapped under a different Business Unit than their
+ * own home company (cross-BU resourcing — see findAllByEmployee()'s doc
+ * comment). `companyId` is kept as a parameter for call-site symmetry with
+ * the rest of this service but is intentionally unused here.
+ *
  * @param {number} employeeId
  * @param {number} companyId
  * @returns {Promise<Array<{ id, code, name, service_po_breadcrumb, hierarchy: Array<object> }>>}
  */
 const getMappedProjects = async (employeeId, companyId) => {
-  const mappings = await employeeServicePOMappingRepository.findByEmployee(employeeId, companyId, 'active');
+  const mappings = await employeeServicePOMappingRepository.findAllByEmployee(employeeId, 'active');
   const projects = mappings
     .filter((m) => m.servicePO)
     .map((m) => ({
@@ -746,6 +1050,9 @@ const getMappedProjects = async (employeeId, companyId) => {
 module.exports = {
   replaceDailyEntries,
   updateEntry,
+  addTimeEntries,
+  resubmitEntry,
+  getEntries,
   deleteEntry,
   getCalendarSummary,
   getDailyEntries,

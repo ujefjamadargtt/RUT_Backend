@@ -24,8 +24,14 @@ const { getIpAddress } = require('../middlewares/auditLog');
  * body/query/params: employee_id, company_id, role_id supplied by a client
  * must never influence what this caller is authorized to see.
  *
+ * `employeeBusinessUnits` (this session's own actively mapped BUs, plain
+ * ids) is included alongside `companyId` (the single CURRENTLY ACTIVE one,
+ * from X-Company-Id/auto-resolution) specifically so a multi-BU BU Admin's
+ * business_unit_ids assignment isn't wrongly limited to just today's active
+ * BU — see employeeService.resolveBusinessUnitIds()'s caller.
+ *
  * @param {import('express').Request} req
- * @returns {{ userId: number, employeeId: number|null, companyId: number|null, hierarchyRank: number|null, roleNames: string[] }}
+ * @returns {{ userId: number, employeeId: number|null, companyId: number|null, hierarchyRank: number|null, roleNames: string[], employeeBusinessUnits: number[] }}
  */
 function buildEmployeeAuthContext(req) {
   return {
@@ -34,6 +40,7 @@ function buildEmployeeAuthContext(req) {
     companyId: req.companyId,
     hierarchyRank: req.hierarchyRank,
     roleNames: req.userRoles || [],
+    employeeBusinessUnits: (req.employeeBusinessUnits || []).map((bu) => bu.id),
   };
 }
 
@@ -72,6 +79,48 @@ const getById = async (req, res, next) => {
 };
 
 /**
+ * GET /api/v1/employees/:id/mappings
+ * Data source for the Action → Role & BU Mapping screen.
+ */
+const getMappings = async (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) {
+      return sendError(res, 'Invalid employee ID.', 400);
+    }
+    const mappings = await employeeService.getMappings(id, buildEmployeeAuthContext(req));
+    return sendSuccess(res, mappings, 'Employee role/BU mappings fetched successfully.');
+  } catch (err) {
+    if (err.statusCode === 404) {
+      return sendNotFound(res, 'Employee');
+    }
+    next(err);
+  }
+};
+
+/**
+ * GET /api/v1/employees/:id/business-units
+ * Dedicated "Mapped BUs" data source — frontend sends the employee's id
+ * here (e.g. right after login) rather than reading it off the login
+ * response, which no longer carries Business Unit data.
+ */
+const getBusinessUnits = async (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) {
+      return sendError(res, 'Invalid employee ID.', 400);
+    }
+    const result = await employeeService.getBusinessUnits(id, buildEmployeeAuthContext(req));
+    return sendSuccess(res, result, 'Employee business units fetched successfully.');
+  } catch (err) {
+    if (err.statusCode === 404) {
+      return sendNotFound(res, 'Employee');
+    }
+    next(err);
+  }
+};
+
+/**
  * POST /api/v1/employees
  *
  * Creates the Employee, its linked User (login) account, and the mandatory
@@ -82,7 +131,7 @@ const getById = async (req, res, next) => {
  */
 const create = async (req, res, next) => {
   try {
-    const result = await employeeService.create(req.body, req.userId, getIpAddress(req), req.companyId);
+    const result = await employeeService.create(req.body, req.userId, getIpAddress(req), buildEmployeeAuthContext(req));
     return sendCreated(res, result, 'Employee created successfully.');
   } catch (err) {
     if (err.statusCode === 409 || err.statusCode === 400 || err.statusCode === 404) {
@@ -101,7 +150,7 @@ const update = async (req, res, next) => {
     if (isNaN(id)) {
       return sendError(res, 'Invalid employee ID.', 400);
     }
-    const employee = await employeeService.update(id, req.body, req.userId, getIpAddress(req), req.companyId);
+    const employee = await employeeService.update(id, req.body, req.userId, getIpAddress(req), buildEmployeeAuthContext(req));
     return sendSuccess(res, employee, 'Employee updated successfully.');
   } catch (err) {
     if (err.statusCode === 404 || err.statusCode === 409 || err.statusCode === 400) {
@@ -120,7 +169,7 @@ const deleteEmployee = async (req, res, next) => {
     if (isNaN(id)) {
       return sendError(res, 'Invalid employee ID.', 400);
     }
-    const employee = await employeeService.delete(id, req.userId, getIpAddress(req), req.companyId);
+    const employee = await employeeService.delete(id, req.userId, getIpAddress(req), buildEmployeeAuthContext(req));
     return sendSuccess(res, employee, 'Employee deactivated successfully.');
   } catch (err) {
     if (err.statusCode === 404) {
@@ -138,7 +187,7 @@ const deleteEmployee = async (req, res, next) => {
  */
 const getActiveEmployees = async (req, res, next) => {
   try {
-    const employees = await employeeService.getActiveEmployees(req.companyId);
+    const employees = await employeeService.getActiveEmployees(buildEmployeeAuthContext(req));
     return sendSuccess(res, employees, 'Active employees fetched successfully.');
   } catch (err) {
     next(err);
@@ -152,7 +201,7 @@ const getActiveEmployees = async (req, res, next) => {
  */
 const importEmployees = async (req, res, next) => {
   try {
-    const result = await employeeImportService.importEmployees(req.file.path, req.userId, req.companyId);
+    const result = await employeeImportService.importEmployees(req.file.path, req.userId, req);
     const message = `Import complete. ${result.imported} employee(s) imported, ${result.skipped} skipped.`;
     return sendSuccess(res, result, message);
   } catch (err) {
@@ -167,8 +216,23 @@ const importEmployees = async (req, res, next) => {
  */
 const getEligibleDeliveryHeads = async (req, res, next) => {
   try {
-    const employees = await employeeService.getEligibleDeliveryHeads(req.companyId);
+    const employees = await employeeService.getEligibleDeliveryHeads(buildEmployeeAuthContext(req));
     return sendSuccess(res, employees, 'Eligible Delivery Head employees fetched successfully.');
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * GET /api/v1/employees/eligible-managers
+ * Eligible candidates for Primary/Secondary Manager selection — active
+ * employees in the caller's scope who hold a role capable of managing
+ * Employees (same rule assertValidManager() enforces on save).
+ */
+const getEligibleManagers = async (req, res, next) => {
+  try {
+    const employees = await employeeService.getEligibleManagers(buildEmployeeAuthContext(req));
+    return sendSuccess(res, employees, 'Eligible Manager employees fetched successfully.');
   } catch (err) {
     next(err);
   }
@@ -177,10 +241,13 @@ const getEligibleDeliveryHeads = async (req, res, next) => {
 module.exports = {
   getAll,
   getById,
+  getMappings,
+  getBusinessUnits,
   create,
   update,
   delete: deleteEmployee,
   getActiveEmployees,
   getEligibleDeliveryHeads,
+  getEligibleManagers,
   importEmployees,
 };

@@ -4,10 +4,13 @@ const servicePORepository = require('../repositories/servicePORepository');
 const clientRepository = require('../repositories/clientRepository');
 const projectRepository = require('../repositories/projectRepository');
 const employeeRepository = require('../repositories/employeeRepository');
+const employeeBusinessUnitRepository = require('../repositories/employeeBusinessUnitRepository');
 const servicePOHierarchyRepository = require('../repositories/servicePOHierarchyRepository');
 const timesheetRepository = require('../repositories/timesheetRepository');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
-const { Employee } = require('../models');
+const { resolveActorCompanyScope, resolveCreateCompanyId, resolveOptionalCreateCompanyId } = require('./companyAccessControlService');
+const { Employee, Company } = require('../models');
+const { Op } = require('sequelize');
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
 const logger = require('../utils/logger');
@@ -41,24 +44,71 @@ function assertProjectBelongsToClient(project, clientId) {
 }
 
 /**
+ * Confirm a candidate Client/Project belongs to this Service PO's company —
+ * matched two ways: its own company_id equals the PO's companyId, OR it has
+ * no company_id at all yet (an Admin/Entity Admin may create a Client or
+ * Project before assigning either to a Business Unit at all — see
+ * clientService.js/projectService.js's resolveOptionalCreateCompanyId()
+ * usage). A strict companyId-scoped findById() alone would 404 that record
+ * here even though it's genuinely available to attach — the exact
+ * "Client not found" a company-less Admin hits picking their own
+ * not-yet-assigned Client. Same idiom as assertValidDeliveryHead() above:
+ * fetched UNSCOPED (clientRepository/projectRepository's findByIdUnscoped)
+ * and checked after, so an unrelated company's record still simply resolves
+ * "not found" below, never leaking cross-company existence.
+ *
+ * @param {{company_id: number|null}|null} candidate
+ * @param {number} companyId
+ * @returns {boolean}
+ */
+function belongsToCompanyOrUnassigned(candidate, companyId) {
+  return !!candidate && (candidate.company_id === companyId || candidate.company_id === null);
+}
+
+/**
  * Confirm a candidate Delivery Head: exists, belongs to the same Company
  * as the Service PO, is active, and is not soft-deleted. Always an
  * Employee Master id — never a User Master id (see ServicePO.js's model
  * doc comment on the `deliveryHead` association).
  *
- * employeeRepository.findById() already scopes by company_id AND
- * is_deleted = false, so an employee from another company or a deleted
- * employee both simply resolve as "not found" here — the same branch as a
+ * "Belongs to the Company" is checked two ways, since the Employee Identity
+ * redesign left both live: the legacy single `employees.company_id`
+ * column (still populated for BU-scoped-created employees) OR a row in
+ * `employee_business_units` (the multi-BU membership table — see
+ * models/index.js's Employee<->Company belongsToMany doc comment). An
+ * Admin-created Employee with no home `company_id` but a BU grant for
+ * this exact company must still be a valid pick here. Fetched unscoped by
+ * company and checked after, not via employeeRepository.findById()'s
+ * strict single-column companyScope(), so that BU-membership case isn't
+ * missed; an employee from another company entirely, or a deleted one,
+ * still simply resolves as "not found" below — the same branch as a
  * genuinely missing id, which is deliberate (never leak cross-company
  * existence).
  *
+ * `companyId` may itself be `null` — a Business Unit is mandatory for a
+ * NEW Service PO (see servicePOService.create()'s resolveCreateCompanyId()
+ * usage), but this is also called from update() with `existing.company_id`,
+ * which can still be `null` on a Service PO created before that requirement
+ * existed. There is then no target company to check membership against, so
+ * this only confirms the employee exists and is active; company-membership
+ * reconciles once a Business Unit is actually assigned. (Deliberately NOT
+ * treated as "`employee.company_id ===
+ * null` counts as belonging" — that would match almost every Employee post-
+ * redesign, since employees.company_id is left NULL in favor of
+ * employee_business_units — an unrelated employee would wrongly pass.)
+ *
  * @param {number} employeeId
- * @param {number} companyId
+ * @param {number|null} companyId
  * @returns {Promise<Employee>}
  */
 async function assertValidDeliveryHead(employeeId, companyId) {
-  const employee = await employeeRepository.findById(employeeId, companyId);
-  if (!employee) {
+  const employee = await employeeRepository.findById(employeeId, null);
+  const belongsToCompany = companyId == null
+    ? !!employee
+    : !!employee &&
+      (employee.company_id === companyId || (await employeeBusinessUnitRepository.exists(employeeId, companyId)));
+
+  if (!belongsToCompany) {
     const err = new Error('Delivery Head employee not found.');
     err.statusCode = 404;
     throw err;
@@ -75,9 +125,11 @@ async function assertValidDeliveryHead(employeeId, companyId) {
  * Return a paginated list of Service POs.
  *
  * @param {object} query - req.query
+ * @param {object} authContext - { companyId, hierarchyRank, employeeId }
  * @returns {Promise<{ data: ServicePO[], meta: object }>}
  */
-const getAll = async (query = {}, companyId) => {
+const getAll = async (query = {}, authContext) => {
+  const companyId = await resolveActorCompanyScope(authContext);
   const { page, limit, offset } = getPaginationParams(query);
 
   const filters = {
@@ -91,6 +143,11 @@ const getAll = async (query = {}, companyId) => {
     start_date_from: query.start_date_from || null,
     start_date_to: query.start_date_to || null,
     companyId,
+    // A company-less Admin/Entity Admin must still see their OWN Service
+    // PO(s) created with no Business Unit assigned yet (company_id NULL) —
+    // see servicePORepository.companyScope()'s doc comment. No-op for a
+    // BU-scoped actor (companyId a plain number there, never an array).
+    createdBy: authContext.employeeId,
   };
 
   const sort = {
@@ -108,10 +165,12 @@ const getAll = async (query = {}, companyId) => {
  * Return the full details for a single Service PO, including resources.
  *
  * @param {number} id
+ * @param {object} authContext - { companyId, hierarchyRank, employeeId }
  * @returns {Promise<ServicePO>}
  */
-const getById = async (id, companyId) => {
-  const po = await servicePORepository.findById(id, companyId);
+const getById = async (id, authContext) => {
+  const companyId = await resolveActorCompanyScope(authContext);
+  const po = await servicePORepository.findById(id, companyId, authContext.employeeId);
 
   if (!po) {
     const err = new Error('Service PO not found.');
@@ -134,12 +193,26 @@ const getById = async (id, companyId) => {
  * @returns {Promise<ServicePO>}
  */
 const create = async (data, userId, req) => {
-  const companyId = req.companyId;
+  const { company_id: bodyCompanyId, ...fields } = data;
+  const authContext = { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId };
+  // A Business Unit is mandatory for a normal Service PO — a company-less
+  // actor (Admin/Entity Admin) must supply a `company_id` that is one of
+  // their own owned Business Units (resolveCreateCompanyId throws 400/403
+  // otherwise). A CENTRALISED Service PO (is_centralised: true) is the one
+  // exception: it is deliberately not tied to any Business Unit, so BU stays
+  // optional for it — same "defer/omit BU" treatment Client/Project already
+  // get via resolveOptionalCreateCompanyId. Either way, a BU-scoped actor's
+  // own req.companyId always wins over anything in the body, unchanged.
+  const companyId = fields.is_centralised === true
+    ? await resolveOptionalCreateCompanyId(authContext, bodyCompanyId)
+    : await resolveCreateCompanyId(authContext, bodyCompanyId, 'a Service PO');
+  data = fields;
 
-  // Validate client exists, is active, AND belongs to the same company —
+  // Validate client exists, is active, AND belongs to the same company (or
+  // has no company assigned yet — see belongsToCompanyOrUnassigned()) —
   // otherwise a PO could be attached to another company's client.
-  const client = await clientRepository.findById(data.client_id, companyId);
-  if (!client) {
+  const client = await clientRepository.findByIdUnscoped(data.client_id);
+  if (!belongsToCompanyOrUnassigned(client, companyId)) {
     const err = new Error('Client not found.');
     err.statusCode = 404;
     throw err;
@@ -152,8 +225,8 @@ const create = async (data, userId, req) => {
 
   // Validate project exists, is active, AND belongs to the same company —
   // same pattern as the client_id check above (independent grouping).
-  const project = await projectRepository.findById(data.project_id, companyId);
-  if (!project) {
+  const project = await projectRepository.findByIdUnscoped(data.project_id);
+  if (!belongsToCompanyOrUnassigned(project, companyId)) {
     const err = new Error('Project not found.');
     err.statusCode = 404;
     throw err;
@@ -167,8 +240,13 @@ const create = async (data, userId, req) => {
   // belong to the selected Client.
   assertProjectBelongsToClient(project, data.client_id);
 
-  // Delivery Head — mandatory on create (see createServicePOSchema).
-  await assertValidDeliveryHead(data.delivery_head_employee_id, companyId);
+  // Delivery Head — NULL by default on create (frontend no longer collects
+  // it at creation time; see createServicePOSchema). Only validated when a
+  // caller actually supplies one, same conditional pattern update() already
+  // uses below.
+  if (data.delivery_head_employee_id) {
+    await assertValidDeliveryHead(data.delivery_head_employee_id, companyId);
+  }
 
   // Date ordering guard (Joi already checks, but we also enforce in service)
   if (data.start_date && data.end_date && data.end_date < data.start_date) {
@@ -189,10 +267,21 @@ const create = async (data, userId, req) => {
     throw err;
   }
 
+  // Reject a duplicate service_po_name up front (case-insensitive, scoped
+  // to this company) — code uniqueness alone doesn't stop the same PO
+  // from being entered twice under two different codes.
+  const duplicateName = await servicePORepository.findByName(data.service_po_name, companyId);
+  if (duplicateName) {
+    const err = new Error(`Service PO "${data.service_po_name}" already exists.`);
+    err.statusCode = 409;
+    throw err;
+  }
+
   const payload = {
     ...data,
     service_po_code,
     company_id: companyId,
+    delivery_head_employee_id: data.delivery_head_employee_id ?? null,
     created_by: userId,
     updated_by: userId,
   };
@@ -232,14 +321,19 @@ const create = async (data, userId, req) => {
  * @returns {Promise<ServicePO>}
  */
 const update = async (id, data, userId, req) => {
-  const companyId = req.companyId;
+  const scope = await resolveActorCompanyScope({
+    companyId: req.companyId,
+    hierarchyRank: req.hierarchyRank,
+    employeeId: req.employeeId,
+  });
 
-  const existing = await servicePORepository.findById(id, companyId);
+  const existing = await servicePORepository.findById(id, scope, req.employeeId);
   if (!existing) {
     const err = new Error('Service PO not found.');
     err.statusCode = 404;
     throw err;
   }
+  const companyId = existing.company_id;
 
   if (existing.status === 'closed' || existing.status === 'cancelled') {
     const err = new Error(`Cannot update a Service PO with status "${existing.status}".`);
@@ -258,12 +352,25 @@ const update = async (id, data, userId, req) => {
     }
   }
 
-  // If client_id is being changed, validate the new client — findById is
-  // company-scoped, so a client belonging to another company simply 404s.
+  // Same rule as create() — a renamed Service PO can't collide with
+  // another Service PO's name in the same company.
+  if (data.service_po_name && data.service_po_name.trim().toLowerCase() !== existing.service_po_name.toLowerCase()) {
+    const nameConflict = await servicePORepository.findByName(data.service_po_name, companyId);
+    if (nameConflict && nameConflict.id !== id) {
+      const err = new Error(`Service PO "${data.service_po_name}" already exists.`);
+      err.statusCode = 409;
+      throw err;
+    }
+  }
+
+  // If client_id is being changed, validate the new client — belongs to the
+  // same company, or has no company assigned yet (see
+  // belongsToCompanyOrUnassigned()); a client belonging to another company
+  // entirely still simply 404s.
   const clientChanged = data.client_id && data.client_id !== existing.client_id;
   if (clientChanged) {
-    const client = await clientRepository.findById(data.client_id, companyId);
-    if (!client) {
+    const client = await clientRepository.findByIdUnscoped(data.client_id);
+    if (!belongsToCompanyOrUnassigned(client, companyId)) {
       const err = new Error('Client not found.');
       err.statusCode = 404;
       throw err;
@@ -280,8 +387,8 @@ const update = async (id, data, userId, req) => {
   const projectChanged = data.project_id && data.project_id !== existing.project_id;
   let projectForCrossCheck = null;
   if (projectChanged) {
-    const project = await projectRepository.findById(data.project_id, companyId);
-    if (!project) {
+    const project = await projectRepository.findByIdUnscoped(data.project_id);
+    if (!belongsToCompanyOrUnassigned(project, companyId)) {
       const err = new Error('Project not found.');
       err.statusCode = 404;
       throw err;
@@ -336,7 +443,7 @@ const update = async (id, data, userId, req) => {
     account_manager:     existing.account_manager,
     service_description: existing.service_description,
     invoice_frequency:   existing.invoice_frequency,
-    invoice_amount:      existing.invoice_amount,
+    is_centralised:      existing.is_centralised,
   };
 
   const payload = { ...data, updated_by: userId };
@@ -367,14 +474,19 @@ const update = async (id, data, userId, req) => {
  * @returns {Promise<void>}
  */
 const close = async (id, userId, req) => {
-  const companyId = req.companyId;
+  const scope = await resolveActorCompanyScope({
+    companyId: req.companyId,
+    hierarchyRank: req.hierarchyRank,
+    employeeId: req.employeeId,
+  });
 
-  const existing = await servicePORepository.findById(id, companyId);
+  const existing = await servicePORepository.findById(id, scope, req.employeeId);
   if (!existing) {
     const err = new Error('Service PO not found.');
     err.statusCode = 404;
     throw err;
   }
+  const companyId = existing.company_id;
 
   if (!ALLOWED_CLOSE_FROM.includes(existing.status)) {
     const err = new Error(
@@ -412,14 +524,19 @@ const close = async (id, userId, req) => {
  * @returns {Promise<void>}
  */
 const allocateResources = async (poId, employeeIds, userId, req) => {
-  const companyId = req.companyId;
+  const scope = await resolveActorCompanyScope({
+    companyId: req.companyId,
+    hierarchyRank: req.hierarchyRank,
+    employeeId: req.employeeId,
+  });
 
-  const po = await servicePORepository.findById(poId, companyId);
+  const po = await servicePORepository.findById(poId, scope, req.employeeId);
   if (!po) {
     const err = new Error('Service PO not found.');
     err.statusCode = 404;
     throw err;
   }
+  const companyId = po.company_id;
 
   if (po.status !== 'active') {
     const err = new Error(`Cannot allocate resources to a Service PO with status "${po.status}".`);
@@ -429,10 +546,27 @@ const allocateResources = async (poId, employeeIds, userId, req) => {
 
   // Validate all employees exist, are active, AND belong to this company —
   // an id from another company simply resolves as "not found" below, the
-  // same branch as a genuinely missing id.
+  // same branch as a genuinely missing id. "Belongs to this company" is
+  // checked the same two ways as assertValidDeliveryHead() above: the
+  // legacy `company_id` column OR an `employee_business_units` grant, so
+  // an Admin-created employee with only a BU grant for this company isn't
+  // wrongly rejected. When this PO has no company assigned at all (a
+  // legacy row from before a Business Unit became mandatory at create
+  // time — companyId null), there is no target company to check
+  // membership against, so the filter is skipped
+  // entirely — deliberately NOT `{ company_id: null }`, which would wrongly
+  // match almost every Employee post-redesign (employees.company_id is left
+  // NULL in favor of employee_business_units).
+  const employeeWhere = { id: employeeIds };
+  if (companyId != null) {
+    employeeWhere[Op.or] = [{ company_id: companyId }, { '$businessUnits.id$': companyId }];
+  }
   const employees = await Employee.findAll({
-    where: { id: employeeIds, company_id: companyId },
+    where: employeeWhere,
+    include: [{ model: Company, as: 'businessUnits', attributes: [], through: { attributes: [] } }],
     attributes: ['id', 'full_name', 'status'],
+    distinct: true,
+    subQuery: false,
   });
 
   if (employees.length !== employeeIds.length) {
@@ -476,14 +610,19 @@ const allocateResources = async (poId, employeeIds, userId, req) => {
  * @returns {Promise<void>}
  */
 const deallocateResource = async (poId, employeeId, userId, req) => {
-  const companyId = req.companyId;
+  const scope = await resolveActorCompanyScope({
+    companyId: req.companyId,
+    hierarchyRank: req.hierarchyRank,
+    employeeId: req.employeeId,
+  });
 
-  const po = await servicePORepository.findById(poId, companyId);
+  const po = await servicePORepository.findById(poId, scope, req.employeeId);
   if (!po) {
     const err = new Error('Service PO not found.');
     err.statusCode = 404;
     throw err;
   }
+  const companyId = po.company_id;
 
   const deleted = await servicePORepository.deallocateResource(poId, employeeId, companyId);
 
@@ -507,14 +646,19 @@ const deallocateResource = async (poId, employeeId, userId, req) => {
 };
 
 /**
- * Get utilisation data for a Service PO.
- * Returns hours logged, expected hours, and a utilisation percentage.
+ * Get hours-logged data for a Service PO. Used to just also report
+ * expected-hours-derived metrics (utilisation %, remaining hours,
+ * over-utilised flag) — those all required an expected_man_hours target,
+ * which no longer exists on Service PO, so this now returns only the raw
+ * hours logged.
  *
  * @param {number} poId
+ * @param {object} authContext - { companyId, hierarchyRank, employeeId }
  * @returns {Promise<object>}
  */
-const getUtilisation = async (poId, companyId) => {
-  const po = await servicePORepository.findById(poId, companyId);
+const getUtilisation = async (poId, authContext) => {
+  const companyId = await resolveActorCompanyScope(authContext);
+  const po = await servicePORepository.findById(poId, companyId, authContext.employeeId);
   if (!po) {
     const err = new Error('Service PO not found.');
     err.statusCode = 404;
@@ -523,38 +667,23 @@ const getUtilisation = async (poId, companyId) => {
 
   const raw = await servicePORepository.getUtilisation(poId, companyId);
 
-  const totalHoursLogged = raw ? raw.total_hours_logged : 0;
-  const expectedManHours = raw ? raw.expected_man_hours : 0;
-
-  let utilisationPercentage = 0;
-  if (expectedManHours > 0) {
-    utilisationPercentage = Math.min(
-      parseFloat(((totalHoursLogged / expectedManHours) * 100).toFixed(2)),
-      9999.99
-    );
-  }
-
-  const remainingHours = Math.max(expectedManHours - totalHoursLogged, 0);
-
   return {
     service_po_id: poId,
     service_po_code: po.service_po_code,
     service_po_name: po.service_po_name,
-    expected_man_hours: expectedManHours,
-    total_hours_logged: totalHoursLogged,
-    remaining_hours: remainingHours,
-    utilisation_percentage: utilisationPercentage,
-    is_over_utilised: totalHoursLogged > expectedManHours,
+    total_hours_logged: raw ? raw.total_hours_logged : 0,
   };
 };
 
 /**
  * Return a lightweight list of active POs.
  *
+ * @param {object} authContext - { companyId, hierarchyRank, employeeId }
  * @returns {Promise<ServicePO[]>}
  */
-const getActivePOs = async (companyId) => {
-  return servicePORepository.getActivePOs(companyId);
+const getActivePOs = async (authContext) => {
+  const companyId = await resolveActorCompanyScope(authContext);
+  return servicePORepository.getActivePOs(companyId, authContext.employeeId);
 };
 
 /**
@@ -580,13 +709,20 @@ async function hasWorkLogsInHierarchy(servicePOId, companyId) {
   return hasTimesheets || hasEmployeeWorkLogs;
 }
 
-const deleteServicePO = async (id, userId, companyId) => {
-  const existing = await servicePORepository.findById(id, companyId);
+const deleteServicePO = async (id, userId, req) => {
+  const scope = await resolveActorCompanyScope({
+    companyId: req.companyId,
+    hierarchyRank: req.hierarchyRank,
+    employeeId: req.employeeId,
+  });
+
+  const existing = await servicePORepository.findById(id, scope, req.employeeId);
   if (!existing) {
     const err = new Error('Service PO not found.');
     err.statusCode = 404;
     throw err;
   }
+  const companyId = existing.company_id;
 
   if (await hasWorkLogsInHierarchy(id, companyId)) {
     const err = new Error(

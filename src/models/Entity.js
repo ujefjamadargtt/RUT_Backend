@@ -43,11 +43,11 @@ module.exports = (sequelize) => {
           len: { args: [1, 150], msg: 'Entity name must be between 1 and 150 characters.' },
         },
       },
-      entity_admin_user_id: {
+      entity_admin_employee_id: {
         type: DataTypes.INTEGER,
         allowNull: true,
         references: {
-          model: 'users',
+          model: 'employees',
           key: 'id',
         },
       },

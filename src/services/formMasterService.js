@@ -2,6 +2,7 @@
 
 const { sequelize } = require('../models');
 const formRepository = require('../repositories/formMasterRepository');
+const categoryRepository = require('../repositories/categoryRepository');
 const { createAuditLog } = require('../middlewares/auditLog');
 
 /**
@@ -55,6 +56,26 @@ const assertUnique = async (data, excludeId) => {
   }
 };
 
+/**
+ * Load a category by id and confirm it belongs to the given module row —
+ * the section 11/14 invariant (Form.module_id = Category.module_id when
+ * category_id is present) that can't be a plain DB CHECK since it needs a
+ * join. Returns the category row (never null) or throws.
+ * @param {number} categoryId
+ * @param {FormMaster} moduleRow - the resolved module row (module_name IS NULL)
+ * @returns {Promise<Category>}
+ */
+const assertCategoryBelongsToModule = async (categoryId, moduleRow) => {
+  const category = await categoryRepository.findById(categoryId);
+  if (!category) {
+    fail(`Category with ID ${categoryId} not found.`, 400);
+  }
+  if (category.module_id !== moduleRow.id) {
+    fail(`Category '${category.name}' does not belong to module '${moduleRow.form_name}'.`, 400);
+  }
+  return category;
+};
+
 // ── Create ───────────────────────────────────────────────────────────────
 
 /**
@@ -100,12 +121,19 @@ const createForm = async (data, userId, ipAddress) => {
 
   await assertUnique(data);
 
+  let categoryId = null;
+  if (data.category_id !== undefined && data.category_id !== null) {
+    const category = await assertCategoryBelongsToModule(data.category_id, moduleRow);
+    categoryId = category.id;
+  }
+
   const maxSeq = await formRepository.getMaxSeqInModule(data.module_name);
   const created = await formRepository.create({
     module_name: data.module_name.trim(),
     form_name: data.form_name.trim(),
     status: data.status || 'active',
     seq: maxSeq + 1,
+    category_id: categoryId,
   });
 
   await createAuditLog(userId, 'CREATE', 'form_master', created.id, null, created.toJSON(), ipAddress);
@@ -254,6 +282,95 @@ const update = async (id, data, userId, ipAddress) => {
     : updateForm(existing, data, userId, ipAddress);
 };
 
+// ── Move (Module <-> Category <-> Module/Category) ─────────────────────────
+
+/**
+ * PUT /forms/:id/move — the dedicated Move Form operation (distinct from
+ * PUT /forms/:id, which only renames/(de)activates/moves-by-name). Handles
+ * every case in one place: Module -> Category, Category -> Module,
+ * Category A -> Category B, and moving to a different module entirely.
+ * Only module_id/category_id are ever touched here — form_name/status are
+ * untouched.
+ *
+ * Destination validation always runs to completion BEFORE the single write,
+ * and the write itself is wrapped in a transaction — if anything fails, the
+ * form's original module/category relationship is left completely
+ * untouched (section 18's transactional requirement).
+ *
+ * If module_id changes and category_id is NOT explicitly provided, the
+ * category is reset to null rather than silently carried over — a category
+ * under the OLD module is never valid under the new one (section 11).
+ *
+ * @param {number} id
+ * @param {object} data - { module_id?: number, category_id?: number|null }
+ * @param {number} userId
+ * @param {string} ipAddress
+ * @returns {Promise<FormMaster>}
+ */
+const moveForm = async (id, data, userId, ipAddress) => {
+  const existing = await getById(id);
+  if (existing.module_name === null) {
+    fail('Cannot move a module. Only forms can be moved.', 400);
+  }
+
+  const currentModuleRow = await formRepository.findModuleByName(existing.module_name);
+
+  let destinationModuleRow = currentModuleRow;
+  let moving = false;
+  if (data.module_id !== undefined) {
+    const targetModuleRow = await formRepository.findModuleById(data.module_id);
+    if (!targetModuleRow) {
+      fail(`Module with ID ${data.module_id} does not exist.`, 400);
+    }
+    if (targetModuleRow.id !== currentModuleRow.id) {
+      destinationModuleRow = targetModuleRow;
+      moving = true;
+    }
+  }
+
+  let targetCategoryId;
+  if (data.category_id !== undefined) {
+    if (data.category_id === null) {
+      targetCategoryId = null;
+    } else {
+      const category = await assertCategoryBelongsToModule(data.category_id, destinationModuleRow);
+      targetCategoryId = category.id;
+    }
+  } else if (moving) {
+    // The module changed but no explicit category was given — the old
+    // category (if any) belongs to the OLD module, so it can't carry over.
+    targetCategoryId = null;
+  } else {
+    targetCategoryId = existing.category_id;
+  }
+
+  await assertUnique(
+    { module_name: destinationModuleRow.form_name, form_name: existing.form_name },
+    existing.id
+  );
+
+  const payload = { category_id: targetCategoryId };
+  if (moving) {
+    payload.module_name = destinationModuleRow.form_name;
+    const maxSeq = await formRepository.getMaxSeqInModule(destinationModuleRow.form_name);
+    payload.seq = maxSeq + 1;
+  }
+
+  const before = existing.toJSON();
+  const t = await sequelize.transaction();
+  let updated;
+  try {
+    updated = await formRepository.update(existing.id, payload, { transaction: t });
+    await t.commit();
+  } catch (err) {
+    await t.rollback();
+    throw err;
+  }
+
+  await createAuditLog(userId, 'UPDATE', 'form_master', existing.id, before, updated.toJSON(), ipAddress);
+  return updated;
+};
+
 // ── Delete (soft) ────────────────────────────────────────────────────────
 
 /**
@@ -369,13 +486,216 @@ const reorderForms = async (moduleName, items, userId, ipAddress) => {
   return formRepository.findFormsInModule(moduleName, 'all');
 };
 
+// ── Category CRUD ────────────────────────────────────────────────────────
+
+/**
+ * Fetch a single category by id, or throw 404.
+ * @param {number} id
+ * @returns {Promise<Category>}
+ */
+const getCategoryById = async (id) => {
+  const category = await categoryRepository.findById(id);
+  if (!category) {
+    fail(`Category with ID ${id} not found.`, 404);
+  }
+  return category;
+};
+
+/**
+ * GET /forms/categories
+ * @param {object} query - { module_id?, status? }
+ * @returns {Promise<Category[]>}
+ */
+const getCategories = (query) => categoryRepository.findAll(query);
+
+/**
+ * POST /forms/categories — a category always belongs to exactly one
+ * module, addressed by its module row's own id (unlike forms, which
+ * address their module by name in create/update).
+ * @param {object} data - { module_id, name, description?, status? }
+ * @param {number} userId
+ * @param {string} ipAddress
+ * @returns {Promise<Category>}
+ */
+const createCategory = async (data, userId, ipAddress) => {
+  const moduleRow = await formRepository.findModuleById(data.module_id);
+  if (!moduleRow) {
+    fail(`Module with ID ${data.module_id} does not exist.`, 400);
+  }
+
+  const existing = await categoryRepository.findByName(data.module_id, data.name);
+  if (existing) {
+    fail('A category with this name already exists under this module.', 409);
+  }
+
+  const maxSeq = await categoryRepository.getMaxSeqInModule(data.module_id);
+  const created = await categoryRepository.create({
+    module_id: data.module_id,
+    name: data.name.trim(),
+    description: data.description ? data.description.trim() : null,
+    status: data.status || 'active',
+    seq: maxSeq + 1,
+  });
+
+  await createAuditLog(userId, 'CREATE', 'categories', created.id, null, created.toJSON(), ipAddress);
+  return created;
+};
+
+/**
+ * PUT /forms/categories/:id — rename/describe/(de)activate. module_id is
+ * immutable here; a category is never moved to a different module (only
+ * its forms move, via PUT /forms/:id/move).
+ * @param {number} id
+ * @param {object} data - { name?, description?, status? }
+ * @param {number} userId
+ * @param {string} ipAddress
+ * @returns {Promise<Category>}
+ */
+const updateCategory = async (id, data, userId, ipAddress) => {
+  const existing = await getCategoryById(id);
+
+  const payload = {};
+  if (data.name !== undefined) payload.name = data.name.trim();
+  if (data.description !== undefined) payload.description = data.description ? data.description.trim() : null;
+  if (data.status !== undefined) payload.status = data.status;
+
+  if (payload.name !== undefined && payload.name !== existing.name) {
+    const conflict = await categoryRepository.findByName(existing.module_id, payload.name);
+    if (conflict && conflict.id !== existing.id) {
+      fail('A category with this name already exists under this module.', 409);
+    }
+  }
+
+  if (Object.keys(payload).length === 0) {
+    return existing;
+  }
+
+  const before = existing.toJSON();
+  const updated = await categoryRepository.update(id, payload);
+  await createAuditLog(userId, 'UPDATE', 'categories', id, before, updated.toJSON(), ipAddress);
+  return updated;
+};
+
+/**
+ * DELETE /forms/categories/:id — soft-deactivates (status = 'inactive'),
+ * never hard-deletes. A category with any forms assigned to it (active or
+ * inactive) cannot be deactivated — forms must be moved out first (to the
+ * module directly, or to another category, via PUT /forms/:id/move).
+ * Mirrors the module-delete guard (deactivate() above) exactly.
+ * @param {number} id
+ * @param {number} userId
+ * @param {string} ipAddress
+ * @returns {Promise<Category>}
+ */
+const deactivateCategory = async (id, userId, ipAddress) => {
+  const existing = await getCategoryById(id);
+
+  const childCount = await categoryRepository.countFormsInCategory(id);
+  if (childCount > 0) {
+    fail(
+      `Cannot delete category '${existing.name}' because it still has ${childCount} form(s) under it. Move them to the module or another category first.`,
+      400
+    );
+  }
+
+  return updateCategory(id, { status: 'inactive' }, userId, ipAddress);
+};
+
+/**
+ * PATCH /forms/categories/reorder — bulk-assign new seq values to the
+ * categories inside ONE module. Mirrors reorderModules/reorderForms.
+ * @param {number} moduleId
+ * @param {{id: number, seq: number}[]} items
+ * @param {number} userId
+ * @param {string} ipAddress
+ * @returns {Promise<Category[]>} every category in the module, in its new order
+ */
+const reorderCategories = async (moduleId, items, userId, ipAddress) => {
+  const moduleRow = await formRepository.findModuleById(moduleId);
+  if (!moduleRow) {
+    fail(`Module with ID ${moduleId} does not exist.`, 404);
+  }
+
+  const ids = items.map((item) => item.id);
+  const rows = await categoryRepository.findByIds(ids);
+  if (rows.length !== ids.length) {
+    fail('One or more category IDs were not found.', 404);
+  }
+  if (rows.some((row) => row.module_id !== moduleId)) {
+    fail('All categories being reordered must belong to the same module.', 400);
+  }
+
+  const before = rows.map((row) => ({ id: row.id, seq: row.seq }));
+
+  const t = await sequelize.transaction();
+  try {
+    await categoryRepository.bulkUpdateSeq(items, t);
+    await t.commit();
+  } catch (err) {
+    await t.rollback();
+    throw err;
+  }
+
+  await createAuditLog(
+    userId,
+    'UPDATE',
+    'categories',
+    null,
+    { categories: before },
+    { categories: items },
+    ipAddress
+  );
+
+  return categoryRepository.findByModule(moduleId, 'all');
+};
+
+// ── Hierarchy (read) ─────────────────────────────────────────────────────
+
+/**
+ * GET /forms/hierarchy — the full Module -> Category -> Form tree, for the
+ * Form Master listing/module-detail views (sections 12/13). Pure read
+ * composition over existing module/category/form queries — no new schema.
+ * @returns {Promise<object[]>} [{ ...module, categories: [{...category, forms}], forms: [uncategorized forms] }]
+ */
+const getHierarchy = async () => {
+  const modules = await formRepository.findModules('all');
+
+  return Promise.all(
+    modules.map(async (moduleRow) => {
+      const [categories, allForms] = await Promise.all([
+        categoryRepository.findByModule(moduleRow.id, 'all'),
+        formRepository.findFormsInModule(moduleRow.form_name, 'all'),
+      ]);
+
+      const categoriesWithForms = categories.map((category) => ({
+        ...category.toJSON(),
+        forms: allForms.filter((form) => form.category_id === category.id).map((form) => form.toJSON()),
+      }));
+
+      return {
+        ...moduleRow.toJSON(),
+        categories: categoriesWithForms,
+        forms: allForms.filter((form) => form.category_id === null).map((form) => form.toJSON()),
+      };
+    })
+  );
+};
+
 module.exports = {
   getAll: formRepository.findAll,
   getById,
   getModules: formRepository.findModules,
   create,
   update,
+  moveForm,
   deactivate,
   reorderModules,
   reorderForms,
+  getCategories,
+  getCategoryById,
+  createCategory,
+  updateCategory,
+  deactivateCategory,
+  reorderCategories,
+  getHierarchy,
 };

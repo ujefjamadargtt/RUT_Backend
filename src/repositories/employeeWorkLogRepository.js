@@ -1,7 +1,7 @@
 'use strict';
 
 const { Op, fn, col, literal } = require('sequelize');
-const { EmployeeWorkLog, Employee, ServicePO, SubProject, Project, ServicePOHierarchy } = require('../models');
+const { EmployeeWorkLog, Employee, ServicePO, SubProject, Project, ServicePOHierarchy, EmployeeWorkLogTimeEntry } = require('../models');
 
 /**
  * Employee Work Log Repository
@@ -14,11 +14,51 @@ const { EmployeeWorkLog, Employee, ServicePO, SubProject, Project, ServicePOHier
 
 const ALLOWED_SORT_COLUMNS = new Set(['work_date', 'hours', 'created_at']);
 
+/**
+ * A company-less actor (Platform Admin/Admin/Entity Admin — hierarchyRank
+ * 1-3, see resolveCompany.js) never gets a req.companyId resolved, unlike a
+ * real BU-scoped Employee — yet since every login is now an Employee, such
+ * an actor can still reach these read-only self-service report/summary
+ * queries if their role grants the report capability. Every one of the
+ * functions using this helper is already scoped by a fixed employee_id (the
+ * caller's own) or a pre-authorized employeeIds set (a Manager's resolved
+ * team) — never an arbitrary company-wide scan — so company_id here is a
+ * "narrow to my current BU" refinement, not an authorization boundary.
+ * Passing `company_id: undefined` straight into a Sequelize `where` throws
+ * ("WHERE parameter \"company_id\" has invalid \"undefined\" value" —
+ * reported live on GET /employee-reports/project-hours); this omits the key
+ * entirely instead, so a company-less caller sees their own rows across
+ * every company rather than crashing.
+ * @param {number|number[]|null|undefined} companyId
+ * @returns {object}
+ */
+function companyIdScope(companyId) {
+  if (companyId == null) return {};
+  return Array.isArray(companyId) ? { company_id: { [Op.in]: companyId } } : { company_id: companyId };
+}
+
 function buildIncludes() {
   return [
     { model: Employee, as: 'employee', attributes: ['id', 'employee_code', 'full_name'] },
     { model: ServicePO, as: 'servicePO', attributes: ['id', 'service_po_code', 'service_po_name', 'status'] },
     { model: SubProject, as: 'subProject', attributes: ['id', 'sub_project_code', 'sub_project_name'], required: false },
+    {
+      model: Employee,
+      as: 'rejectedByEmployee',
+      attributes: ['id', 'full_name'],
+      required: false,
+    },
+    // The detailed Start Time/End Time breakdown behind this row's own
+    // (aggregated) `hours` — see EmployeeWorkLogTimeEntry.js. Empty for any
+    // row not created via the detailed-entry flow (plain hours-only rows,
+    // or old single start_time/end_time rows from before this feature).
+    {
+      model: EmployeeWorkLogTimeEntry,
+      as: 'timeEntries',
+      required: false,
+      separate: true,
+      order: [['start_time', 'ASC'], ['id', 'ASC']],
+    },
   ];
 }
 
@@ -157,12 +197,15 @@ const deleteByEmployeeAndDate = async (employeeId, date, companyId, transaction)
  * @param {number} id
  * @param {object} data
  * @param {number} companyId
+ * @param {object} [transaction] - passed through when the update needs to
+ *   stay atomic with a time-entries replace (see updateEntry() in
+ *   employeeTimesheetService.js)
  * @returns {Promise<EmployeeWorkLog|null>}
  */
-const update = async (id, data, companyId) => {
-  const entry = await EmployeeWorkLog.findOne({ where: { id, company_id: companyId } });
+const update = async (id, data, companyId, transaction = null) => {
+  const entry = await EmployeeWorkLog.findOne({ where: { id, company_id: companyId }, transaction });
   if (!entry) return null;
-  return entry.update(data);
+  return entry.update(data, { transaction });
 };
 
 /**
@@ -322,7 +365,7 @@ const getHierarchyBreakdownForRange = async ({ employeeId, startDate, endDate, c
     ],
     where: {
       employee_id: parseInt(employeeId, 10),
-      company_id: companyId,
+      ...companyIdScope(companyId),
       work_date: { [Op.gte]: startDate, [Op.lte]: endDate },
     },
     group: ['service_po_id', 'hierarchy_node_id'],
@@ -455,7 +498,7 @@ const revertSyncStatusByImportIds = async (importIds, transaction = null) => {
  * @returns {Promise<Array>}
  */
 const getReportRows = async ({ employeeId, companyId, startDate, endDate }) => {
-  const where = { employee_id: employeeId, company_id: companyId };
+  const where = { employee_id: employeeId, ...companyIdScope(companyId) };
   if (startDate) where.work_date = { ...where.work_date, [Op.gte]: startDate };
   if (endDate) where.work_date = { ...where.work_date, [Op.lte]: endDate };
 
@@ -484,7 +527,7 @@ const getReportRows = async ({ employeeId, companyId, startDate, endDate }) => {
  * @returns {Promise<EmployeeWorkLog[]>}
  */
 const getWorkLogTimeReportRows = async ({ employeeIds, companyId, startDate, endDate, servicePOId, projectId }) => {
-  const where = { company_id: companyId, employee_id: { [Op.in]: employeeIds } };
+  const where = { ...companyIdScope(companyId), employee_id: { [Op.in]: employeeIds } };
   if (startDate) where.work_date = { ...where.work_date, [Op.gte]: startDate };
   if (endDate) where.work_date = { ...where.work_date, [Op.lte]: endDate };
   if (servicePOId) where.service_po_id = servicePOId;
@@ -516,8 +559,20 @@ const getWorkLogTimeReportRows = async ({ employeeIds, companyId, startDate, end
           { model: ServicePOHierarchy, as: 'parentNode', attributes: ['id', 'node_name', 'node_type'], required: false },
         ],
       },
+      {
+        model: EmployeeWorkLogTimeEntry,
+        as: 'timeEntries',
+        required: false,
+        separate: true,
+        order: [['start_time', 'ASC'], ['id', 'ASC']],
+      },
     ],
-    order: [['work_date', 'DESC'], ['start_time', 'ASC'], ['id', 'ASC']],
+    // Per-entry Start Time ordering now happens inside the `timeEntries`
+    // include above (its own column, on a separate query — `separate: true`
+    // means it can't be ordered from this outer `order` clause anyway);
+    // employee_work_logs itself no longer has a start_time column to sort by
+    // (see 20260886_backfill_and_drop_worklog_start_end_time.sql).
+    order: [['work_date', 'DESC'], ['id', 'ASC']],
   });
 };
 
@@ -556,7 +611,7 @@ const findForApprovalSummary = async ({ employeeId, companyId, startDate, endDat
 const findForApprovalSummaryByEmployees = async ({ employeeIds, companyId, startDate, endDate }) => {
   if (!employeeIds || employeeIds.length === 0) return [];
 
-  const where = { employee_id: { [Op.in]: employeeIds }, company_id: companyId };
+  const where = { employee_id: { [Op.in]: employeeIds }, ...companyIdScope(companyId) };
   if (startDate) where.work_date = { ...where.work_date, [Op.gte]: startDate };
   if (endDate) where.work_date = { ...where.work_date, [Op.lte]: endDate };
 
@@ -643,6 +698,69 @@ const markApprovedByIds = async (ids, companyId, transaction = null) => {
 };
 
 /**
+ * Manager Approve — atomically flips ONE row from 'pending' to 'approved'.
+ * The single-row analog of markApprovedByIds (bulk, used internally right
+ * after Draft creation for an employee who skips approval) and of
+ * rejectById below — same atomic status='pending' guard, for the same
+ * reason: a lost race against a concurrent reject/resubmit on this row
+ * shows up as a no-op (0 rows) rather than silently overwriting it. The
+ * caller (managerSelfServiceService.approveTimesheet) treats null as "not
+ * pending anymore" and 409s.
+ * @param {number} id
+ * @param {number} companyId
+ * @returns {Promise<EmployeeWorkLog|null>} the updated row, or null if it wasn't pending
+ */
+const approveById = async (id, companyId) => {
+  const [count] = await EmployeeWorkLog.update(
+    { status: 'approved' },
+    { where: { id, company_id: companyId, status: 'pending' } }
+  );
+  if (count === 0) return null;
+  return findById(id, companyId);
+};
+
+/**
+ * Manager Reject — atomically flips ONE row from 'pending' to 'rejected',
+ * recording the mandatory remark and who/when. The status='pending' guard
+ * in the WHERE clause makes this a no-op (0 rows) rather than a race if the
+ * row was approved/rejected by someone else a moment earlier — the caller
+ * (managerSelfServiceService.rejectWorkLogEntry) treats 0 as "not pending
+ * anymore" and 409s.
+ * @param {number} id
+ * @param {number} companyId
+ * @param {{ remark: string, rejectedBy: number }} params
+ * @returns {Promise<EmployeeWorkLog|null>} the updated row, or null if it wasn't pending
+ */
+const rejectById = async (id, companyId, { remark, rejectedBy }) => {
+  const [count] = await EmployeeWorkLog.update(
+    { status: 'rejected', rejection_remark: remark, rejected_by: rejectedBy, rejected_at: new Date() },
+    { where: { id, company_id: companyId, status: 'pending' } }
+  );
+  if (count === 0) return null;
+  return findById(id, companyId);
+};
+
+/**
+ * Employee Resubmit — atomically flips ONE row from 'rejected' back to
+ * 'pending'. Deliberately does NOT touch rejection_remark/rejected_by/
+ * rejected_at — the most recent rejection stays visible even once the row
+ * is pending again (see EmployeeWorkLog.js's doc comment); it's only
+ * overwritten by a subsequent rejection. The status='rejected' guard makes
+ * this a no-op (0 rows) if the row isn't currently rejected.
+ * @param {number} id
+ * @param {number} companyId
+ * @returns {Promise<EmployeeWorkLog|null>} the updated row, or null if it wasn't rejected
+ */
+const resubmitById = async (id, companyId) => {
+  const [count] = await EmployeeWorkLog.update(
+    { status: 'pending' },
+    { where: { id, company_id: companyId, status: 'rejected' } }
+  );
+  if (count === 0) return null;
+  return findById(id, companyId);
+};
+
+/**
  * Whether ANY employee_work_logs row exists for a Service PO OR any of its
  * hierarchy nodes (Parent/Child) — one half of the delete guard in
  * servicePOService.delete() (the other half is timesheetRepository.
@@ -679,14 +797,16 @@ const existsForServicePOOrHierarchy = async (servicePOId, hierarchyNodeIds, comp
  * against the Service PO or against a sibling node elsewhere in the
  * hierarchy.
  * @param {number[]} hierarchyNodeIds - the node being deleted, plus its Children if it's a Parent
- * @param {number} companyId
+ * @param {number|number[]} companyId - a plain company id, or an array of owned company ids
+ *   for a company-less Admin/Entity Admin caller (see companyAccessControlService)
  * @returns {Promise<boolean>}
  */
 const existsForHierarchyNodes = async (hierarchyNodeIds, companyId) => {
   if (!hierarchyNodeIds || hierarchyNodeIds.length === 0) return false;
 
+  const companyWhere = Array.isArray(companyId) ? { [Op.in]: companyId } : companyId;
   const row = await EmployeeWorkLog.findOne({
-    where: { hierarchy_node_id: { [Op.in]: hierarchyNodeIds }, company_id: companyId },
+    where: { hierarchy_node_id: { [Op.in]: hierarchyNodeIds }, company_id: companyWhere },
     attributes: ['id'],
   });
   return !!row;
@@ -819,6 +939,9 @@ module.exports = {
   approveByEmployeeAndDates,
   approveByEmployeeAndMonths,
   markApprovedByIds,
+  approveById,
+  rejectById,
+  resubmitById,
   existsForServicePOOrHierarchy,
   existsForHierarchyNodes,
 };

@@ -19,6 +19,23 @@ const MONTH_YEAR_SQL = {
   monthName: "TO_CHAR(TO_DATE(split_part(mc.month_year, '-', 2), 'MM'), 'Month')",
 };
 
+// An Employee created after the Employee-Business-Unit redesign
+// (database/migrations/20260866_create_employee_business_units.sql) never
+// gets its own `employees.company_id` populated; its Company/BU membership
+// lives exclusively in `employee_business_units`. Matching on `e.company_id`
+// alone silently drops such employees from every report. Same OR-with-legacy
+// -column pattern as employeeRepository.js's employeeScope(), expressed as
+// raw SQL for this file's hand-written queries.
+const EMPLOYEE_COMPANY_SCOPE_SQL = `(
+  e.company_id = :companyId
+  OR EXISTS (
+    SELECT 1 FROM employee_business_units ebu
+    WHERE ebu.employee_id = e.id
+      AND ebu.business_unit_id = :companyId
+      AND ebu.status = 'active'
+  )
+)`;
+
 /**
  * Get employee hourly rate by joining employees with monthly_costs.
  * per_hour_rate = total_cost / (standard working hours in the month)
@@ -62,7 +79,7 @@ async function getEmployeeHourlyRate(filters) {
     stdHours: STANDARD_HOURS,
     companyId: filters.companyId,
   };
-  const conditions = ["e.status = 'active'", "e.company_id = :companyId"];
+  const conditions = ["e.status = 'active'", EMPLOYEE_COMPANY_SCOPE_SQL];
 
   if (employeeId) {
     conditions.push('e.id = :employeeId');
@@ -332,7 +349,10 @@ async function getTimesheetSummary(filters) {
 }
 
 /**
- * Get Service PO utilisation — actual hours logged vs expected man hours.
+ * Get Service PO actual hours logged. Used to also report utilisation_pct
+ * (actual hours vs expected_man_hours) — that field was retired, so this
+ * now returns only the raw hours logged per PO. See database/migrations/
+ * 20260884_drop_service_pos_invoice_amount_and_expected_man_hours.sql.
  *
  * @param {object} filters
  * @param {string} [filters.startDate]
@@ -353,7 +373,7 @@ async function getServicePOUtilisation(filters) {
     poId,
     status,
     search,
-    sortBy = 'utilisation_pct',
+    sortBy = 'actual_hours',
     sortOrder = 'DESC',
     limit,
     offset,
@@ -369,9 +389,9 @@ async function getServicePOUtilisation(filters) {
 
   const allowedSortColumns = [
     'sp.service_po_code', 'sp.service_po_name', 'actual_hours',
-    'sp.expected_man_hours', 'utilisation_pct', 'sp.start_date', 'sp.end_date',
+    'sp.start_date', 'sp.end_date',
   ];
-  const safeSort = allowedSortColumns.includes(sortBy) ? sortBy : 'utilisation_pct';
+  const safeSort = allowedSortColumns.includes(sortBy) ? sortBy : 'actual_hours';
   const safeOrder = sortOrder.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
 
   const replacements = { limit, offset, companyId: filters.companyId };
@@ -424,18 +444,10 @@ async function getServicePOUtilisation(filters) {
       sp.start_date,
       sp.end_date,
       sp.po_value,
-      sp.expected_man_hours,
       c.id                                                      AS client_id,
       c.client_name,
       st.service_type_name,
       COALESCE(SUM(CASE WHEN t.id IS NOT NULL ${tsDateCondition} THEN ${hoursCol} ELSE 0 END), 0) AS actual_hours,
-      CASE
-        WHEN sp.expected_man_hours IS NOT NULL AND sp.expected_man_hours > 0
-          THEN ROUND(
-            (COALESCE(SUM(CASE WHEN t.id IS NOT NULL ${tsDateCondition} THEN ${hoursCol} ELSE 0 END), 0)
-             / sp.expected_man_hours * 100)::numeric, 2)
-        ELSE NULL
-      END                                                       AS utilisation_pct,
       COUNT(DISTINCT t.employee_id)                             AS distinct_resources
     FROM service_pos sp
     INNER JOIN clients c       ON c.id  = sp.client_id
@@ -444,7 +456,7 @@ async function getServicePOUtilisation(filters) {
     ${whereClause}
     GROUP BY sp.id, sp.service_po_code, sp.service_po_name, sp.status,
              sp.is_billable, sp.start_date, sp.end_date, sp.po_value,
-             sp.expected_man_hours, c.id, c.client_name, st.service_type_name
+             c.id, c.client_name, st.service_type_name
     ORDER BY ${safeSort} ${safeOrder}
     LIMIT :limit OFFSET :offset
   `;
@@ -645,7 +657,7 @@ async function getResourceAllocation(filters) {
   const safeOrder = sortOrder.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
 
   const replacements = { limit, offset, companyId: filters.companyId };
-  const conditions = ["e.status = 'active'", 'e.company_id = :companyId'];
+  const conditions = ["e.status = 'active'", EMPLOYEE_COMPANY_SCOPE_SQL];
 
   if (employeeId) {
     conditions.push('e.id = :employeeId');
@@ -944,7 +956,7 @@ async function getEmployeeUtilizationSummary(filters) {
     companyId: filters.companyId,
   };
 
-  const empConditions = ["e.status = 'active'", 'e.company_id = :companyId'];
+  const empConditions = ["e.status = 'active'", EMPLOYEE_COMPANY_SCOPE_SQL];
   if (employeeId) {
     empConditions.push('e.id = :employeeId');
     replacements.employeeId = employeeId;
@@ -1098,8 +1110,8 @@ async function getServicePOSummary(filters) {
 
   const allowedSortColumns = [
     'c.client_name', 'sp.service_po_name', 'sp.start_date', 'sp.end_date',
-    'sp.po_value', 'sp.expected_man_hours', 'hours_delivered_before_month',
-    'available_hours', 'monthly_billable_amount', 'sp.status', 'sc.name',
+    'sp.po_value', 'hours_delivered_before_month',
+    'monthly_billable_amount', 'sp.status', 'sc.name',
   ];
   const safeSort = allowedSortColumns.includes(sortBy) ? sortBy : 'c.client_name';
   const safeOrder = sortOrder.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
@@ -1172,7 +1184,6 @@ async function getServicePOSummary(filters) {
       sp.invoice_frequency,
       sp.po_value,
       sp.account_manager,
-      sp.expected_man_hours,
       c.id                                                               AS client_id,
       c.client_name,
       sc.id                                                              AS service_category_id,
@@ -1180,24 +1191,11 @@ async function getServicePOSummary(filters) {
       st.id                                                              AS service_type_id,
       st.service_type_name                                               AS service_type,
       COALESCE(prev.hours_delivered, 0)                                  AS hours_delivered_before_month,
-      COALESCE(sp.expected_man_hours, 0) - COALESCE(prev.hours_delivered, 0) AS available_hours,
       CASE
         WHEN sp.is_billable = true
           THEN ROUND(COALESCE(curr.billable_amount, 0)::numeric, 2)
         ELSE NULL
-      END                                                                AS monthly_billable_amount,
-      CASE
-        WHEN sp.is_billable = true
-          THEN ROUND(COALESCE(sp.invoice_amount, 0)::numeric, 2)
-        ELSE NULL
-      END                                                                AS invoiced_amount,
-      CASE
-        WHEN sp.is_billable = true
-          THEN ROUND(
-            (COALESCE(prev_bill.prev_billable_amount, 0) + COALESCE(curr.billable_amount, 0)
-            - COALESCE(sp.invoice_amount, 0))::numeric, 2)
-        ELSE NULL
-      END                                                                AS unbilled_amount
+      END                                                                AS monthly_billable_amount
     FROM service_pos sp
     INNER JOIN clients c        ON c.id  = sp.client_id
     INNER JOIN service_types st ON st.id = sp.service_type_id
@@ -1210,18 +1208,6 @@ async function getServicePOSummary(filters) {
       GROUP BY service_po_id
     ) prev ON prev.service_po_id = sp.id
     LEFT JOIN (
-      SELECT
-        t.service_po_id,
-        SUM(${hoursCol} * COALESCE(mc.total_cost, 0)) AS prev_billable_amount
-      FROM timesheets t
-      LEFT JOIN monthly_costs mc
-             ON mc.employee_id = t.employee_id
-            AND mc.month_year  = TO_CHAR(t.timesheet_date, 'YYYY-MM')
-      WHERE t.timesheet_date < MAKE_DATE(:yearNum, :monthNum, 1)
-        ${publishGuard}
-      GROUP BY t.service_po_id
-    ) prev_bill ON prev_bill.service_po_id = sp.id
-    INNER JOIN (
       SELECT
         t.service_po_id,
         SUM(${hoursCol} * COALESCE(mc.total_cost, 0)) AS billable_amount
@@ -1245,13 +1231,6 @@ async function getServicePOSummary(filters) {
     INNER JOIN clients c        ON c.id  = sp.client_id
     INNER JOIN service_types st ON st.id = sp.service_type_id
     INNER JOIN service_categories sc ON sc.id = st.service_category_id
-    INNER JOIN (
-      SELECT DISTINCT service_po_id
-      FROM timesheets t
-      WHERE EXTRACT(MONTH FROM timesheet_date) = :monthNum
-        AND EXTRACT(YEAR  FROM timesheet_date) = :yearNum
-        ${publishGuard}
-    ) curr ON curr.service_po_id = sp.id
     ${whereClause}
   `;
 
@@ -1325,8 +1304,8 @@ async function getInvoicePOSummary(filters) {
 
   const allowedSortColumns = [
     'c.client_name', 'sp.service_po_name', 'sp.start_date', 'sp.end_date',
-    'sp.po_value', 'sp.expected_man_hours', 'hours_delivered_before_month',
-    'available_hours', 'monthly_billable_amount', 'sp.status', 'sc.name',
+    'sp.po_value', 'hours_delivered_before_month',
+    'monthly_billable_amount', 'sp.status', 'sc.name',
   ];
   const safeSort = allowedSortColumns.includes(sortBy) ? sortBy : 'c.client_name';
   const safeOrder = sortOrder.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
@@ -1399,7 +1378,6 @@ async function getInvoicePOSummary(filters) {
       sp.invoice_frequency,
       sp.po_value,
       sp.account_manager,
-      sp.expected_man_hours,
       c.id                                                               AS client_id,
       c.client_name,
       sc.id                                                              AS service_category_id,
@@ -1407,7 +1385,6 @@ async function getInvoicePOSummary(filters) {
       st.id                                                              AS service_type_id,
       st.service_type_name                                               AS service_type,
       COALESCE(prev.hours_delivered, 0)                                  AS hours_delivered_before_month,
-      COALESCE(sp.expected_man_hours, 0) - COALESCE(prev.hours_delivered, 0) AS available_hours,
       CASE
         WHEN sp.is_billable = true
           THEN ROUND(COALESCE(curr.billable_amount, 0)::numeric, 2)
@@ -1448,7 +1425,7 @@ async function getInvoicePOSummary(filters) {
         ${publishGuard}
       GROUP BY service_po_id
     ) prev ON prev.service_po_id = sp.id
-    INNER JOIN (
+    LEFT JOIN (
       SELECT
         t.service_po_id,
         SUM(${hoursCol} * COALESCE(mc.total_cost, 0)) AS billable_amount
@@ -1472,13 +1449,6 @@ async function getInvoicePOSummary(filters) {
     INNER JOIN clients c        ON c.id  = sp.client_id
     INNER JOIN service_types st ON st.id = sp.service_type_id
     INNER JOIN service_categories sc ON sc.id = st.service_category_id
-    INNER JOIN (
-      SELECT DISTINCT service_po_id
-      FROM timesheets t
-      WHERE EXTRACT(MONTH FROM timesheet_date) = :monthNum
-        AND EXTRACT(YEAR  FROM timesheet_date) = :yearNum
-        ${publishGuard}
-    ) curr ON curr.service_po_id = sp.id
     ${whereClause}
   `;
 

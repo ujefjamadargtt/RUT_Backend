@@ -14,13 +14,13 @@ const platformAdminService = require('../src/services/platformAdminService');
 const ORIGINAL = {
   findAllCompaniesWithEntity: platformAdminRepository.findAllCompaniesWithEntity,
   findAllProjectsWithServicePOs: platformAdminRepository.findAllProjectsWithServicePOs,
-  findAllUsersWithRoles: platformAdminRepository.findAllUsersWithRoles,
+  findAllEmployeesWithRolesAndBUs: platformAdminRepository.findAllEmployeesWithRolesAndBUs,
 };
 
 function restore() {
   platformAdminRepository.findAllCompaniesWithEntity = ORIGINAL.findAllCompaniesWithEntity;
   platformAdminRepository.findAllProjectsWithServicePOs = ORIGINAL.findAllProjectsWithServicePOs;
-  platformAdminRepository.findAllUsersWithRoles = ORIGINAL.findAllUsersWithRoles;
+  platformAdminRepository.findAllEmployeesWithRolesAndBUs = ORIGINAL.findAllEmployeesWithRolesAndBUs;
 }
 
 test('All BUs are returned with their Entity info', async () => {
@@ -29,7 +29,7 @@ test('All BUs are returned with their Entity info', async () => {
     { id: 53, company_name: 'No Entity Loaded Co', entity_id: 9, status: 'inactive', created_at: '2026-01-02', entity: null },
   ];
   platformAdminRepository.findAllProjectsWithServicePOs = async () => [];
-  platformAdminRepository.findAllUsersWithRoles = async () => [];
+  platformAdminRepository.findAllEmployeesWithRolesAndBUs = async () => [];
 
   const result = await platformAdminService.getOrganizationOverview();
 
@@ -100,66 +100,66 @@ test('Service POs report their OWN Client/BU, independent of their Project\'s Cl
   assert.equal(mapped.service_pos[0].bu.name, 'PO-level BU');
 });
 
-test('User with multiple roles (primary + additional) returns a deduplicated roles array', () => {
-  const user = {
+test('Employee with multiple active role grants returns them all, id-keyed (users is Employee-sourced post RBAC redesign)', () => {
+  const employee = {
     id: 428,
     email: 'john@example.com',
     status: 'active',
-    employee_id: 428,
-    role: { id: 8, role_name: 'Employee' },
-    additionalRoles: [
-      { id: 8, role_name: 'Employee' }, // duplicate of primary — must not appear twice
+    full_name: 'John Doe',
+    roles: [
+      { id: 8, role_name: 'Employee' },
       { id: 4, role_name: 'BU Admin' },
     ],
-    employee: { full_name: 'John Doe', company: null },
-    company: { id: 52, company_name: 'ABC Technologies', entity: { id: 5, entity_name: 'ABC Group' } },
+    businessUnits: [
+      { id: 52, company_name: 'ABC Technologies', entity: { id: 5, entity_name: 'ABC Group' } },
+    ],
   };
 
-  const mapped = platformAdminService.mapUser(user);
+  const mapped = platformAdminService.mapUser(employee);
 
   assert.deepEqual(mapped.roles, [
     { id: 8, name: 'Employee' },
     { id: 4, name: 'BU Admin' },
   ]);
+  assert.equal(mapped.user_id, 428);
+  assert.equal(mapped.employee_id, 428);
   assert.equal(mapped.name, 'John Doe');
-  assert.equal(mapped.bu.id, 52);
-  assert.equal(mapped.entity.id, 5);
+  assert.deepEqual(mapped.bu, { ids: [52], name: 'ABC Technologies' });
+  assert.deepEqual(mapped.entity, { ids: [5], name: 'ABC Group' });
 });
 
-test('User with no direct company_id (Platform Admin / Admin / Entity Admin) falls back to their Employee\'s Company', () => {
-  const user = {
-    id: 10,
-    email: 'entityadmin@example.com',
+test('Employee with multiple active Business Units reports bu/entity as a comma-separated name, deduping shared Entities', () => {
+  const employee = {
+    id: 77,
+    email: 'multi-bu@example.com',
     status: 'active',
-    employee_id: 77,
-    role: { id: 3, role_name: 'Entity Admin' },
-    additionalRoles: [],
-    company: null,
-    employee: {
-      full_name: 'Entity Admin User',
-      company: { id: 61, company_name: 'Fallback BU', entity: { id: 8, entity_name: 'Fallback Entity' } },
-    },
+    full_name: 'Multi BU User',
+    roles: [],
+    businessUnits: [
+      { id: 61, company_name: 'BU One', entity: { id: 8, entity_name: 'Shared Entity' } },
+      { id: 62, company_name: 'BU Two', entity: { id: 8, entity_name: 'Shared Entity' } }, // same Entity as BU One
+      { id: 63, company_name: 'BU Three', entity: { id: 9, entity_name: 'Other Entity' } },
+    ],
   };
 
-  const mapped = platformAdminService.mapUser(user);
+  const mapped = platformAdminService.mapUser(employee);
 
-  assert.equal(mapped.bu.id, 61);
-  assert.equal(mapped.entity.id, 8);
+  assert.deepEqual(mapped.bu, { ids: [61, 62, 63], name: 'BU One, BU Two, BU Three' });
+  // Entity 8 backs both BU One and BU Two — must appear exactly once, not twice.
+  assert.deepEqual(mapped.entity, { ids: [8, 9], name: 'Shared Entity, Other Entity' });
 });
 
-test('User with neither a direct Company nor an Employee Company reports null BU/Entity, never a guessed one', () => {
-  const user = {
+test('Employee with no active Business Unit reports null bu/entity, never a guessed one', () => {
+  const employee = {
     id: 1,
     email: 'platformadmin@example.com',
     status: 'active',
-    employee_id: null,
-    role: { id: 1, role_name: 'Platform Admin' },
-    additionalRoles: [],
-    company: null,
-    employee: null,
+    full_name: 'Platform Admin User',
+    roles: [{ id: 1, role_name: 'Platform Admin' }],
+    businessUnits: [],
   };
 
-  const mapped = platformAdminService.mapUser(user);
+  const mapped = platformAdminService.mapUser(employee);
 
   assert.equal(mapped.bu, null);
   assert.equal(mapped.entity, null);
@@ -167,15 +167,13 @@ test('User with neither a direct Company nor an Employee Company reports null BU
 });
 
 test('No password/token/security fields ever appear in the mapped user payload', () => {
-  const user = {
+  const employee = {
     id: 1,
     email: 'a@example.com',
     status: 'active',
-    employee_id: null,
-    role: { id: 8, role_name: 'Employee' },
-    additionalRoles: [],
-    company: null,
-    employee: null,
+    full_name: 'A User',
+    roles: [],
+    businessUnits: [],
     // Even if a caller accidentally attached these (they never should, since
     // the repository's attribute allow-lists exclude them), the mapper only
     // reads named fields off the instance and can't leak them.
@@ -183,7 +181,7 @@ test('No password/token/security fields ever appear in the mapped user payload',
     refresh_token: 'refresh-secret',
   };
 
-  const mapped = platformAdminService.mapUser(user);
+  const mapped = platformAdminService.mapUser(employee);
   const keys = Object.keys(mapped);
 
   assert.equal(keys.includes('password'), false);

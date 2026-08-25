@@ -4,6 +4,7 @@ const { sequelize } = require('../models');
 const resourceBudgetRepository = require('../repositories/resourceBudgetRepository');
 const servicePORepository = require('../repositories/servicePORepository');
 const employeeRepository = require('../repositories/employeeRepository');
+const companyAccessControlService = require('./companyAccessControlService');
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
 const { parseMonthString, toMonthString } = require('../helpers/monthPeriodHelper');
 const { MAX_MONTHLY_HOURS } = require('../config/resourceBudget.config');
@@ -23,12 +24,38 @@ const logger = require('../utils/logger');
 const round2 = (value) => Math.round((parseFloat(value || 0) + Number.EPSILON) * 100) / 100;
 
 /**
+ * Resolve the caller's company scope from server-verified req fields only —
+ * a plain companyId for a BU-scoped actor, or the resolved array of owned
+ * Company ids for a company-less Admin/Entity Admin
+ * (companyAccessControlService.resolveActorCompanyScope). Every function
+ * below used to read `req.companyId` directly, which is undefined for
+ * Admin/Entity Admin and previously crashed on every real write/aggregate.
+ *
+ * @param {import('express').Request} req
+ * @returns {Promise<number|number[]>}
+ */
+function resolveScope(req) {
+  return companyAccessControlService.resolveActorCompanyScope({
+    companyId: req.companyId,
+    hierarchyRank: req.hierarchyRank,
+    employeeId: req.employeeId,
+  });
+}
+
+/**
+ * `createdBy` is passed through to servicePORepository.findById()'s
+ * companyScope() so a Centralised (BU-less, company_id NULL) Service PO's
+ * own creator can still resolve it here — without it, a company-less
+ * actor's array-form scope has no NULL-company fallback at all, and even
+ * the PO's own creator gets a false "Service PO not found."
+ *
  * @param {number} servicePOId
- * @param {number} companyId
+ * @param {number|number[]} companyId
+ * @param {number} [createdBy]
  * @returns {Promise<ServicePO>}
  */
-async function assertServicePOExists(servicePOId, companyId) {
-  const po = await servicePORepository.findById(servicePOId, companyId);
+async function assertServicePOExists(servicePOId, companyId, createdBy) {
+  const po = await servicePORepository.findById(servicePOId, companyId, createdBy);
   if (!po) {
     const err = new Error('Service PO not found.');
     err.statusCode = 404;
@@ -38,12 +65,23 @@ async function assertServicePOExists(servicePOId, companyId) {
 }
 
 /**
+ * Confirm the Employee record itself exists (and isn't soft-deleted) — NOT
+ * scoped to any company/Business Unit. Cross-BU staffing is a deliberate,
+ * supported pattern in this app (employeeServicePOMappingService.assign()
+ * allows mapping an Employee to a Service PO in a different company, and
+ * even an Employee with no Business Unit at all, "as long as each is
+ * independently within the caller's owned scope" at assign time) —
+ * authorization for budgeting against a specific Service PO is
+ * assertEmployeeMappedToServicePO() below, not a second, redundant
+ * "does the Employee also have a BU matching this PO's company" check.
+ * That extra check used to live here and rejected legitimately
+ * cross-BU-mapped employees with a false "not found" — confirmed live on
+ * two separate Service POs/employees.
  * @param {number} empId
- * @param {number} companyId
  * @returns {Promise<Employee>}
  */
-async function assertEmployeeExists(empId, companyId) {
-  const employee = await employeeRepository.findById(empId, companyId);
+async function assertEmployeeExists(empId) {
+  const employee = await employeeRepository.findById(empId, null);
   if (!employee) {
     const err = new Error(`Employee ${empId} not found.`);
     err.statusCode = 404;
@@ -53,6 +91,11 @@ async function assertEmployeeExists(empId, companyId) {
 }
 
 /**
+ * The authorization gate for budgeting an Employee against a Service PO —
+ * the mapping row's own company_id is always stamped from the Service PO's
+ * company at assign time (see employeeServicePOMappingService.assign()), so
+ * this alone already confirms the pairing was authorized within the
+ * caller's scope; no separate Employee-BU-match check is needed on top.
  * @param {number} empId
  * @param {number} servicePOId
  * @param {number} companyId
@@ -99,17 +142,22 @@ function toResponse(record) {
 }
 
 /**
- * GET /service-pos/:servicePoId mapped-employees equivalent — employees
- * actively mapped to this Service PO (employee_servicepo_mapping, status
- * 'active'), reusing the existing mapping table rather than introducing a
- * new mapping concept.
+ * GET /service-pos/:servicePoId mapped-employees equivalent — every
+ * employee actively mapped to this Service PO (employee_servicepo_mapping,
+ * status 'active'), reusing the existing mapping table rather than
+ * introducing a new mapping concept. Deliberately NOT further filtered by
+ * the employee's own Business Unit — cross-BU staffing (mapping an Employee
+ * to a Service PO in a different company than their own) is a supported
+ * pattern (see employeeServicePOMappingService.assign()), and this list
+ * must match what create()/bulkUpsert() will actually accept.
  * @param {number} servicePOId
- * @param {number} companyId
+ * @param {import('express').Request} req
  * @returns {Promise<object[]>}
  */
-const getMappedEmployees = async (servicePOId, companyId) => {
-  await assertServicePOExists(servicePOId, companyId);
-  const employees = await resourceBudgetRepository.findMappedEmployees(servicePOId, companyId);
+const getMappedEmployees = async (servicePOId, req) => {
+  const scope = await resolveScope(req);
+  const po = await assertServicePOExists(servicePOId, scope, req.employeeId);
+  const employees = await resourceBudgetRepository.findMappedEmployees(servicePOId, po.company_id);
   return employees.map((e) => ({
     id: e.id,
     employee_code: e.employee_code,
@@ -127,13 +175,19 @@ const getMappedEmployees = async (servicePOId, companyId) => {
  * @returns {Promise<object>}
  */
 const create = async (data, userId, req) => {
-  const companyId = req.companyId;
+  const scope = await resolveScope(req);
   const { emp_id, service_po_id } = data;
   const { month, year } = parseMonthString(data.month);
   const hours = round2(data.hours);
 
-  await assertEmployeeExists(emp_id, companyId);
-  await assertServicePOExists(service_po_id, companyId);
+  // Resolve the Service PO's OWN concrete company_id first (within the
+  // caller's permitted scope) — every budget row is stamped/scoped with
+  // THIS company, regardless of which of the caller's owned companies the
+  // Employee themselves happens to belong to (cross-BU staffing is allowed
+  // — see assertEmployeeMappedToServicePO()'s doc comment).
+  const po = await assertServicePOExists(service_po_id, scope, req.employeeId);
+  const companyId = po.company_id;
+  await assertEmployeeExists(emp_id);
   await assertEmployeeMappedToServicePO(emp_id, service_po_id, companyId);
 
   const existing = await resourceBudgetRepository.findOne(emp_id, service_po_id, month, year, companyId);
@@ -182,14 +236,15 @@ const create = async (data, userId, req) => {
  * @returns {Promise<object>}
  */
 const update = async (id, data, userId, req) => {
-  const companyId = req.companyId;
+  const scope = await resolveScope(req);
 
-  const existing = await resourceBudgetRepository.findById(id, companyId);
+  const existing = await resourceBudgetRepository.findById(id, scope);
   if (!existing) {
     const err = new Error('Resource budget record not found.');
     err.statusCode = 404;
     throw err;
   }
+  const companyId = existing.company_id;
 
   const hours = round2(data.hours);
 
@@ -227,14 +282,15 @@ const update = async (id, data, userId, req) => {
  * @returns {Promise<void>}
  */
 const deactivate = async (id, userId, req) => {
-  const companyId = req.companyId;
+  const scope = await resolveScope(req);
 
-  const existing = await resourceBudgetRepository.findById(id, companyId);
+  const existing = await resourceBudgetRepository.findById(id, scope);
   if (!existing) {
     const err = new Error('Resource budget record not found.');
     err.statusCode = 404;
     throw err;
   }
+  const companyId = existing.company_id;
 
   await resourceBudgetRepository.update(id, { status: 'inactive', updated_by: userId }, companyId);
   await createAuditLog(userId, 'DELETE', 'resource_budget_master', id, { status: existing.status }, { status: 'inactive' }, req ? getIpAddress(req) : null);
@@ -244,11 +300,12 @@ const deactivate = async (id, userId, req) => {
 /**
  * GET /resource-budgets/service-po/:servicePoId
  * @param {number} servicePOId
- * @param {number} companyId
+ * @param {import('express').Request} req
  * @returns {Promise<object[]>}
  */
-const listByServicePO = async (servicePOId, companyId) => {
-  await assertServicePOExists(servicePOId, companyId);
+const listByServicePO = async (servicePOId, req) => {
+  const companyId = await resolveScope(req);
+  await assertServicePOExists(servicePOId, companyId, req.employeeId);
   const records = await resourceBudgetRepository.findByServicePO(servicePOId, companyId);
   return records.map(toResponse);
 };
@@ -256,10 +313,11 @@ const listByServicePO = async (servicePOId, companyId) => {
 /**
  * GET /resource-budgets — filtered list (emp_id and/or month, both optional).
  * @param {object} query - { emp_id?, month? } (month is "YYYY-MM")
- * @param {number} companyId
+ * @param {import('express').Request} req
  * @returns {Promise<object[]>}
  */
-const list = async (query, companyId) => {
+const list = async (query, req) => {
+  const companyId = await resolveScope(req);
   const filters = {};
   if (query.emp_id !== undefined) filters.emp_id = query.emp_id;
   if (query.month !== undefined) {
@@ -286,18 +344,24 @@ const list = async (query, companyId) => {
  * @returns {Promise<object[]>}
  */
 const bulkUpsert = async (data, userId, req) => {
-  const companyId = req.companyId;
+  const scope = await resolveScope(req);
   const { service_po_id, resources } = data;
   const { month, year } = parseMonthString(data.month);
 
-  await assertServicePOExists(service_po_id, companyId);
+  // Same "resolve the PO's own company first" pattern as create() — every
+  // budget row is stamped/scoped with THIS company, regardless of which of
+  // the caller's owned companies each Employee themselves belongs to
+  // (cross-BU staffing is allowed — see assertEmployeeMappedToServicePO()'s
+  // doc comment).
+  const po = await assertServicePOExists(service_po_id, scope, req.employeeId);
+  const companyId = po.company_id;
 
   // Pass 1 — employee existence + Service PO mapping, collected per-employee
   // rather than failing on the first bad row.
   const mappingErrors = [];
   for (const item of resources) {
     try {
-      await assertEmployeeExists(item.emp_id, companyId);
+      await assertEmployeeExists(item.emp_id);
       await assertEmployeeMappedToServicePO(item.emp_id, service_po_id, companyId);
     } catch (err) {
       mappingErrors.push({ emp_id: item.emp_id, message: err.message });

@@ -18,6 +18,10 @@ module.exports = (sequelize) => {
     // getMaxSeqInModule).
     seq: { type: DataTypes.INTEGER, allowNull: false, validate: { min: 1 } },
     status: { type: DataTypes.ENUM('active', 'inactive'), allowNull: false, defaultValue: 'active' },
+    // Optional parent category — only ever set on a FORM row (module_name
+    // NOT NULL); NULL means this form sits directly under its module. See
+    // database/migrations/20260881_add_form_master_categories.sql.
+    category_id: { type: DataTypes.INTEGER, allowNull: true },
   }, {
     sequelize,
     modelName: 'FormMaster',

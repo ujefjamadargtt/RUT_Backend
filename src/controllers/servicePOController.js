@@ -18,11 +18,23 @@ const logger = require('../utils/logger');
  */
 
 /**
+ * The object-level scoping context Service PO reads need for company-less
+ * actors (Admin/Entity Admin) — see companyAccessControlService.js. Built
+ * only from server-verified req fields, never from body/query. Mirrors
+ * projectController.js's buildAuthContext().
+ *
+ * @param {import('express').Request} req
+ */
+function buildAuthContext(req) {
+  return { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId };
+}
+
+/**
  * GET /api/v1/service-pos
  */
 const getAllServicePOs = async (req, res) => {
   try {
-    const { data, meta } = await servicePOService.getAll(req.query, req.companyId);
+    const { data, meta } = await servicePOService.getAll(req.query, buildAuthContext(req));
     return sendPaginated(res, data, meta, 'Service POs fetched successfully.');
   } catch (error) {
     logger.error('getAllServicePOs error', { error: error.message });
@@ -35,7 +47,7 @@ const getAllServicePOs = async (req, res) => {
  */
 const getActivePOs = async (req, res) => {
   try {
-    const pos = await servicePOService.getActivePOs(req.companyId);
+    const pos = await servicePOService.getActivePOs(buildAuthContext(req));
     return sendSuccess(res, pos, 'Active Service POs fetched successfully.');
   } catch (error) {
     logger.error('getActivePOs error', { error: error.message });
@@ -53,7 +65,7 @@ const getServicePOById = async (req, res) => {
       return sendError(res, 'Invalid Service PO ID.', 400);
     }
 
-    const po = await servicePOService.getById(id, req.companyId);
+    const po = await servicePOService.getById(id, buildAuthContext(req));
     return sendSuccess(res, po, 'Service PO fetched successfully.');
   } catch (error) {
     if (error.statusCode === 404) {
@@ -193,7 +205,7 @@ const getUtilisation = async (req, res) => {
       return sendError(res, 'Invalid Service PO ID.', 400);
     }
 
-    const utilisation = await servicePOService.getUtilisation(id, req.companyId);
+    const utilisation = await servicePOService.getUtilisation(id, buildAuthContext(req));
     return sendSuccess(res, utilisation, 'Utilisation data fetched successfully.');
   } catch (error) {
     if (error.statusCode === 404) {
@@ -209,7 +221,7 @@ const deleteServicePO = async (req, res) => {
     const id = parseInt(req.params.id, 10);
     if (isNaN(id) || id < 1) return sendError(res, 'Invalid Service PO ID.', 400);
 
-    await servicePOService.delete(id, req.userId, req.companyId);
+    await servicePOService.delete(id, req.userId, req);
     return sendNoContent(res);
   } catch (error) {
     if (error.statusCode === 404) return sendNotFound(res, 'Service PO');
@@ -229,7 +241,7 @@ const deleteServicePO = async (req, res) => {
  */
 const importServicePOs = async (req, res) => {
   try {
-    const result = await servicePOImportService.importServicePOs(req.file.path, req.userId, req.companyId);
+    const result = await servicePOImportService.importServicePOs(req.file.path, req.userId, req);
     const message = (result.imported > 0 || result.existing_po_reused > 0)
       ? `Import complete. ${result.imported} Service PO(s) created, ${result.existing_po_reused} existing Service PO(s) reused, ${result.hierarchy_created} hierarchy node(s) created.`
       : `Import aborted. ${result.skipped} row(s) failed validation — no rows were inserted.`;

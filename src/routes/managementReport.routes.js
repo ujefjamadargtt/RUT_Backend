@@ -3,7 +3,17 @@
 const express = require('express');
 const router = express.Router();
 
-const authenticate = require('../middlewares/auth');
+const authenticateBase = require('../middlewares/auth');
+const resolveCompanyContextForCompanyLessActors = require('../middlewares/resolveCompanyContextForCompanyLessActors');
+// Admin/Entity Admin (ranks 2-3) have no single req.companyId from
+// authenticateBase alone — 9 of these 10 reports read req.companyId
+// directly, so `authenticate` resolves ONE Business Unit context for them
+// too (see resolveCompanyContextForCompanyLessActors.js for the contract).
+// The 10th report, bu-performance-scorecard, is explicitly a cross-BU view
+// scoped by req.entityIds instead — it uses authenticateBase directly below
+// so this doesn't force a single-BU selection onto the one report designed
+// to show every owned BU at once.
+const authenticate = [authenticateBase, resolveCompanyContextForCompanyLessActors];
 const requireEntityAdminOrAdmin = require('../middlewares/requireEntityAdminOrAdmin');
 const managementReportController = require('../controllers/managementReportController');
 const { heavyReportLimiter } = require('../middlewares/rateLimiters');
@@ -225,7 +235,7 @@ router.get('/client-profitability-concentration', authenticate, managementReport
  *       403: { description: Restricted to Admin or Entity Admin }
  *       422: { description: month and year are required }
  */
-router.get('/bu-performance-scorecard', authenticate, requireEntityAdminOrAdmin, managementReportController.getBUPerformanceScorecard);
+router.get('/bu-performance-scorecard', authenticateBase, requireEntityAdminOrAdmin, managementReportController.getBUPerformanceScorecard);
 
 /**
  * @swagger

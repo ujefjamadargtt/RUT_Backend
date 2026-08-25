@@ -1,11 +1,15 @@
 'use strict';
 
-const { sequelize, Role } = require('../models');
+const { Op } = require('sequelize');
+const { sequelize, Role, Company } = require('../models');
 const employeeRepository = require('../repositories/employeeRepository');
-const userRepository = require('../repositories/userRepository');
+const employeeRoleRepository = require('../repositories/employeeRoleRepository');
+const employeeBusinessUnitRepository = require('../repositories/employeeBusinessUnitRepository');
 const managerEmployeeMappingRepository = require('../repositories/managerEmployeeMappingRepository');
+const employeeServicePOMappingService = require('./employeeServicePOMappingService');
 const roleHierarchyService = require('./roleHierarchyService');
 const employeeAccessControlService = require('./employeeAccessControlService');
+const companyAccessControlService = require('./companyAccessControlService');
 const { createAuditLog } = require('../middlewares/auditLog');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
 const { generateTemporaryPassword } = require('../utils/password');
@@ -14,14 +18,14 @@ const logger = require('../utils/logger');
 /**
  * Employee Service
  *
- * Employee is pure business data now (see database/migrations/
- * 20260842_employees_drop_login_columns.sql) — every Employee that needs
- * to log in gets a linked User row (users.employee_id) created
- * automatically here, never a separate Employee-direct-login path. Per
- * the RBAC redesign: "Whenever an Employee is created, automatically
- * create a User record. Role = Employee." HR may also assign a Primary
- * Manager (and optional Secondary) in the same transaction — both optional,
- * so an Employee can be left unmapped and assigned a manager later via update.
+ * Employee is the sole login identity now (Employee-as-Identity redesign,
+ * database/migrations/20260864-20260880) — email/password live natively
+ * on `employees`, roles are many-to-many (employee_roles, no primary/
+ * additional split), and Business Unit membership is many-to-many
+ * (employee_business_units) rather than a single company_id. HR may also
+ * assign a Primary Manager (and optional Secondary) in the same
+ * transaction — both optional, so an Employee can be left unmapped and
+ * assigned a manager later via update().
  */
 
 const CAPABILITY_CAN_MANAGE_EMPLOYEES = 'manager.view_mapped_employees';
@@ -44,44 +48,45 @@ function badRequestError(message) {
   return err;
 }
 
+function forbiddenError(message) {
+  const err = new Error(message);
+  err.statusCode = 403;
+  return err;
+}
+
 /**
  * Confirm a candidate manager: exists, active, same company as the
  * Employee, and holds a role capable of managing Employees (Manager,
  * Service PO Admin, or Project Admin — anything with
  * 'manager.view_mapped_employees' in its effective capability set, direct
- * or inherited — see roleHierarchyService.js). The capability may come from
- * the candidate's PRIMARY role or an ADDITIONAL operational role (e.g. an
- * Employee-primary user who also holds an additional "Manager" role — see
- * database/migrations/20260850_add_user_additional_roles.sql). Reused by
- * both create() and update() rather than duplicating the check.
+ * or inherited — see roleHierarchyService.js). Reused by both create() and
+ * update() rather than duplicating the check.
  *
- * @param {number} userId
+ * @param {number} managerEmployeeId
  * @param {number} companyId
  * @param {string} label - 'Primary Manager' | 'Secondary Manager', for error messages
- * @returns {Promise<User>}
+ * @returns {Promise<Employee>}
  */
-async function assertValidManager(userId, companyId, label) {
-  const user = await userRepository.findById(userId, companyId);
-  if (!user) {
+async function assertValidManager(managerEmployeeId, companyId, label) {
+  const manager = await employeeRepository.findById(managerEmployeeId, companyId);
+  if (!manager) {
     throw notFoundError(`${label} not found in this company.`);
   }
-  if (user.status !== 'active') {
+  if (manager.status !== 'active') {
     throw badRequestError(`${label} is not an active account.`);
   }
-  if (!user.role) {
+
+  const roleIds = await employeeRoleRepository.findIdsByEmployeeId(managerEmployeeId);
+  if (roleIds.length === 0) {
     throw badRequestError(`${label} has no role assigned.`);
   }
 
-  const additionalRoleIds = (user.additionalRoles || []).map((role) => role.id);
-  const capabilities = await roleHierarchyService.getEffectiveCapabilitiesForRoleIds([
-    user.role.id,
-    ...additionalRoleIds,
-  ]);
+  const capabilities = await roleHierarchyService.getEffectiveCapabilitiesForRoleIds(roleIds);
   if (!roleHierarchyService.hasCapability(capabilities, CAPABILITY_CAN_MANAGE_EMPLOYEES)) {
     throw badRequestError(`${label} must hold a Manager (or higher) role.`);
   }
 
-  return user;
+  return manager;
 }
 
 /**
@@ -89,10 +94,10 @@ async function assertValidManager(userId, companyId, label) {
  * for an Employee, inside the given transaction. Used by both create() and
  * update()'s manager-reassignment path.
  */
-async function upsertManagerMapping(employeeId, mappingType, managerUserId, companyId, actorId, transaction) {
+async function upsertManagerMapping(employeeId, mappingType, managerEmployeeId, companyId, actorId, transaction) {
   const existing = await managerEmployeeMappingRepository.findByEmployeeAndType(employeeId, mappingType);
 
-  if (existing && existing.manager_user_id === managerUserId) {
+  if (existing && existing.manager_employee_id === managerEmployeeId) {
     return existing; // already correct, no-op
   }
   if (existing) {
@@ -101,7 +106,7 @@ async function upsertManagerMapping(employeeId, mappingType, managerUserId, comp
 
   return managerEmployeeMappingRepository.create({
     company_id: companyId,
-    manager_user_id: managerUserId,
+    manager_employee_id: managerEmployeeId,
     employee_id: employeeId,
     mapping_type: mappingType,
     status: 'active',
@@ -111,32 +116,12 @@ async function upsertManagerMapping(employeeId, mappingType, managerUserId, comp
 }
 
 /**
- * Employee itself carries no email (see database/migrations/
- * 20260842_employees_drop_login_columns.sql) — flatten it onto the
- * response from the linked User account, same convention as
- * getEligibleDeliveryHeads(). null if no User is linked yet. Expects an
- * Employee instance fetched with the `users` include (e.g. via
- * employeeRepository.findByIdWithEmail()).
+ * Attach each employee's Primary/Secondary Manager id AND display name —
+ * batched: one query for every mapping row across all given employees, one
+ * query for every distinct manager Employee, rather than N+1 lookups per
+ * employee.
  *
- * @param {Employee} employee
- * @returns {object} plain object with `email` set, `users` removed
- */
-function attachEmail(employee) {
-  const plain = employee.toJSON ? employee.toJSON() : { ...employee };
-  plain.email = plain.users && plain.users[0] ? plain.users[0].email : null;
-  delete plain.users;
-  return plain;
-}
-
-/**
- * Attach each employee's Primary/Secondary Manager id AND display name
- * (full_name of the manager's own linked Employee, falling back to their
- * email if they have none) — batched: one query for every mapping row
- * across all given employees, one query for every distinct manager user,
- * rather than N+1 lookups per employee.
- *
- * @param {object[]} employees - plain objects (e.g. already through attachEmail()), each with an `id`
- * @param {number} companyId
+ * @param {object[]} employees - plain objects, each with an `id`
  * @returns {Promise<object[]>}
  */
 async function attachManagers(employees) {
@@ -145,21 +130,16 @@ async function attachManagers(employees) {
   const employeeIds = employees.map((employee) => employee.id);
   const mappings = await managerEmployeeMappingRepository.findByEmployeeIds(employeeIds);
 
-  const managerUserIds = [...new Set(mappings.map((mapping) => mapping.manager_user_id))];
-  const managers = await userRepository.findByIds(managerUserIds);
-  const managerById = new Map(
-    managers.map((manager) => [
-      manager.id,
-      { id: manager.id, name: manager.employee ? manager.employee.full_name : manager.email },
-    ])
-  );
+  const managerEmployeeIds = [...new Set(mappings.map((mapping) => mapping.manager_employee_id))];
+  const managers = await employeeRepository.findByIds(managerEmployeeIds);
+  const managerById = new Map(managers.map((manager) => [manager.id, { id: manager.id, name: manager.full_name }]));
 
   const mappingsByEmployee = new Map();
   mappings.forEach((mapping) => {
     if (!mappingsByEmployee.has(mapping.employee_id)) {
       mappingsByEmployee.set(mapping.employee_id, {});
     }
-    mappingsByEmployee.get(mapping.employee_id)[mapping.mapping_type] = mapping.manager_user_id;
+    mappingsByEmployee.get(mapping.employee_id)[mapping.mapping_type] = mapping.manager_employee_id;
   });
 
   return employees.map((employee) => {
@@ -168,10 +148,67 @@ async function attachManagers(employees) {
     const secondary = slots.SECONDARY ? managerById.get(slots.SECONDARY) : null;
     return {
       ...employee,
-      primary_manager_user_id: primary ? primary.id : null,
+      primary_manager_employee_id: primary ? primary.id : null,
       primary_manager_name: primary ? primary.name : null,
-      secondary_manager_user_id: secondary ? secondary.id : null,
+      secondary_manager_employee_id: secondary ? secondary.id : null,
       secondary_manager_name: secondary ? secondary.name : null,
+    };
+  });
+}
+
+/**
+ * @param {object} employee - Sequelize Employee instance or plain object
+ * @returns {object} plain object
+ */
+function toPlain(employee) {
+  return employee.toJSON ? employee.toJSON() : { ...employee };
+}
+
+/**
+ * Attach each employee's currently-held roles and Business Units — both
+ * as plain id arrays (`role_ids`/`business_unit_ids`, for the Role & BU
+ * Mapping form's multi-select value binding) and as `{id, name}` objects
+ * (`roles`/`business_units`, for display) — batched: one query for roles
+ * and one for BUs across every employee given, not N+1 per employee.
+ *
+ * Deliberately only used by the single-employee detail response
+ * (getByIdWithEmail/update) and NOT the list endpoint (getAll) — the list
+ * screen doesn't need this, and joining employee_roles/employee_business_units
+ * for every row on a paginated list would be a needless cost there.
+ *
+ * @param {object[]} employees - plain objects, each with an `id`
+ * @returns {Promise<object[]>}
+ */
+async function attachRoleAndBusinessUnitInfo(employees) {
+  if (employees.length === 0) return employees;
+
+  const employeeIds = employees.map((employee) => employee.id);
+  const [roleGrants, buGrants] = await Promise.all([
+    employeeRoleRepository.findRolesByEmployeeIds(employeeIds),
+    employeeBusinessUnitRepository.findBusinessUnitsByEmployeeIds(employeeIds),
+  ]);
+
+  const rolesByEmployee = new Map();
+  roleGrants.forEach((grant) => {
+    if (!rolesByEmployee.has(grant.employee_id)) rolesByEmployee.set(grant.employee_id, []);
+    rolesByEmployee.get(grant.employee_id).push({ id: grant.id, name: grant.name });
+  });
+
+  const businessUnitsByEmployee = new Map();
+  buGrants.forEach((grant) => {
+    if (!businessUnitsByEmployee.has(grant.employee_id)) businessUnitsByEmployee.set(grant.employee_id, []);
+    businessUnitsByEmployee.get(grant.employee_id).push({ id: grant.id, name: grant.name });
+  });
+
+  return employees.map((employee) => {
+    const roles = rolesByEmployee.get(employee.id) || [];
+    const businessUnits = businessUnitsByEmployee.get(employee.id) || [];
+    return {
+      ...employee,
+      role_ids: roles.map((role) => role.id),
+      roles,
+      business_unit_ids: businessUnits.map((bu) => bu.id),
+      business_units: businessUnits,
     };
   });
 }
@@ -210,8 +247,7 @@ const getAll = async (query = {}, authContext) => {
   const { rows, count } = await employeeRepository.findAll(filters, { limit, offset }, sort);
   const meta = getPaginationMeta(count, page, limit);
 
-  const withEmail = rows.map(attachEmail);
-  const data = await attachManagers(withEmail);
+  const data = await attachManagers(rows.map(toPlain));
 
   return { data, meta };
 };
@@ -254,33 +290,299 @@ const getByIdWithEmail = async (id, authContext) => {
   if (!employee) {
     throw notFoundError(`Employee with ID ${id} not found.`);
   }
-  const [withManagers] = await attachManagers([attachEmail(employee)]);
-  return withManagers;
+  const [withManagers] = await attachManagers([toPlain(employee)]);
+  const [withRolesAndBUs] = await attachRoleAndBusinessUnitInfo([withManagers]);
+  return withRolesAndBUs;
 };
 
 /**
- * Create a new Employee — and, in the same transaction:
- *   1. A linked User account (role = Employee) so they can log in.
- *   2. An optional PRIMARY manager_employee_mappings row.
- *   3. An optional SECONDARY manager_employee_mappings row.
+ * Return one employee's current Role & Business Unit mappings only — the
+ * data source for the Action → Role & BU Mapping screen (moved out of the
+ * Employee Drawer; the Employee List's GET /employees intentionally does
+ * NOT carry this, see attachRoleAndBusinessUnitInfo()'s doc comment).
+ * Reuses the exact same access check (an out-of-scope employee 404s here
+ * too, never disclosing existence) and the exact same
+ * employee_roles/employee_business_units read path GET /employees/:id
+ * already uses — no separate/duplicate mapping-fetch logic.
+ *
+ * @param {number} id
+ * @param {object} authContext - { userId, employeeId, companyId, hierarchyRank, roleNames }
+ * @returns {Promise<{ employee_id: number, role_ids: number[], roles: object[], business_unit_ids: number[], business_units: object[] }>}
+ */
+const getMappings = async (id, authContext) => {
+  const accessWhere = await employeeAccessControlService.resolveEmployeeAccessWhere(authContext);
+  const employee = await employeeRepository.findByIdWithEmail(id, authContext.companyId, accessWhere);
+  if (!employee) {
+    throw notFoundError(`Employee with ID ${id} not found.`);
+  }
+
+  const [withRolesAndBUs] = await attachRoleAndBusinessUnitInfo([{ id: employee.id }]);
+
+  return {
+    employee_id: employee.id,
+    role_ids: withRolesAndBUs.role_ids,
+    roles: withRolesAndBUs.roles,
+    business_unit_ids: withRolesAndBUs.business_unit_ids,
+    business_units: withRolesAndBUs.business_units,
+  };
+};
+
+/**
+ * Return one employee's Business Units — the dedicated, lightweight data
+ * source for the frontend to load "Mapped BUs" by empId (e.g. right after
+ * login, using the `employee.id` from the login/select-role response)
+ * instead of the login response itself carrying this. Deliberately
+ * separate from getMappings() above: that endpoint is the Role & BU
+ * Mapping admin screen's heavier payload (roles + BUs, lean `{id, name}`
+ * shape); this one is just BUs, in the fuller `{id, name,
+ * is_original_data_visible}` shape authService.js's login used to embed
+ * directly in its response.
+ *
+ * Two DIFFERENT sources, unioned, because "which BUs does this employee
+ * have" means something different depending on tier:
+ *   - explicit `employee_business_units` grants — every ordinary Employee/
+ *     Manager/BU Admin/etc's actual mapped BUs.
+ *   - for an Admin/Entity Admin TARGET (rank 2/3) — these are platform-
+ *     wide/Entity-scoped by design and are almost never given an explicit
+ *     employee_business_units row (see adminService.createAdmin —
+ *     company_id is always NULL, no BU mapping step). Their real "BUs" are
+ *     whatever Companies fall under an Entity they own, transitively (the
+ *     SAME companyAccessControlService.resolveOwnedCompanyIds resolution
+ *     Company/Entity Master and employeeAccessControlService already use)
+ *     — i.e. the Companies under Entities/Entity Admins THEY created.
+ *     Without this, an Admin would get `businessUnits: []` here even
+ *     though they meaningfully "own" a whole sub-hierarchy of Companies.
+ * Each returned entry carries `source: 'mapped' | 'owned'` so the frontend
+ * can distinguish an explicit grant from an Admin's owned-hierarchy
+ * Company if it needs to (e.g. different label/badge) — a Company present
+ * in BOTH sets is returned once, tagged `mapped` (explicit grant wins).
+ *
+ * Reuses the same object-level access check as every other Employee read
+ * (an out-of-scope employee 404s here too, never disclosing existence) —
+ * an employee's own record is always within their own access scope, so
+ * this always succeeds for "my own mapped BUs".
+ *
+ * @param {number} id
+ * @param {object} authContext - { userId, employeeId, companyId, hierarchyRank, roleNames }
+ * @returns {Promise<{ employee_id: number, businessUnits: {id: number, name: string, is_original_data_visible: boolean, source: string}[] }>}
+ */
+const getBusinessUnits = async (id, authContext) => {
+  // Self-lookup ("my own mapped BUs") is unconditionally allowed — no
+  // company/BU context is required to see your own record, which matters
+  // because a multi-BU actor calls this specifically to discover their own
+  // BU list BEFORE they have anything to put in X-Company-Id (see
+  // employee.routes.js's route, which skips resolveCompany for exactly this
+  // case, leaving authContext.companyId unresolved here on purpose).
+  const accessWhere = id === authContext.employeeId
+    ? {}
+    : await employeeAccessControlService.resolveEmployeeAccessWhere(authContext);
+  const employee = await employeeRepository.findByIdWithEmail(id, authContext.companyId, accessWhere);
+  if (!employee) {
+    throw notFoundError(`Employee with ID ${id} not found.`);
+  }
+
+  const [explicitBUs, targetRoles] = await Promise.all([
+    employeeBusinessUnitRepository.findBusinessUnitsByEmployeeId(employee.id),
+    employeeRoleRepository.findRolesByEmployeeId(employee.id),
+  ]);
+
+  const businessUnitsById = new Map(
+    explicitBUs.map((bu) => [bu.id, {
+      id: bu.id,
+      name: bu.company_name,
+      is_original_data_visible: !!bu.is_original_data_visible,
+      source: 'mapped',
+    }])
+  );
+
+  // Effective hierarchy rank of the TARGET employee (not the caller) —
+  // same MIN-across-active-roles rule as authService.getEffectiveHierarchyRank.
+  const ranks = targetRoles.map((role) => role.hierarchy_rank).filter((rank) => Number.isInteger(rank));
+  const targetHierarchyRank = ranks.length > 0 ? Math.min(...ranks) : null;
+
+  if (targetHierarchyRank === 2 || targetHierarchyRank === 3) {
+    const ownedCompanyIds = await companyAccessControlService.resolveOwnedCompanyIds(targetHierarchyRank, employee.id);
+    if (ownedCompanyIds.length > 0) {
+      const ownedCompanies = await Company.findAll({
+        where: { id: { [Op.in]: ownedCompanyIds }, is_deleted: false },
+        attributes: ['id', 'company_name', 'is_original_data_visible'],
+      });
+      ownedCompanies.forEach((company) => {
+        if (!businessUnitsById.has(company.id)) {
+          businessUnitsById.set(company.id, {
+            id: company.id,
+            name: company.company_name,
+            is_original_data_visible: !!company.is_original_data_visible,
+            source: 'owned',
+          });
+        }
+      });
+    }
+  }
+
+  return {
+    employee_id: employee.id,
+    businessUnits: [...businessUnitsById.values()],
+  };
+};
+
+/**
+ * Validate every requested role: must exist and be active. At most one may
+ * be senior-tier (hierarchy_rank <= 4) — preserves the pre-redesign
+ * single-primary-senior-role invariant even though roles are otherwise
+ * flat multi-value (see the Employee-as-Identity plan's decision #3).
+ *
+ * @param {number[]} roleIds
+ * @returns {Promise<Role[]>} the resolved Role rows, same order as roleIds
+ */
+async function assertValidRoles(roleIds) {
+  const roles = await Promise.all(
+    roleIds.map(async (roleId) => {
+      const role = await Role.findOne({ where: { id: roleId, is_deleted: false } });
+      if (!role) {
+        throw notFoundError(`Role with ID ${roleId} not found.`);
+      }
+      if (role.status !== 'active') {
+        throw conflictError(`Role "${role.role_name}" is inactive and cannot be assigned.`);
+      }
+      return role;
+    })
+  );
+
+  const seniorRoles = roles.filter((role) => roleHierarchyService.isSeniorTier(role.hierarchy_rank));
+  if (seniorRoles.length > 1) {
+    throw badRequestError(
+      `An Employee may hold at most one senior-tier role; got: ${seniorRoles.map((r) => r.role_name).join(', ')}.`
+    );
+  }
+
+  return roles;
+}
+
+/**
+ * Validate every requested Business Unit: must exist, be an active,
+ * non-deleted Company. `companyId` (the actor's own home BU) is
+ * auto-injected if the caller supplied one and it isn't already in the
+ * list. Business Unit assignment is OPTIONAL at Employee create/update
+ * time — BU mapping is done separately (a dedicated mapping flow, not the
+ * Employee form) — so an empty/omitted `businessUnitIds` with no
+ * `companyId` to fall back to simply resolves to no BUs at all, rather
+ * than failing the request.
+ *
+ * Ownership check: every id, after the exists-and-active check, must also
+ * fall within the caller's own permitted scope (`ownedScope` — either a
+ * single companyId, or an array: the resolved owned-Company ids for a
+ * company-less Admin/Entity Admin, OR — for a multi-BU BU-scoped actor —
+ * every one of THEIR OWN actively mapped BUs, not just whichever one is
+ * currently active via X-Company-Id; see create()/update()'s callers for
+ * which one gets built) — otherwise any caller could attach an Employee to
+ * a completely unrelated tenant's (or unmapped) Business Unit just by
+ * knowing/guessing its id.
+ *
+ * @param {number[]} businessUnitIds
+ * @param {number} companyId
+ * @param {number|number[]} ownedScope
+ * @returns {Promise<number[]>}
+ */
+/**
+ * The scope to check business_unit_ids against — widened for a multi-BU
+ * BU-scoped actor to their FULL set of actively mapped BUs, not just the
+ * single one currently active via X-Company-Id. `ownedScope` (from
+ * companyAccessControlService.resolveActorCompanyScope) already correctly
+ * returns an array for a company-less Admin/Entity Admin, so this only
+ * changes the BU-scoped-actor case: a BU Admin mapped to BU 1 + BU 2 must
+ * be able to assign either (or both) to an Employee regardless of which one
+ * is momentarily active, but still never an unmapped BU 3.
+ *
+ * @param {{ companyId: number|null, employeeBusinessUnits?: number[] }} authContext
+ * @param {number|number[]} ownedScope
+ * @returns {number|number[]}
+ */
+function resolveBUAssignmentScope(authContext, ownedScope) {
+  if (authContext.companyId != null) {
+    const mappedIds = authContext.employeeBusinessUnits || [];
+    if (mappedIds.length > 0) {
+      return mappedIds;
+    }
+  }
+  return ownedScope;
+}
+
+async function resolveBusinessUnitIds(businessUnitIds, companyId, ownedScope) {
+  const ids = [...new Set(businessUnitIds && businessUnitIds.length > 0 ? businessUnitIds : [])];
+  if (companyId && !ids.includes(companyId)) {
+    ids.push(companyId);
+  }
+  if (ids.length === 0) {
+    return ids;
+  }
+
+  const companies = await Company.findAll({ where: { id: { [Op.in]: ids }, is_deleted: false } });
+  if (companies.length !== ids.length) {
+    const found = new Set(companies.map((c) => c.id));
+    const missing = ids.filter((id) => !found.has(id));
+    throw notFoundError(`Business Unit(s) not found: ${missing.join(', ')}.`);
+  }
+
+  const allowedIds = Array.isArray(ownedScope) ? new Set(ownedScope) : null;
+  const disallowed = ids.filter((id) => (allowedIds ? !allowedIds.has(id) : id !== ownedScope));
+  if (disallowed.length > 0) {
+    throw forbiddenError(`Business Unit(s) not one of your own: ${disallowed.join(', ')}.`);
+  }
+
+  return ids;
+}
+
+/**
+ * Resolve the roles an Employee will hold: whatever the caller supplied,
+ * or — if none — the single "Employee" role, so an Employee can always be
+ * created without the caller having to explicitly pick a role every time.
+ *
+ * @param {number[]} roleIds
+ * @returns {Promise<number[]>}
+ * @throws {Error} 404 if role_ids is empty AND the "Employee" role master
+ *   row itself can't be found (a genuine data-setup problem, not a caller error)
+ */
+async function resolveDefaultRoleIds(roleIds) {
+  if (roleIds && roleIds.length > 0) {
+    return roleIds;
+  }
+
+  const employeeRole = await Role.findOne({ where: { role_name: 'Employee', is_deleted: false } });
+  if (!employeeRole) {
+    throw notFoundError('Default "Employee" role not found — contact an administrator.');
+  }
+
+  return [employeeRole.id];
+}
+
+/**
+ * Create a new Employee — email/password are now native fields, and role/
+ * Business Unit assignment is inside the same transaction via
+ * employee_roles/employee_business_units (Employee-as-Identity redesign).
  *
  * @param {object} data - Validated fields: employee business fields + email,
- *   password?, primary_manager_user_id?, secondary_manager_user_id?
- * @param {number} userId - ID of the creating (HR) user, for audit
+ *   password?, role_ids[], business_unit_ids[]?, primary_manager_employee_id?,
+ *   secondary_manager_employee_id?
+ * @param {number} userId - ID of the creating (HR) actor, for audit
  * @param {string} ipAddress
- * @param {number} companyId
- * @returns {Promise<{ employee: object, user: object, temporaryPassword?: string }>}
+ * @param {object} authContext - { userId, employeeId, companyId, hierarchyRank, roleNames } — see controller
+ * @returns {Promise<{ employee: object, temporaryPassword?: string }>}
  */
-const create = async (data, userId, ipAddress = null, companyId) => {
+const create = async (data, userId, ipAddress = null, authContext) => {
+  const companyId = authContext.companyId;
+  const ownedScope = await companyAccessControlService.resolveActorCompanyScope(authContext);
   const {
     email,
     password,
-    primary_manager_user_id: primaryManagerUserId,
-    secondary_manager_user_id: secondaryManagerUserId,
+    role_ids: roleIds = [],
+    business_unit_ids: businessUnitIds = [],
+    primary_manager_employee_id: primaryManagerEmployeeId,
+    secondary_manager_employee_id: secondaryManagerEmployeeId,
     ...employeeFields
   } = data;
 
-  if (secondaryManagerUserId && secondaryManagerUserId === primaryManagerUserId) {
+  if (secondaryManagerEmployeeId && secondaryManagerEmployeeId === primaryManagerEmployeeId) {
     throw badRequestError('Secondary Manager must be different from the Primary Manager.');
   }
 
@@ -291,57 +593,89 @@ const create = async (data, userId, ipAddress = null, companyId) => {
     }
   }
 
-  const existingUser = await userRepository.findByEmail(email);
-  if (existingUser) {
+  const existingEmployee = await employeeRepository.findByEmail(email);
+  if (existingEmployee) {
     throw conflictError(`Email "${email}" is already registered.`);
   }
 
-  // Both managers are optional; when supplied, must belong to the same
-  // Company as the Employee being created — assertValidManager's findById()
-  // is itself company-scoped, so a manager from another company 404s here.
-  if (primaryManagerUserId) {
-    await assertValidManager(primaryManagerUserId, companyId, 'Primary Manager');
-  }
-  if (secondaryManagerUserId) {
-    await assertValidManager(secondaryManagerUserId, companyId, 'Secondary Manager');
+  // role_ids defaults to the "Employee" role when omitted — the caller no
+  // longer has to explicitly pick a role every time. business_unit_ids is
+  // fully optional: BU mapping is done separately (a dedicated mapping
+  // flow, not this form), so an Employee can be created with zero BUs.
+  const resolvedRoleIds = await resolveDefaultRoleIds(roleIds);
+  const resolvedRoles = await assertValidRoles(resolvedRoleIds);
+  const resolvedBusinessUnitIds = await resolveBusinessUnitIds(
+    businessUnitIds, companyId, resolveBUAssignmentScope(authContext, ownedScope)
+  );
+
+  // Admin holds no timesheet of its own to approve — never held-back
+  // awaiting approval like a regular Employee, regardless of what the
+  // caller passed for this field.
+  const isAdminRole = resolvedRoles.some((role) => role.role_name === 'Admin');
+  if (isAdminRole) {
+    employeeFields.is_timesheet_approval_required = false;
   }
 
-  const employeeRole = await Role.findOne({ where: { role_name: 'Employee' } });
-  if (!employeeRole) {
-    const err = new Error('The "Employee" role is not seeded.');
-    err.statusCode = 500;
-    throw err;
+  // Both managers are optional; when supplied, must belong to the caller's
+  // own permitted scope — assertValidManager's findById() is passed
+  // `ownedScope` (not the raw, possibly-undefined `companyId`) so a
+  // company-less Admin/Entity Admin can't reference a manager belonging to
+  // an unrelated tenant's Company.
+  if (primaryManagerEmployeeId) {
+    await assertValidManager(primaryManagerEmployeeId, ownedScope, 'Primary Manager');
+  }
+  if (secondaryManagerEmployeeId) {
+    await assertValidManager(secondaryManagerEmployeeId, ownedScope, 'Secondary Manager');
   }
 
   const temporaryPassword = password || generateTemporaryPassword();
 
   let employee;
-  let user;
 
   await sequelize.transaction(async (transaction) => {
     employee = await employeeRepository.create({
       ...employeeFields,
-      company_id: companyId,
-      created_by: userId,
-      updated_by: userId,
-    }, { transaction });
-
-    user = await userRepository.create({
       email,
       password: temporaryPassword,
-      role_id: employeeRole.id,
-      employee_id: employee.id,
       company_id: companyId,
-      status: 'active',
       created_by: userId,
       updated_by: userId,
     }, { transaction });
 
-    if (primaryManagerUserId) {
-      await upsertManagerMapping(employee.id, 'PRIMARY', primaryManagerUserId, companyId, userId, transaction);
+    await employeeRoleRepository.replaceForEmployee(employee.id, resolvedRoleIds, userId, transaction);
+    await employeeBusinessUnitRepository.replaceForEmployee(employee.id, resolvedBusinessUnitIds, userId, transaction);
+
+    if (primaryManagerEmployeeId) {
+      await upsertManagerMapping(employee.id, 'PRIMARY', primaryManagerEmployeeId, companyId, userId, transaction);
     }
-    if (secondaryManagerUserId) {
-      await upsertManagerMapping(employee.id, 'SECONDARY', secondaryManagerUserId, companyId, userId, transaction);
+    if (secondaryManagerEmployeeId) {
+      await upsertManagerMapping(employee.id, 'SECONDARY', secondaryManagerEmployeeId, companyId, userId, transaction);
+    }
+
+    // Auto-map against every Business Unit this NEW employee is actually
+    // being assigned to (resolvedBusinessUnitIds — already includes the
+    // BU-scoped actor's own companyId when no explicit business_unit_ids
+    // were supplied, see resolveBusinessUnitIds() above), NOT the raw
+    // `companyId` (the CREATING actor's own BU, which is undefined for a
+    // company-less Admin/Entity Admin even when they explicitly assign the
+    // new employee one or more Business Units via business_unit_ids — using
+    // it here meant auto-mapping silently never ran for exactly that,
+    // increasingly common, creation path). Calling this once per BU is safe
+    // even when a BU-less global Centralised PO shows up for more than one
+    // BU — bulkCreate's ignoreDuplicates + the unique (employee_id,
+    // service_po_id) constraint make the repeat a no-op.
+    //
+    // An employee with NO Business Unit at all (resolvedBusinessUnitIds
+    // empty) still gets one call with companyId: null — a Centralised PO
+    // is deliberately not tied to any BU, so it must reach every employee
+    // regardless of whether THEY have a BU (see
+    // autoMapCentralisedServicePOs()'s doc comment).
+    if (resolvedBusinessUnitIds.length > 0) {
+      for (const businessUnitId of resolvedBusinessUnitIds) {
+        await employeeServicePOMappingService.autoMapCentralisedServicePOs(employee.id, businessUnitId, userId, transaction);
+      }
+    } else {
+      await employeeServicePOMappingService.autoMapCentralisedServicePOs(employee.id, null, userId, transaction);
     }
   });
 
@@ -351,22 +685,22 @@ const create = async (data, userId, ipAddress = null, companyId) => {
     'employees',
     employee.id,
     null,
-    { id: employee.id, employee_code: employee.employee_code, linked_user_id: user.id, email },
+    { id: employee.id, employee_code: employee.employee_code, email, role_ids: resolvedRoleIds },
     ipAddress
   );
 
-  logger.info('Employee created with linked User account', {
+  logger.info('Employee created', {
     employeeId: employee.id,
-    userId: user.id,
-    primaryManagerUserId,
-    secondaryManagerUserId: secondaryManagerUserId || null,
+    roleIds: resolvedRoleIds,
+    primaryManagerEmployeeId,
+    secondaryManagerEmployeeId: secondaryManagerEmployeeId || null,
     createdBy: userId,
   });
 
-  const responseUser = user.toJSON();
-  delete responseUser.password;
+  const responseEmployee = employee.toJSON();
+  delete responseEmployee.password;
 
-  const response = { employee, user: responseUser };
+  const response = { employee: responseEmployee };
   // Only surface the plaintext password when we generated it — if HR
   // supplied their own, they already know it.
   if (!password) {
@@ -381,18 +715,37 @@ const create = async (data, userId, ipAddress = null, companyId) => {
  * Guards against duplicate employee_code changes; optionally reassigns
  * Primary/Secondary Manager (same validation as create()).
  *
+ * Object-level authorization (the PUT /employees/:id IDOR fix — mirrors
+ * getByIdWithEmail()): `authContext`'s resolved `accessWhere` is merged
+ * into the SAME lookup query that 404s when the row doesn't exist, so an
+ * Employee outside the caller's scope 404s exactly like a nonexistent one,
+ * and can never be updated by a company-less Admin/Entity Admin guessing an
+ * id. `existing.company_id` (now verified-owned) is then used for every
+ * single-company operation below instead of the raw, possibly-undefined
+ * `authContext.companyId` — this also closes the same "manager/BU from an
+ * unrelated tenant" gap create() has, for the update path.
+ *
  * @param {number} id
  * @param {object} data
  * @param {number} userId
  * @param {string} ipAddress
+ * @param {object} authContext - { userId, employeeId, companyId, hierarchyRank, roleNames } — see controller
  * @returns {Promise<Employee>}
  */
-const update = async (id, data, userId, ipAddress = null, companyId) => {
-  const existing = await getById(id, companyId); // throws 404 if not found
+const update = async (id, data, userId, ipAddress = null, authContext) => {
+  const accessWhere = await employeeAccessControlService.resolveEmployeeAccessWhere(authContext);
+  const existing = await employeeRepository.findByIdWithEmail(id, authContext.companyId, accessWhere);
+  if (!existing) {
+    throw notFoundError(`Employee with ID ${id} not found.`);
+  }
+  const companyId = existing.company_id;
+  const ownedScope = await companyAccessControlService.resolveActorCompanyScope(authContext);
 
   const {
-    primary_manager_user_id: primaryManagerUserId,
-    secondary_manager_user_id: secondaryManagerUserId,
+    primary_manager_employee_id: primaryManagerEmployeeId,
+    secondary_manager_employee_id: secondaryManagerEmployeeId,
+    role_ids: roleIds,
+    business_unit_ids: businessUnitIds,
     email,
     ...employeeFields
   } = data;
@@ -404,53 +757,68 @@ const update = async (id, data, userId, ipAddress = null, companyId) => {
     }
   }
 
-  if (primaryManagerUserId) {
-    await assertValidManager(primaryManagerUserId, companyId, 'Primary Manager');
-  }
-  if (secondaryManagerUserId) {
-    await assertValidManager(secondaryManagerUserId, companyId, 'Secondary Manager');
+  if (email && email !== existing.email) {
+    const taken = await employeeRepository.findByEmail(email);
+    if (taken && taken.id !== id) {
+      throw conflictError(`Email "${email}" is already registered to another employee.`);
+    }
   }
 
-  // Employee itself carries no email column — updating it means updating
-  // the linked User's own email instead (see userEmailField's doc comment
-  // in employeeValidation.js). Validated up front, same uniqueness rule as
-  // User Master's own email-change flow.
-  let linkedUser = null;
-  if (email) {
-    linkedUser = await userRepository.findByEmployeeId(id, companyId);
-    if (!linkedUser) {
-      throw badRequestError('This Employee has no linked User account to update the email for.');
-    }
-    if (email !== linkedUser.email) {
-      const taken = await userRepository.findByEmail(email);
-      if (taken && taken.id !== linkedUser.id) {
-        throw conflictError(`Email "${email}" is already registered to another user.`);
-      }
-    }
+  // Same default-to-"Employee" behavior as create() — an explicitly empty
+  // role_ids array falls back to the Employee role rather than erroring.
+  const resolvedRoleIds = roleIds !== undefined
+    ? await resolveDefaultRoleIds(roleIds)
+    : undefined;
+  if (resolvedRoleIds !== undefined) {
+    await assertValidRoles(resolvedRoleIds);
+  }
+
+  // ownedScope (not the single companyId) — an Admin/Entity Admin may
+  // legitimately attach any of their OWN Business Units, not just the one
+  // this Employee already belongs to. Widened further for a multi-BU
+  // BU-scoped actor via resolveBUAssignmentScope() — see its doc comment.
+  const resolvedBusinessUnitIds = businessUnitIds !== undefined
+    ? await resolveBusinessUnitIds(businessUnitIds, companyId, resolveBUAssignmentScope(authContext, ownedScope))
+    : null;
+
+  if (primaryManagerEmployeeId) {
+    await assertValidManager(primaryManagerEmployeeId, companyId, 'Primary Manager');
+  }
+  if (secondaryManagerEmployeeId) {
+    await assertValidManager(secondaryManagerEmployeeId, companyId, 'Secondary Manager');
   }
 
   const oldValues = existing.toJSON();
   let updated;
 
   await sequelize.transaction(async (transaction) => {
-    updated = await employeeRepository.update(id, { ...employeeFields, updated_by: userId }, companyId, { transaction });
+    const updatePayload = { ...employeeFields, updated_by: userId };
+    if (email) updatePayload.email = email;
 
-    if (linkedUser && email !== linkedUser.email) {
-      await userRepository.update(linkedUser.id, { email, updated_by: userId }, { transaction }, companyId);
+    updated = await employeeRepository.update(id, updatePayload, companyId, { transaction });
+
+    if (resolvedRoleIds !== undefined) {
+      await employeeRoleRepository.replaceForEmployee(id, resolvedRoleIds, userId, transaction);
+    }
+    if (resolvedBusinessUnitIds !== null) {
+      await employeeBusinessUnitRepository.replaceForEmployee(id, resolvedBusinessUnitIds, userId, transaction);
     }
 
-    if (primaryManagerUserId) {
-      await upsertManagerMapping(id, 'PRIMARY', primaryManagerUserId, companyId, userId, transaction);
+    if (primaryManagerEmployeeId) {
+      await upsertManagerMapping(id, 'PRIMARY', primaryManagerEmployeeId, companyId, userId, transaction);
     }
-    if (secondaryManagerUserId !== undefined) {
-      if (secondaryManagerUserId === null) {
+    if (secondaryManagerEmployeeId !== undefined) {
+      if (secondaryManagerEmployeeId === null) {
         const existingSecondary = await managerEmployeeMappingRepository.findByEmployeeAndType(id, 'SECONDARY');
         if (existingSecondary) await existingSecondary.destroy({ transaction });
       } else {
-        await upsertManagerMapping(id, 'SECONDARY', secondaryManagerUserId, companyId, userId, transaction);
+        await upsertManagerMapping(id, 'SECONDARY', secondaryManagerEmployeeId, companyId, userId, transaction);
       }
     }
   });
+
+  const updatedPlain = updated.toJSON();
+  delete updatedPlain.password;
 
   await createAuditLog(
     userId,
@@ -458,28 +826,39 @@ const update = async (id, data, userId, ipAddress = null, companyId) => {
     'employees',
     id,
     oldValues,
-    updated.toJSON(),
+    updatedPlain,
     ipAddress
   );
 
   logger.info('Employee updated', { employeeId: id, userId });
 
   const refreshed = await employeeRepository.findByIdWithEmail(id, companyId);
-  const [withManagers] = await attachManagers([attachEmail(refreshed)]);
-  return withManagers;
+  const [withManagers] = await attachManagers([toPlain(refreshed)]);
+  const [withRolesAndBUs] = await attachRoleAndBusinessUnitInfo([withManagers]);
+  return withRolesAndBUs;
 };
 
 /**
  * Soft-delete an employee.
  * Blocks deletion if the employee is allocated to any active Service PO.
  *
+ * Object-level authorization — same fix and rationale as update() above:
+ * an out-of-scope Employee 404s exactly like a nonexistent one, closing the
+ * DELETE /employees/:id IDOR.
+ *
  * @param {number} id
  * @param {number} userId
  * @param {string} ipAddress
+ * @param {object} authContext - { userId, employeeId, companyId, hierarchyRank, roleNames } — see controller
  * @returns {Promise<Employee>}
  */
-const deleteEmployee = async (id, userId, ipAddress = null, companyId) => {
-  const employee = await getById(id, companyId); // throws 404 if not found
+const deleteEmployee = async (id, userId, ipAddress = null, authContext) => {
+  const accessWhere = await employeeAccessControlService.resolveEmployeeAccessWhere(authContext);
+  const employee = await employeeRepository.findByIdWithEmail(id, authContext.companyId, accessWhere);
+  if (!employee) {
+    throw notFoundError(`Employee with ID ${id} not found.`);
+  }
+  const companyId = employee.company_id;
 
   // Guard: do not deactivate an employee tied to an active PO
   const activeAllocations = await employeeRepository.findActiveAllocations(id, companyId);
@@ -511,11 +890,44 @@ const deleteEmployee = async (id, userId, ipAddress = null, companyId) => {
 };
 
 /**
- * Return all active employees (lightweight list for dropdowns, allocation pickers).
+ * Return all active employees (lightweight list for dropdowns, allocation
+ * pickers) — scoped via the same resolveEmployeeAccessWhere() every other
+ * Employee read uses, so a company-less Admin/Entity Admin gets their own
+ * owned-Company employees instead of every employee on the platform (the
+ * GET /employees/active/list leak fix).
+ *
+ * @param {object} authContext - { userId, employeeId, companyId, hierarchyRank, roleNames }
  * @returns {Promise<Employee[]>}
  */
-const getActiveEmployees = async (companyId) => {
-  return employeeRepository.getActiveEmployees(companyId);
+const getActiveEmployees = async (authContext) => {
+  const accessWhere = await employeeAccessControlService.resolveEmployeeAccessWhere(authContext);
+  return employeeRepository.getActiveEmployees(authContext.companyId, accessWhere);
+};
+
+/**
+ * Return eligible candidates for Primary/Secondary Manager selection — the
+ * Employee Create/Edit form's manager dropdowns. Same eligibility rule
+ * assertValidManager() enforces at create()/update() time (any role whose
+ * effective capability set includes manager.view_mapped_employees, direct
+ * or inherited), resolved once here via a single Employee<->Role join
+ * rather than per-candidate — so a value offered in the dropdown is always
+ * one create()/update() will actually accept, and the frontend never needs
+ * to N+1 a per-row mappings fetch to figure out who's eligible.
+ *
+ * @param {object} authContext - { userId, employeeId, companyId, hierarchyRank, roleNames }
+ * @returns {Promise<{ id: number, employee_code: string, full_name: string, designation: string|null, status: string }[]>}
+ */
+const getEligibleManagers = async (authContext) => {
+  const accessWhere = await employeeAccessControlService.resolveEmployeeAccessWhere(authContext);
+  const eligibleRoleIds = await roleHierarchyService.getRoleIdsWithCapability(CAPABILITY_CAN_MANAGE_EMPLOYEES);
+  const employees = await employeeRepository.findEligibleManagers(authContext.companyId, eligibleRoleIds, accessWhere);
+  return employees.map((employee) => ({
+    id: employee.id,
+    employee_code: employee.employee_code,
+    full_name: employee.full_name,
+    designation: employee.designation,
+    status: employee.status,
+  }));
 };
 
 /**
@@ -527,17 +939,21 @@ const getActiveEmployees = async (companyId) => {
  * 20260842_employees_drop_login_columns.sql), `null` if that Employee has
  * no linked User yet.
  *
- * @param {number} companyId
+ * Scoped via resolveEmployeeAccessWhere() — same leak fix as
+ * getActiveEmployees() above (GET /employees/eligible-delivery-heads).
+ *
+ * @param {object} authContext - { userId, employeeId, companyId, hierarchyRank, roleNames }
  * @returns {Promise<{ id: number, employee_code: string, employee_name: string, email: string|null, status: string, company_id: number }[]>}
  */
-const getEligibleDeliveryHeads = async (companyId) => {
-  const employees = await employeeRepository.getEligibleDeliveryHeads(companyId);
+const getEligibleDeliveryHeads = async (authContext) => {
+  const accessWhere = await employeeAccessControlService.resolveEmployeeAccessWhere(authContext);
+  const employees = await employeeRepository.getEligibleDeliveryHeads(authContext.companyId, accessWhere);
 
   return employees.map((employee) => ({
     id: employee.id,
     employee_code: employee.employee_code,
     employee_name: employee.full_name,
-    email: employee.users && employee.users[0] ? employee.users[0].email : null,
+    email: employee.email || null,
     status: employee.status,
     company_id: employee.company_id,
   }));
@@ -547,9 +963,12 @@ module.exports = {
   getAll,
   getById,
   getByIdWithEmail,
+  getMappings,
+  getBusinessUnits,
   create,
   update,
   delete: deleteEmployee,
   getActiveEmployees,
   getEligibleDeliveryHeads,
+  getEligibleManagers,
 };

@@ -145,13 +145,6 @@ module.exports = (sequelize) => {
           },
         },
       },
-      expected_man_hours: {
-        type: DataTypes.DECIMAL(10, 2),
-        allowNull: true,
-        validate: {
-          min: { args: [0], msg: 'Expected man hours cannot be negative.' },
-        },
-      },
       is_billable: {
         type: DataTypes.BOOLEAN,
         allowNull: false,
@@ -178,13 +171,6 @@ module.exports = (sequelize) => {
           },
         },
       },
-      invoice_amount: {
-        type: DataTypes.DECIMAL(15, 2),
-        allowNull: true,
-        validate: {
-          min: { args: [0], msg: 'Invoice amount cannot be negative.' },
-        },
-      },
       status: {
         type: DataTypes.STRING(20),
         allowNull: false,
@@ -197,6 +183,14 @@ module.exports = (sequelize) => {
         },
       },
       is_deleted: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
+      },
+      // Centralised POs are auto-mapped to every NEW employee created
+      // afterward (see employeeServicePOMappingService.autoMapCentralisedServicePOs());
+      // flipping this flag never touches existing mappings either direction.
+      is_centralised: {
         type: DataTypes.BOOLEAN,
         allowNull: false,
         defaultValue: false,

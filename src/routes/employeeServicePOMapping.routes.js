@@ -8,6 +8,7 @@ const { validate } = require('../middlewares/validateRequest');
 const {
   assignMappingSchema,
   listMappingsQuerySchema,
+  saveEmployeeMappingsSchema,
 } = require('../validations/employeeServicePOMappingValidation');
 const controller = require('../controllers/employeeServicePOMappingController');
 
@@ -80,6 +81,85 @@ router.get(
   authenticate,
   validate(listMappingsQuerySchema, 'query'),
   controller.getEmployeeMappings
+);
+
+/**
+ * @swagger
+ * /employee-servicepo-mapping/employee/{employeeId}/options:
+ *   get:
+ *     summary: >
+ *       Get eligible Service PO options for an Employee, plus their current
+ *       mappings — data source for the "Manage Service PO Mapping" action on
+ *       Employee Master.
+ *     description: >
+ *       If the Employee holds Service PO Admin or Delivery Head (checked
+ *       server-side), every eligible Service PO in the caller's authorized
+ *       company/tenant scope is returned, regardless of the Employee's own
+ *       Business Unit. Every other role stays restricted to their own
+ *       Business Unit(s) plus Centralised/BU-less Service POs.
+ *     tags: [Employee Service PO Mapping]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: employeeId
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Eligible Service PO options and current mappings
+ *       404:
+ *         description: Employee not found
+ */
+router.get(
+  '/employee/:employeeId/options',
+  authenticate,
+  controller.getServicePOOptions
+);
+
+/**
+ * @swagger
+ * /employee-servicepo-mapping/employee/{employeeId}:
+ *   put:
+ *     summary: Save (replace) an Employee's Service PO mapping set
+ *     description: >
+ *       Replaces the Employee's mapping set to exactly `service_po_ids`.
+ *       Every id is revalidated server-side against the same eligibility
+ *       rule GET .../options uses; an ineligible id rejects the whole
+ *       request with 400. Existing mappings are diff-synced (activated/
+ *       deactivated), never hard-deleted.
+ *     tags: [Employee Service PO Mapping]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: employeeId
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [service_po_ids]
+ *             properties:
+ *               service_po_ids:
+ *                 type: array
+ *                 items: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Mappings saved
+ *       400:
+ *         description: One or more Service PO ids are not eligible for this Employee
+ *       404:
+ *         description: Employee not found
+ */
+router.put(
+  '/employee/:employeeId',
+  authenticate,
+  validate(saveEmployeeMappingsSchema),
+  controller.saveMappings
 );
 
 /**

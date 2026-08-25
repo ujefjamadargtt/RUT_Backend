@@ -1,11 +1,11 @@
 'use strict';
 
-const { Employee, ServicePO, sequelize } = require('../models');
+const { Op } = require('sequelize');
+const { Employee, ServicePO, Company, sequelize } = require('../models');
 const managerEmployeeMappingRepository = require('../repositories/managerEmployeeMappingRepository');
 const managerServicePOMappingRepository = require('../repositories/managerServicePOMappingRepository');
 const employeeServicePOMappingRepository = require('../repositories/employeeServicePOMappingRepository');
 const employeeServicePOMappingService = require('./employeeServicePOMappingService');
-const timesheetRepository = require('../repositories/timesheetRepository');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
 const { createAuditLog } = require('../middlewares/auditLog');
 const logger = require('../utils/logger');
@@ -221,47 +221,62 @@ const getTimesheets = async (managerUserId, employeeId, ownEmployeeId, companyId
 };
 
 /**
- * Manager "Approve" action — approves ONE pending timesheet entry belonging
- * to one of the Manager's own (Primary or Secondary) mapped Employees.
- * Reuses the exact same is_publish mechanism the existing Publish flow
- * already uses (timesheetRepository.publishById — the single-row analog of
- * the existing publishByImportId) — this is not a new approval mechanism,
- * just a new, Manager-scoped entry point into the same one.
+ * Manager "Approve" action — approves ONE pending Employee Work Log entry
+ * belonging to one of the Manager's own (Primary or Secondary) mapped
+ * Employees. Acts on `employee_work_logs`, exactly like rejectWorkLogEntry
+ * below (same id space, same table) — NOT the official `timesheets` table.
+ *
+ * This used to target `timesheets` via timesheetRepository.publishById,
+ * which was wrong: approval happens BEFORE Sync, on employee_work_logs (see
+ * this file's other approval paths — bulkApproveTimesheets, and
+ * rejectWorkLogEntry's own doc comment), and a not-yet-synced entry simply
+ * doesn't exist in `timesheets` yet — every such id 404'd with "Timesheet
+ * not found" the moment a Manager tried to approve one entry while another
+ * entry (elsewhere in the SAME list, built from employee_work_logs) had
+ * already been rejected via the sibling endpoint that correctly targets
+ * employee_work_logs. Only a currently-'pending' row can be approved this
+ * way — an already-approved/rejected/synced row 409s rather than silently
+ * re-approving.
  *
  * @param {number} managerUserId
- * @param {number} timesheetId
+ * @param {number} id - employee_work_logs.id
  * @param {number} companyId
  * @param {number} actorId
  * @param {string} ipAddress
- * @returns {Promise<Timesheet>}
+ * @returns {Promise<EmployeeWorkLog>}
  */
-const approveTimesheet = async (managerUserId, timesheetId, companyId, actorId, ipAddress) => {
-  const timesheet = await timesheetRepository.findById(timesheetId, companyId);
-  if (!timesheet) {
-    throw notFoundError('Timesheet not found.');
+const approveTimesheet = async (managerUserId, id, companyId, actorId, ipAddress) => {
+  const entry = await employeeWorkLogRepository.findById(id, companyId);
+  if (!entry) {
+    throw notFoundError(`Work log entry #${id} was not found.`);
   }
 
-  await assertOwnEmployee(managerUserId, timesheet.employee_id, companyId);
+  await assertOwnEmployee(managerUserId, entry.employee_id, companyId);
 
-  if (timesheet.is_publish) {
-    throw conflictError('This timesheet has already been approved.');
+  if (entry.status !== 'pending') {
+    throw conflictError(`Only a pending work log entry can be approved (current status: ${entry.status}).`);
   }
 
-  await timesheetRepository.publishById(timesheetId, companyId);
+  const approved = await employeeWorkLogRepository.approveById(id, companyId);
+  if (!approved) {
+    // Lost a race against another action (e.g. a concurrent reject/resubmit)
+    // between the status check above and the atomic update itself.
+    throw conflictError(`Only a pending work log entry can be approved (current status: ${entry.status}).`);
+  }
 
   await createAuditLog(
     actorId,
     'APPROVE',
-    'timesheets',
-    timesheetId,
-    { is_publish: false },
-    { is_publish: true },
+    'employee_work_logs',
+    id,
+    { status: 'pending' },
+    { status: 'approved' },
     ipAddress
   );
 
-  logger.info('Manager approved Employee timesheet', { managerUserId, timesheetId, employeeId: timesheet.employee_id, actorId });
+  logger.info('Manager approved Employee Work Log entry', { managerUserId, workLogId: id, employeeId: entry.employee_id, actorId });
 
-  return timesheetRepository.findById(timesheetId, companyId);
+  return approved;
 };
 
 /**
@@ -330,7 +345,16 @@ const getApprovalSummary = async (managerUserId, employeeId, ownEmployeeId, comp
 
   const buckets = Array.from(bucketsByKey.values()).map((bucket) => {
     const totalHours = bucket.entries.reduce((sum, e) => sum + (parseFloat(e.hours) || 0), 0);
-    const approvalStatus = bucket.entries.some((e) => e.status === 'pending') ? 'pending' : 'approved';
+    // Priority: any 'pending' row makes the whole bucket 'pending' (still
+    // needs Manager action); failing that, any 'rejected' row makes it
+    // 'rejected' (needs Employee resubmit, not "approved" — a rejected-only
+    // bucket must never read as approved); otherwise every row is
+    // 'approved'/'synced', so the bucket is 'approved'.
+    const approvalStatus = bucket.entries.some((e) => e.status === 'pending')
+      ? 'pending'
+      : bucket.entries.some((e) => e.status === 'rejected')
+        ? 'rejected'
+        : 'approved';
     return {
       ...bucket,
       total_hours: totalHours,
@@ -413,6 +437,57 @@ const bulkApproveTimesheets = async (managerUserId, body, companyId, actorId, ip
 };
 
 /**
+ * Manager "Reject" action — rejects ONE pending Employee Work Log entry
+ * belonging to one of the Manager's own (Primary or Secondary) mapped
+ * Employees, with a mandatory remark. Only a currently-'pending' row can be
+ * rejected (PENDING -> REJECTED is the only valid entry into this status —
+ * see EmployeeWorkLog.js's status doc comment); an already-approved/
+ * rejected/synced row 409s rather than silently overwriting its state.
+ * Symmetric with approveTimesheet/bulkApproveTimesheets above, but acts on
+ * employee_work_logs (where 'pending' actually lives) rather than
+ * `timesheets`.
+ *
+ * @param {number} managerUserId
+ * @param {number} id - employee_work_logs.id
+ * @param {string} remark - mandatory rejection reason (validated non-empty
+ *   by managerSelfServiceValidation.rejectWorkLogSchema before this runs)
+ * @param {number} companyId
+ * @param {number} actorId
+ * @param {string} ipAddress
+ * @returns {Promise<EmployeeWorkLog>}
+ */
+const rejectWorkLogEntry = async (managerUserId, id, remark, companyId, actorId, ipAddress) => {
+  const entry = await employeeWorkLogRepository.findById(id, companyId);
+  if (!entry) {
+    throw notFoundError(`Work log entry #${id} was not found.`);
+  }
+
+  await assertOwnEmployee(managerUserId, entry.employee_id, companyId);
+
+  if (entry.status !== 'pending') {
+    throw conflictError(`Only a pending work log entry can be rejected (current status: ${entry.status}).`);
+  }
+
+  const rejected = await employeeWorkLogRepository.rejectById(id, companyId, { remark, rejectedBy: actorId });
+
+  await createAuditLog(
+    actorId,
+    'REJECT',
+    'employee_work_logs',
+    id,
+    { status: 'pending' },
+    { status: 'rejected', remark },
+    ipAddress
+  );
+
+  logger.info('Manager rejected Employee Work Log entry', {
+    managerUserId, workLogId: id, employeeId: entry.employee_id, actorId,
+  });
+
+  return rejected;
+};
+
+/**
  * Remove a Service PO assignment from one of the Manager's own Employees —
  * same scoping check, then delegates to the existing removeMapping().
  *
@@ -425,7 +500,7 @@ const bulkApproveTimesheets = async (managerUserId, body, companyId, actorId, ip
 const removeServicePOFromEmployee = async (managerUserId, employeeId, servicePOId, companyId) => {
   await assertOwnEmployee(managerUserId, employeeId, companyId);
 
-  const existing = await employeeServicePOMappingRepository.findByEmployeeAndPO(employeeId, servicePOId, companyId);
+  const existing = await employeeServicePOMappingRepository.findByEmployeeAndPO(employeeId, servicePOId);
   if (!existing) {
     const err = new Error('This Service PO is not assigned to this Employee.');
     err.statusCode = 404;
@@ -451,7 +526,18 @@ const removeServicePOFromEmployee = async (managerUserId, employeeId, servicePOI
  * @returns {Promise<ManagerEmployeeMapping>}
  */
 const mapEmployeeToSelf = async (managerUserId, employeeId, companyId, actorId) => {
-  const employee = await Employee.findOne({ where: { id: employeeId, company_id: companyId, is_deleted: false } });
+  // ORs the legacy company_id column with an active employee_business_units
+  // membership — an Employee whose company_id is null but who holds a real
+  // BU grant for this company (common for an Admin-created Employee) must
+  // still resolve, or a Manager can never self-map to them.
+  const employee = await Employee.findOne({
+    where: {
+      id: employeeId,
+      is_deleted: false,
+      [Op.or]: [{ company_id: companyId }, { '$businessUnits.id$': companyId }],
+    },
+    include: [{ model: Company, as: 'businessUnits', attributes: [], through: { attributes: [] } }],
+  });
   if (!employee) {
     throw notFoundError('Employee not found in this company.');
   }
@@ -507,6 +593,7 @@ module.exports = {
   approveTimesheet,
   getApprovalSummary,
   bulkApproveTimesheets,
+  rejectWorkLogEntry,
   assignServicePOToEmployee,
   removeServicePOFromEmployee,
   mapEmployeeToSelf,

@@ -36,6 +36,11 @@ const seqValue = Joi.number().integer().positive().messages({
   'number.positive': 'seq must be a positive integer.',
 });
 
+const categoryId = Joi.number().integer().positive().allow(null).messages({
+  'number.base': 'category_id must be a positive integer or null.',
+  'number.positive': 'category_id must be a positive integer or null.',
+});
+
 /**
  * POST /forms
  * module_name omitted or null => create a module (form_name is the
@@ -48,6 +53,10 @@ const createFormSchema = Joi.object({
   }),
   module_name: moduleName.allow(null).default(null),
   status: status.default('active'),
+  // Only meaningful when module_name is a string (creating a form, not a
+  // module) — assigns the new form directly under a category instead of
+  // straight under the module. Omitted/null => Module -> Form (unchanged).
+  category_id: categoryId,
 });
 
 /**
@@ -121,6 +130,23 @@ const reorderFormsSchema = Joi.object({
   items: reorderItemsSchema,
 });
 
+/**
+ * PUT /forms/:id/move
+ * module_id moves the form to a different module (by the module row's own
+ * id — unlike create/update, which address a module by name); category_id
+ * assigns/reassigns/clears (null) its category. At least one of the two
+ * must be given. Renaming and status changes are NOT part of this
+ * endpoint — use PUT /forms/:id for those.
+ */
+const moveFormSchema = Joi.object({
+  module_id: positiveId,
+  category_id: categoryId,
+})
+  .min(1)
+  .messages({
+    'object.min': 'At least one of module_id or category_id must be provided.',
+  });
+
 module.exports = {
   createFormSchema,
   updateFormSchema,
@@ -128,4 +154,5 @@ module.exports = {
   listModulesSchema,
   reorderModulesSchema,
   reorderFormsSchema,
+  moveFormSchema,
 };

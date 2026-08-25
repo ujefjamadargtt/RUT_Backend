@@ -58,18 +58,28 @@ function findDangerousKey(value, depth = 0) {
   return null;
 }
 
+// Password-shaped fields are secrets, not display text — trimming or
+// HTML-escaping them would silently store/compare a different string than
+// what the user actually typed (e.g. a password containing "<" or ">"
+// would hash as "&lt;"/"&gt;" on write but be compared against the escaped
+// form again on every future read, which happens to still match... except
+// when the value was NEVER sanitized on write, such as employeeService.js's
+// server-generated temporary password, hashed raw). Left untouched here.
+const PASSWORD_KEY_PATTERN = /password/i;
+
 /**
  * Recursively trim + HTML-sanitize every string in a body/query/params
  * value, leaving numbers/booleans/null/dates and object/array shape intact.
+ * A key matching PASSWORD_KEY_PATTERN is passed through unchanged instead.
  */
-function sanitizeValue(value, depth = 0) {
+function sanitizeValue(value, depth = 0, isPasswordField = false) {
   if (depth > 10) return value;
-  if (typeof value === 'string') return xss(value.trim());
-  if (Array.isArray(value)) return value.map((item) => sanitizeValue(item, depth + 1));
+  if (typeof value === 'string') return isPasswordField ? value : xss(value.trim());
+  if (Array.isArray(value)) return value.map((item) => sanitizeValue(item, depth + 1, isPasswordField));
   if (value && typeof value === 'object') {
     const out = {};
     for (const key of Object.keys(value)) {
-      out[key] = sanitizeValue(value[key], depth + 1);
+      out[key] = sanitizeValue(value[key], depth + 1, PASSWORD_KEY_PATTERN.test(key));
     }
     return out;
   }

@@ -5,13 +5,16 @@ const router = express.Router();
 
 const authenticate = require('../middlewares/auth');
 const authorize = require('../middlewares/authorize');
+const requireCompanyScope = require('../middlewares/requireCompanyScope');
 const { validate } = require('../middlewares/validateRequest');
 const {
   replaceDailyEntriesSchema,
   updateEntrySchema,
+  addTimeEntriesSchema,
   monthYearQuerySchema,
   monthlySummaryQuerySchema,
   dailyQuerySchema,
+  listEntriesQuerySchema,
 } = require('../validations/employeeTimesheetValidation');
 const controller = require('../controllers/employeeTimesheetController');
 
@@ -53,6 +56,7 @@ const controller = require('../controllers/employeeTimesheetController');
 router.get(
   '/calendar',
   authenticate,
+  requireCompanyScope,
   authorize('employee.view_timesheet'),
   validate(monthYearQuerySchema, 'query'),
   controller.getCalendar
@@ -83,6 +87,7 @@ router.get(
 router.get(
   '/daily',
   authenticate,
+  requireCompanyScope,
   authorize('employee.view_timesheet'),
   validate(dailyQuerySchema, 'query'),
   controller.getDaily
@@ -125,6 +130,7 @@ router.get(
 router.get(
   '/monthly-summary',
   authenticate,
+  requireCompanyScope,
   authorize('employee.view_timesheet'),
   validate(monthlySummaryQuerySchema, 'query'),
   controller.getMonthlySummary
@@ -145,8 +151,54 @@ router.get(
 router.get(
   '/projects',
   authenticate,
+  requireCompanyScope,
   authorize('employee.view_timesheet'),
   controller.getProjects
+);
+
+/**
+ * @swagger
+ * /employee-timesheets/entries:
+ *   get:
+ *     summary: >
+ *       Flat list of the caller's own work log entries — id, status
+ *       (pending/approved/rejected/synced), and (for rejected rows)
+ *       rejection_remark/rejected_by_name/rejected_at. Backs the Employee
+ *       Work Log list/history view and is how the Employee discovers a
+ *       rejected entry's id for Resubmit/Delete.
+ *     tags: [Employee Timesheet]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: startDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: endDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, enum: [pending, approved, rejected, synced] }
+ *       - in: query
+ *         name: poId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 20 }
+ *     responses:
+ *       200:
+ *         description: Paginated list of the caller's own work log entries
+ */
+router.get(
+  '/entries',
+  authenticate,
+  requireCompanyScope,
+  authorize('employee.view_timesheet'),
+  validate(listEntriesQuerySchema, 'query'),
+  controller.getEntries
 );
 
 /**
@@ -195,6 +247,7 @@ router.get(
 router.post(
   '/entries',
   authenticate,
+  requireCompanyScope,
   authorize('employee.fill_worklog'),
   validate(replaceDailyEntriesSchema),
   controller.createEntry
@@ -222,9 +275,101 @@ router.post(
 router.put(
   '/entries/:id',
   authenticate,
+  requireCompanyScope,
   authorize('employee.fill_worklog'),
   validate(updateEntrySchema),
   controller.updateEntry
+);
+
+/**
+ * @swagger
+ * /employee-timesheets/time-entries:
+ *   post:
+ *     summary: >
+ *       The dedicated Time Entry form. ADDS the given Start Time/End Time
+ *       segments to whatever this Module/Task (service_po_id +
+ *       hierarchy_node_id) already has logged for this date — it never
+ *       replaces or requires resending segments saved by an earlier call
+ *       (this endpoint, or a previous session). Find-or-creates the
+ *       underlying work log entry: if this is the first time this
+ *       Module/Task is logged on this date, `description` is required and a
+ *       new entry is created; if an entry already exists, only the new
+ *       segments are inserted and `hours` becomes the old total plus the new
+ *       segments' total. Overlap is checked against the FULL combined set
+ *       (already-saved + new), not just the segments in this request.
+ *     tags: [Employee Timesheet]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [work_date, service_po_id, time_entries]
+ *             properties:
+ *               work_date: { type: string, format: date }
+ *               service_po_id: { type: integer }
+ *               sub_project_id: { type: integer, nullable: true }
+ *               hierarchy_node_id: { type: integer, nullable: true }
+ *               time_entries:
+ *                 type: array
+ *                 minItems: 1
+ *                 items:
+ *                   type: object
+ *                   required: [start_time, end_time]
+ *                   properties:
+ *                     start_time: { type: string, example: "09:30" }
+ *                     end_time: { type: string, example: "10:20" }
+ *               description: { type: string, description: "Required only when no entry exists yet for this Module/Task/date" }
+ *     responses:
+ *       200:
+ *         description: Entry after the add — includes the FULL time_entries breakdown (old + new)
+ *       400:
+ *         description: Overlapping segments, missing description on first log, or over the 12-hour/day cap
+ */
+router.post(
+  '/time-entries',
+  authenticate,
+  requireCompanyScope,
+  authorize('employee.fill_worklog'),
+  validate(addTimeEntriesSchema),
+  controller.addTimeEntries
+);
+
+/**
+ * @swagger
+ * /employee-timesheets/entries/{id}/resubmit:
+ *   put:
+ *     summary: >
+ *       Resubmit a rejected work log entry — the only way to move
+ *       REJECTED -> PENDING. No request body: the backend always sets
+ *       status to 'pending' itself, never accepting a caller-supplied
+ *       status. Re-runs the same business validations (project mapping,
+ *       PO/sub-project eligibility, hierarchy node ownership, 12-hour/day
+ *       cap, Daily/Monthly exclusion) a fresh submission would.
+ *     tags: [Employee Timesheet]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Entry resubmitted (status set to 'pending')
+ *       404:
+ *         description: Not found (or not owned by this employee)
+ *       409:
+ *         description: Entry is not currently rejected
+ */
+router.put(
+  '/entries/:id/resubmit',
+  authenticate,
+  requireCompanyScope,
+  authorize('employee.fill_worklog'),
+  controller.resubmitEntry
 );
 
 /**
@@ -249,6 +394,7 @@ router.put(
 router.delete(
   '/entries/:id',
   authenticate,
+  requireCompanyScope,
   authorize('employee.fill_worklog'),
   controller.deleteEntry
 );

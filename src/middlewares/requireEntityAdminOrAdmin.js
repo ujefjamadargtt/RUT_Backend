@@ -61,7 +61,7 @@ const requireEntityAdminOrAdmin = async (req, res, next) => {
     }
 
     const entities = await Entity.findAll({
-      where: { entity_admin_user_id: req.userId, is_deleted: false },
+      where: { entity_admin_employee_id: req.employeeId, is_deleted: false },
       attributes: ['id'],
     });
     req.entityIds = entities.map((e) => e.id);

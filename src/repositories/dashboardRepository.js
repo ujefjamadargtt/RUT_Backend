@@ -9,13 +9,27 @@ const { QueryTypes } = require('sequelize');
  * Designed to be called in parallel by the service layer (Promise.all).
  */
 
+// An Employee created after the Employee-Business-Unit redesign
+// (database/migrations/20260866_create_employee_business_units.sql) never
+// gets its own `employees.company_id` populated; its Company/BU membership
+// lives exclusively in `employee_business_units`. Matching on `company_id`
+// alone silently undercounts the workforce. Same OR-with-legacy-column
+// pattern as employeeRepository.js's employeeScope().
+const EMPLOYEE_COMPANY_SCOPE_SQL = `(
+  company_id = :companyId
+  OR id IN (
+    SELECT employee_id FROM employee_business_units
+    WHERE business_unit_id = :companyId AND status = 'active'
+  )
+)`;
+
 /**
  * Total employees ever registered (regardless of status).
  * @returns {Promise<number>}
  */
 async function getTotalEmployees(companyId) {
   const [result] = await sequelize.query(
-    'SELECT COUNT(*) AS total FROM employees WHERE company_id = :companyId',
+    `SELECT COUNT(*) AS total FROM employees WHERE ${EMPLOYEE_COMPANY_SCOPE_SQL}`,
     { replacements: { companyId }, type: QueryTypes.SELECT }
   );
   return parseInt(result.total, 10);
@@ -27,7 +41,7 @@ async function getTotalEmployees(companyId) {
  */
 async function getActiveEmployees(companyId) {
   const [result] = await sequelize.query(
-    "SELECT COUNT(*) AS total FROM employees WHERE status = 'active' AND company_id = :companyId",
+    `SELECT COUNT(*) AS total FROM employees WHERE status = 'active' AND is_deleted = false AND ${EMPLOYEE_COMPANY_SCOPE_SQL}`,
     { replacements: { companyId }, type: QueryTypes.SELECT }
   );
   return parseInt(result.total, 10);
@@ -148,112 +162,6 @@ async function getCurrentMonthBillableSplit(month, year, hoursSource, roleId, co
     billable_hours: parseFloat(result.billable_hours) || 0,
     non_billable_hours: parseFloat(result.non_billable_hours) || 0,
   };
-}
-
-/**
- * Overall utilisation percentage for the given month/year:
- *   SUM(actual hours logged on active POs) / SUM(expected_man_hours of those POs) * 100
- *
- * Only POs that have expected_man_hours set are included in the denominator.
- *
- * @param {number} month
- * @param {number} year
- * @returns {Promise<number|null>} Rounded to 2 decimal places, or null if no data
- */
-async function getOverallUtilisation(month, year, hoursSource, roleId, companyId) {
-  // hoursSource = 'O' -> original hours_logged. Anything else/default
-  // (including no roleId, or roleId != 5) -> modified_hours. roleId plays no
-  // part in this selection — only hoursSource does.
-  const hoursCol = (hoursSource === 'O')
-    ? 't.hours_logged'
-    : 'COALESCE(t.modified_hours, t.hours_logged)';
-  // Role ID 5 only: exclude unpublished timesheet rows from the join.
-  const publishGuard = Number(roleId) === 5
-    ? `AND EXISTS (
-         SELECT 1 FROM timesheet_import_history h
-         WHERE h.id = t.timesheet_import_id AND h.is_publish = true
-       )`
-    : '';
-  const [result] = await sequelize.query(
-    `SELECT
-       COALESCE(SUM(${hoursCol}), 0)         AS actual_hours,
-       COALESCE(SUM(sp.expected_man_hours), 0)  AS expected_hours
-     FROM service_pos sp
-     LEFT JOIN timesheets t
-       ON  t.service_po_id = sp.id
-       AND EXTRACT(MONTH FROM t.timesheet_date) = :month
-       AND EXTRACT(YEAR  FROM t.timesheet_date) = :year
-       ${publishGuard}
-     WHERE sp.status IN ('in-progress', 'on-hold', 'pending')
-       AND sp.expected_man_hours IS NOT NULL
-       AND sp.expected_man_hours > 0
-       AND sp.company_id = :companyId`,
-    {
-      replacements: { month, year, companyId },
-      type: QueryTypes.SELECT,
-    }
-  );
-
-  const actual = parseFloat(result.actual_hours) || 0;
-  const expected = parseFloat(result.expected_hours) || 0;
-
-  if (expected === 0) return null;
-  return Math.round((actual / expected) * 100 * 100) / 100;
-}
-
-/**
- * Same as getOverallUtilisation() above (actual hours logged vs. each
- * in-progress PO's total expected_man_hours), scoped to an arbitrary date
- * window instead of a single calendar month. This is a distinct metric from
- * the Analytics Dashboard's existing tiles.utilization_pct (billable hours /
- * total hours logged) — this one measures capacity usage against contracted
- * PO hours.
- *
- * @param {string} startDate - YYYY-MM-DD
- * @param {string} endDate   - YYYY-MM-DD
- * @returns {Promise<number|null>} Rounded to 2 decimal places, or null if no data
- */
-async function getOverallUtilisationForPeriod(startDate, endDate, hoursSource, roleId, companyId) {
-  // hoursSource = 'O' -> original hours_logged. Anything else/default
-  // (including no roleId, or roleId != 5) -> modified_hours. roleId plays no
-  // part in this selection — only hoursSource does.
-  const hoursCol = (hoursSource === 'O')
-    ? 't.hours_logged'
-    : 'COALESCE(t.modified_hours, t.hours_logged)';
-  // Role ID 5 only: exclude unpublished timesheet rows from the join so a
-  // window spanning several months still reflects whichever of those months
-  // ARE published, instead of an all-or-nothing block on the whole window.
-  const publishGuard = Number(roleId) === 5
-    ? `AND EXISTS (
-         SELECT 1 FROM timesheet_import_history h
-         WHERE h.id = t.timesheet_import_id AND h.is_publish = true
-       )`
-    : '';
-  const [result] = await sequelize.query(
-    `SELECT
-       COALESCE(SUM(${hoursCol}), 0)         AS actual_hours,
-       COALESCE(SUM(sp.expected_man_hours), 0)  AS expected_hours
-     FROM service_pos sp
-     LEFT JOIN timesheets t
-       ON  t.service_po_id = sp.id
-       AND t.timesheet_date >= :startDate
-       AND t.timesheet_date <= :endDate
-       ${publishGuard}
-     WHERE sp.status IN ('in-progress', 'on-hold', 'pending')
-       AND sp.expected_man_hours IS NOT NULL
-       AND sp.expected_man_hours > 0
-       AND sp.company_id = :companyId`,
-    {
-      replacements: { startDate, endDate, companyId },
-      type: QueryTypes.SELECT,
-    }
-  );
-
-  const actual = parseFloat(result.actual_hours) || 0;
-  const expected = parseFloat(result.expected_hours) || 0;
-
-  if (expected === 0) return null;
-  return Math.round((actual / expected) * 100 * 100) / 100;
 }
 
 /**
@@ -528,7 +436,7 @@ async function getTopPOsByHours(hoursSource, roleId, companyId) {
        )`
     : '';
   return sequelize.query(
-    `SELECT id, service_po_code, service_po_name, client_name, expected_man_hours,
+    `SELECT id, service_po_code, service_po_name, client_name,
             category_name, total_hours_logged
      FROM (
        SELECT
@@ -536,7 +444,6 @@ async function getTopPOsByHours(hoursSource, roleId, companyId) {
          sp.service_po_code,
          sp.service_po_name,
          c.client_name,
-         sp.expected_man_hours,
          sc.name AS category_name,
          COALESCE(SUM(${hoursCol}), 0) AS total_hours_logged,
          ROW_NUMBER() OVER (
@@ -550,7 +457,7 @@ async function getTopPOsByHours(hoursSource, roleId, companyId) {
        LEFT  JOIN timesheets t         ON t.service_po_id = sp.id
                                        ${publishGuard}
        WHERE sp.company_id = :companyId
-       GROUP BY sp.id, sp.service_po_code, sp.service_po_name, c.client_name, sp.expected_man_hours, sc.name
+       GROUP BY sp.id, sp.service_po_code, sp.service_po_name, c.client_name, sc.name
      ) ranked
      WHERE rn <= 5
      ORDER BY category_name, total_hours_logged DESC`,
@@ -585,7 +492,7 @@ async function getTopPOsByHoursForPeriod(startDate, endDate, hoursSource, roleId
        )`
     : '';
   return sequelize.query(
-    `SELECT id, service_po_code, service_po_name, client_name, expected_man_hours,
+    `SELECT id, service_po_code, service_po_name, client_name,
             category_name, report_bucket_key, total_hours_logged
      FROM (
        SELECT
@@ -593,7 +500,6 @@ async function getTopPOsByHoursForPeriod(startDate, endDate, hoursSource, roleId
          sp.service_po_code,
          sp.service_po_name,
          c.client_name,
-         sp.expected_man_hours,
          sc.name AS category_name,
          sc.report_bucket_key,
          COALESCE(SUM(${hoursCol}), 0) AS total_hours_logged,
@@ -610,7 +516,7 @@ async function getTopPOsByHoursForPeriod(startDate, endDate, hoursSource, roleId
                                        AND t.timesheet_date <= :endDate
                                        ${publishGuard}
        WHERE sp.company_id = :companyId
-       GROUP BY sp.id, sp.service_po_code, sp.service_po_name, c.client_name, sp.expected_man_hours, sc.name, sc.report_bucket_key
+       GROUP BY sp.id, sp.service_po_code, sp.service_po_name, c.client_name, sc.name, sc.report_bucket_key
      ) ranked
      WHERE rn <= 5
      ORDER BY category_name, total_hours_logged DESC`,
@@ -2389,8 +2295,6 @@ module.exports = {
   getAnalyticsBenchDetail,
   getEmployeesByPOForPeriod,
   getEmployeeBillableBreakdownForPeriod,
-  getOverallUtilisation,
-  getOverallUtilisationForPeriod,
   getTotalRevenue,
   getTotalBudgetCost,
   getRecentTimesheetActivity,

@@ -9,6 +9,7 @@ const {
   Client,
   ServiceType,
   ServiceCategory,
+  Company,
   sequelize,
 } = require('../models');
 
@@ -28,18 +29,54 @@ const {
 const ELIGIBLE_PO_STATUSES = ['in-progress', 'on-hold', 'pending', 'completed'];
 
 /**
+ * Builds a `company_id` WHERE fragment — Op.in-aware for an array (a
+ * company-less Admin/Entity Admin's resolved owned-Company-id scope, see
+ * companyAccessControlService.resolveActorCompanyScope), plain equality for
+ * a number. Deliberately no "omit the filter when undefined" fallback — see
+ * timesheetImportRepository.js's identical helper's doc comment for why:
+ * this closes the same cross-tenant leak class for update()/
+ * publishByImportId()/deleteByImportIds() below.
+ *
+ * @param {number|number[]} companyId
+ * @returns {object}
+ */
+function companyScope(companyId) {
+  if (Array.isArray(companyId)) {
+    return { company_id: { [Op.in]: companyId } };
+  }
+  return { company_id: companyId };
+}
+
+/**
  * Fetch a single active, non-deleted employee by ID — the same eligibility
  * rule the Excel import's validateRows() applies when resolving an employee
  * by employee_code, just looked up directly by ID since the manual-entry API
  * already has a concrete ID (e.g. from an Admin Panel dropdown) rather than
  * free text needing to be matched.
  *
+ * "Belongs to this company" is checked two ways, same as
+ * servicePOService.assertValidDeliveryHead()/allocateResources(): the
+ * legacy single `employees.company_id` column OR a row in
+ * `employee_business_units` (the multi-BU membership table — see
+ * models/index.js's Employee<->Company belongsToMany doc comment). An
+ * Employee whose `company_id` is null but who holds an active BU grant for
+ * this exact company (common for an Admin-created Employee) must still
+ * resolve here — without this OR, a brand-new Employee could never log a
+ * work log or timesheet entry against their own assigned Business Unit.
+ *
  * @param {number} id
+ * @param {number} companyId
  * @returns {Promise<Employee|null>}
  */
 const findEligibleEmployeeById = async (id, companyId) => {
   return Employee.findOne({
-    where: { id, status: 'active', is_deleted: false, company_id: companyId },
+    where: {
+      id,
+      status: 'active',
+      is_deleted: false,
+      [Op.or]: [{ company_id: companyId }, { '$businessUnits.id$': companyId }],
+    },
+    include: [{ model: Company, as: 'businessUnits', attributes: [], through: { attributes: [] } }],
   });
 };
 
@@ -53,17 +90,43 @@ const findEligibleEmployeeById = async (id, companyId) => {
  * selected Service Category, exactly as the import implicitly guarantees by
  * only ever reading these values off the one resolved PO.
  *
+ * "Belongs to this company" is checked two ways, same as
+ * findEligibleEmployeeById() above: a plain company_id match OR a BU-less
+ * Centralised Service PO (company_id NULL — see
+ * employeeServicePOMappingService.autoMapCentralisedServicePOs()). Without
+ * this OR, an employee logging time against a Centralised PO their own
+ * mapping already lists as assigned would get "Service PO #X was not found
+ * or is not available for timesheet logging."
+ *
+ * `skipCompanyScope: true` drops the company filter entirely (still
+ * enforcing status/is_deleted) — used ONLY by the Employee Self Timesheet
+ * write paths (employeeTimesheetService.js/employeeMonthlyWorkLogService.js),
+ * which call this immediately after employeeTimesheetService.
+ * assertProjectMapped() has already confirmed an ACTIVE
+ * employee_servicepo_mapping row for this exact (employeeId, servicePOId)
+ * pair — itself sufficient authorization even when the PO belongs to a
+ * different Business Unit than the employee's own (cross-BU resourcing,
+ * intentionally allowed by employeeServicePOMappingService.assign()). The
+ * Admin manual-entry path (timesheetService.createTimesheet) never sets
+ * this flag, so its company enforcement is unchanged — that path has no
+ * mapping-table check of its own to fall back on.
+ *
  * @param {number} id
+ * @param {number|number[]} companyId
+ * @param {{ skipCompanyScope?: boolean }} [options]
  * @returns {Promise<ServicePO|null>}
  */
-const findEligibleServicePOById = async (id, companyId) => {
+const findEligibleServicePOById = async (id, companyId, { skipCompanyScope = false } = {}) => {
+  const where = {
+    id,
+    status: { [Op.in]: ELIGIBLE_PO_STATUSES },
+    is_deleted: false,
+  };
+  if (!skipCompanyScope) {
+    where[Op.or] = [companyScope(companyId), { company_id: null }];
+  }
   return ServicePO.findOne({
-    where: {
-      id,
-      status: { [Op.in]: ELIGIBLE_PO_STATUSES },
-      is_deleted: false,
-      company_id: companyId,
-    },
+    where,
     include: [
       {
         model: Client,
@@ -310,8 +373,7 @@ const bulkCreate = async (records, transaction = null) => {
  * @returns {Promise<Timesheet|null>}
  */
 const update = async (id, data, transaction = null, companyId) => {
-  const where = { id };
-  if (companyId !== undefined) where.company_id = companyId;
+  const where = { id, ...companyScope(companyId) };
   const timesheet = await Timesheet.findOne({ where, ...(transaction ? { transaction } : {}) });
   if (!timesheet) return null;
   return timesheet.update(data, transaction ? { transaction } : {});
@@ -327,34 +389,11 @@ const update = async (id, data, transaction = null, companyId) => {
  * @returns {Promise<number>} number of rows updated
  */
 const publishByImportId = async (importId, transaction = null, companyId) => {
-  const where = { timesheet_import_id: importId };
-  if (companyId !== undefined) where.company_id = companyId;
+  const where = { timesheet_import_id: importId, ...companyScope(companyId) };
   const [count] = await Timesheet.update(
     { is_publish: true },
     {
       where,
-      ...(transaction ? { transaction } : {}),
-    }
-  );
-  return count;
-};
-
-/**
- * Force-publish a SINGLE timesheet row — the per-row analog of
- * publishByImportId above, used by the Manager "Approve" action
- * (src/services/managerSelfServiceService.js's approveTimesheet()) to
- * approve one employee's one timesheet entry without touching every other
- * row in that entry's import batch.
- * @param {number} id
- * @param {number} companyId
- * @param {object} [transaction]
- * @returns {Promise<number>} number of rows updated (0 or 1)
- */
-const publishById = async (id, companyId, transaction = null) => {
-  const [count] = await Timesheet.update(
-    { is_publish: true },
-    {
-      where: { id, company_id: companyId },
       ...(transaction ? { transaction } : {}),
     }
   );
@@ -383,8 +422,7 @@ const deleteById = async (id, companyId) => {
  */
 const deleteByImportIds = async (importIds, transaction = null, companyId) => {
   if (!importIds || importIds.length === 0) return 0;
-  const where = { timesheet_import_id: { [Op.in]: importIds } };
-  if (companyId !== undefined) where.company_id = companyId;
+  const where = { timesheet_import_id: { [Op.in]: importIds }, ...companyScope(companyId) };
   return Timesheet.destroy({
     where,
     ...(transaction ? { transaction } : {}),
@@ -665,7 +703,6 @@ module.exports = {
   deleteByMonth,
   update,
   publishByImportId,
-  publishById,
   deleteById,
   deleteByImportIds,
   getSummaryByEmployee,
