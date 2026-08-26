@@ -12,12 +12,77 @@ const router = express.Router();
 
 const projectController = require('../controllers/projectController');
 const authenticate = require('../middlewares/auth');
+const { importLimiter } = require('../middlewares/rateLimiters');
 const { validate } = require('../middlewares/validateRequest');
 const {
   createProjectSchema,
   updateProjectSchema,
   listProjectsQuerySchema,
 } = require('../validations/projectValidation');
+const { handleProjectUpload } = require('../middlewares/upload');
+
+// ─── Import projects from Excel/CSV (before /:id to avoid route shadowing) ────
+/**
+ * @swagger
+ * /projects/import:
+ *   post:
+ *     summary: Import projects from an Excel or CSV file
+ *     tags: [Projects]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required: [file]
+ *             properties:
+ *               file:
+ *                 type: string
+ *                 format: binary
+ *                 description: .xlsx or .csv file. Required columns - "Project Name" and either "Client Code" or "Client Name". Optional columns - "Project Code", "Description", "Status".
+ *               company_id:
+ *                 type: integer
+ *                 description: Optional. Only used for a company-less actor (Admin/Entity Admin) to import the whole file into one of their own Business Units. A BU-scoped actor (BU Admin and below) always has every row created under their own Business Unit regardless of this field.
+ *     responses:
+ *       200:
+ *         description: Import summary
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 total:
+ *                   type: integer
+ *                   description: Total non-empty rows in file
+ *                 imported:
+ *                   type: integer
+ *                   description: Successfully inserted rows
+ *                 skipped:
+ *                   type: integer
+ *                   description: Duplicate rows skipped
+ *                 error_rows:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       row_number: { type: integer }
+ *                       row_data:   { type: object }
+ *                       errors:     { type: array, items: { type: string } }
+ *                       skipped:    { type: boolean }
+ *       400:
+ *         description: No file uploaded
+ *       422:
+ *         description: File parse or header error
+ */
+router.post(
+  '/import',
+  authenticate,
+  importLimiter,
+  handleProjectUpload,
+  projectController.importProjects
+);
 
 // ─── Active projects dropdown (must come before /:id to avoid route shadowing) ──
 /**

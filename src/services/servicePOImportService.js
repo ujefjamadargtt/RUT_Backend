@@ -1,12 +1,13 @@
 'use strict';
 
 const xlsx = require('xlsx');
-const { sequelize, Client, ServiceType, ServiceCategory, ServicePO, Project, Employee, User, Role } = require('../models');
+const { Op } = require('sequelize');
+const { sequelize, Client, ServiceType, ServiceCategory, ServicePO, Project, Employee, User, Role, Company } = require('../models');
 const servicePORepository = require('../repositories/servicePORepository');
 const servicePOHierarchyRepository = require('../repositories/servicePOHierarchyRepository');
 const { generatePOCode } = require('../helpers/codeGenerator');
 const { createServicePOSchema } = require('../validations/servicePOValidation');
-const { resolveCreateCompanyId } = require('./companyAccessControlService');
+const { resolveOwnedCompanyIds } = require('./companyAccessControlService');
 const logger = require('../utils/logger');
 
 // Sentinel stored in ctx.employeeByName when two employees in the same
@@ -89,6 +90,17 @@ const HEADER_MAP = {
   'hierarchy child': 'hierarchy_child',
   'hierarchy_child': 'hierarchy_child',
   'child': 'hierarchy_child',
+
+  // Only meaningful for a company-less actor (Admin/Entity Admin) — see
+  // resolveRowBusinessUnits(). A BU-scoped actor's own active Business Unit
+  // (req.companyId, already resolved/authorized by resolveCompany.js from
+  // the X-Company-Id header before this service ever runs) always wins;
+  // this column is simply ignored for that actor, even if an old
+  // Admin-style template is reused by mistake.
+  'bu name': 'bu_name',
+  'bu_name': 'bu_name',
+  'business unit': 'bu_name',
+  'business_unit': 'bu_name',
 };
 
 // client_id / service_type_id / project_id / delivery_head_employee_id are all resolved by
@@ -97,8 +109,16 @@ const HEADER_MAP = {
 // this schema runs, so they're relaxed to optional here — Joi is only responsible for
 // format/range/enum/required rules on the remaining fields, reusing the exact same rules the
 // single-record create API enforces.
+//
+// service_po_code is ALSO forked to optional here: per HEADER_MAP's own doc comment above,
+// it is intentionally never read from the sheet and is always freshly auto-generated after
+// validation passes (see importServicePOs()'s code-generation step) — candidate therefore
+// never carries this key when rowSchema runs. Without this fork, createServicePOSchema's own
+// `.required()` on service_po_code fails EVERY row with "Service PO number is required."
+// unconditionally (pre-existing bug, discovered and fixed here — unrelated to Business Unit
+// handling, but it silently made the entire Service PO import feature 100% non-functional).
 const rowSchema = createServicePOSchema.fork(
-  ['client_id', 'service_type_id', 'project_id', 'delivery_head_employee_id'],
+  ['client_id', 'service_type_id', 'project_id', 'delivery_head_employee_id', 'service_po_code'],
   (s) => s.optional()
 );
 
@@ -178,7 +198,13 @@ function isBlank(v) {
 
 /**
  * Parse the first sheet of the uploaded Excel/CSV file.
- * Returns an array of raw row objects keyed by canonical field names.
+ * Returns the parsed rows (keyed by canonical field names) plus whether a
+ * "BU Name" column was present in the header row — needed by
+ * resolveRowBusinessUnits() to tell "company-less actor, column missing
+ * entirely" (a file-level error) apart from "column present but blank on
+ * this row" (a row-level error).
+ *
+ * @returns {{ rows: object[], hasBuNameColumn: boolean }}
  */
 function parseServicePOFile(filePath) {
   const workbook = xlsx.readFile(filePath, { cellDates: false, raw: false });
@@ -186,7 +212,7 @@ function parseServicePOFile(filePath) {
   const sheet = workbook.Sheets[sheetName];
   const raw = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: '', blankrows: false });
 
-  if (!raw.length) return [];
+  if (!raw.length) return { rows: [], hasBuNameColumn: false };
 
   // Detect header row: first row with at least 2 recognised columns in first 5 rows
   let headerRowIdx = -1;
@@ -210,6 +236,8 @@ function parseServicePOFile(filePath) {
     throw err;
   }
 
+  const hasBuNameColumn = mappedHeaders.includes('bu_name');
+
   const rows = [];
   for (let i = headerRowIdx + 1; i < raw.length; i++) {
     const cells = raw[i];
@@ -227,7 +255,7 @@ function parseServicePOFile(filePath) {
     rows.push(row);
   }
 
-  return rows;
+  return { rows, hasBuNameColumn };
 }
 
 /**
@@ -340,45 +368,29 @@ function resolveServiceType(raw, ctx, errors) {
  * Resolve Delivery Head Manager (Excel employee-name column) to an Employee
  * — always by full_name, exact match after trim + case-fold, never a fuzzy
  * or partial match (never silently maps to a different, similarly-named
- * employee). Applies the same active/not-soft-deleted/same-company checks
- * assertValidDeliveryHead() applies for the single-record create/update API,
- * PLUS an import-specific role gate: the employee must have an active login
- * (Users row) holding one of DELIVERY_HEAD_ALLOWED_ROLES. This role check is
- * NEW business logic scoped to import only — the manual create/update API
- * has no such requirement (see DELIVERY_HEAD_ALLOWED_ROLES's doc comment).
- * Required — mirrors createServicePOSchema's own `.required()` rule for
- * delivery_head_employee_id on create.
+ * employee).
+ *
+ * FULLY OPTIONAL, best-effort — never fails the row. Mirrors
+ * createServicePOSchema's delivery_head_employee_id, which is optional
+ * (allows null) on the single-record create/update API: whether this column
+ * is blank, names someone who doesn't exist/isn't active/holds a
+ * disallowed role, or matches more than one employee ambiguously, the row
+ * simply gets NO Delivery Head assigned — never a validation error. Only a
+ * clean, unambiguous, active, correctly-roled match (still gated by
+ * DELIVERY_HEAD_ALLOWED_ROLES) is actually assigned.
  */
-function resolveDeliveryHead(raw, ctx, errors) {
+function resolveDeliveryHead(raw, ctx) {
   const name = String(raw.delivery_head_manager_name || '').trim();
   if (!name) {
-    errors.push('Delivery Head Manager is required.');
     return null;
   }
 
   const entry = ctx.employeeByName.get(name.toLowerCase());
-  if (!entry || entry === AMBIGUOUS_EMPLOYEE) {
-    if (entry === AMBIGUOUS_EMPLOYEE) {
-      errors.push(`Delivery Head Manager "${name}" matches more than one employee — cannot determine which one.`);
-    } else {
-      errors.push(`Delivery Head Manager "${name}" does not exist.`);
-    }
-    return null;
-  }
-  if (!entry.employeeActive) {
-    errors.push(`Delivery Head Manager "${name}" is inactive.`);
-    return null;
-  }
-  if (!entry.roleName) {
-    errors.push(`Delivery Head Manager "${name}" has no active user account/role and cannot be assigned as Delivery Head Manager.`);
-    return null;
-  }
-  if (!DELIVERY_HEAD_ALLOWED_ROLES.includes(entry.roleName)) {
-    errors.push(
-      `Delivery Head Manager "${name}" has role "${entry.roleName}" — only ${DELIVERY_HEAD_ALLOWED_ROLES.join('/')} may be assigned as Delivery Head Manager.`
-    );
-    return null;
-  }
+  if (!entry || entry === AMBIGUOUS_EMPLOYEE) return null;
+  if (!entry.employeeActive) return null;
+  if (!entry.roleName) return null;
+  if (!DELIVERY_HEAD_ALLOWED_ROLES.includes(entry.roleName)) return null;
+
   return entry;
 }
 
@@ -411,7 +423,7 @@ function resolveRowFields(raw, ctx) {
     candidate.is_billable = serviceType.is_billable;
   }
 
-  const deliveryHead = resolveDeliveryHead(raw, ctx, errors);
+  const deliveryHead = resolveDeliveryHead(raw, ctx);
   // Store the resolved Employee's id — never the raw sheet text — per
   // "do not store the employee name directly in the Service PO table".
   if (deliveryHead) candidate.delivery_head_employee_id = deliveryHead.id;
@@ -518,7 +530,7 @@ function detectPartialConflicts(raw, ctx, defining) {
     }
   }
   if (hasAnyValue(raw, ['delivery_head_manager_name'])) {
-    const deliveryHead = resolveDeliveryHead(raw, ctx, errors);
+    const deliveryHead = resolveDeliveryHead(raw, ctx);
     if (deliveryHead && deliveryHead.id !== defining.resolved.deliveryHeadEmployeeId) {
       errors.push(`Conflicting Delivery Head Manager for Service PO "${defining.data.service_po_name}" — a different Delivery Head Manager was already given earlier in this file.`);
     }
@@ -748,60 +760,104 @@ function reportRemainingRowsAsSkipped(rows, failedRaw, ctx, alsoExclude = []) {
 }
 
 /**
- * Parse, validate, and import Service POs (and their hierarchy) from the
- * uploaded file.
+ * Resolve which Business Unit (Company) each row belongs to. Runs BEFORE any
+ * Client/Project/Service Type validation and participates in the exact same
+ * "validation-first, all-or-nothing" gate the rest of this file already uses
+ * (see importServicePOs()'s doc comment below) — a BU error is reported
+ * per-row exactly like any other row error, and if ANY row anywhere fails
+ * (BU or otherwise), nothing in the entire file is inserted.
  *
- * Validation-first, all-or-nothing: every row/group is fully validated
- * before anything is written to the database. If even one row/group fails,
- * the import is aborted immediately and NOTHING is inserted — only once
- * every group passes does the insert phase run. This mirrors
- * employeeImportService.js / clientImportService.js's parse → validate →
- * insert structure and response shape, extended with `existing_po_reused`
- * and `hierarchy_created`.
+ * - BU-scoped actor (authContext.companyId set — BU Admin and every mapped-BU
+ *   role below it): the user's own currently-active Business Unit — already
+ *   resolved AND authorized by resolveCompany.js from the X-Company-Id
+ *   header before this service ever runs (0 mapped BUs -> 403, >1 mapped
+ *   BUs with no header -> 400 "X-Company-Id header is required", header not
+ *   one of the user's mapped BUs -> 403) — always wins for EVERY row. A "BU
+ *   Name" column, if present in the sheet, is deliberately ignored; the
+ *   Excel file can never override or bypass this.
+ * - Company-less actor (Admin/Entity Admin — authContext.companyId is
+ *   undefined): every row MUST carry a non-blank "BU Name", resolved by
+ *   exact case-insensitive name match against ONLY the Companies this actor
+ *   owns (resolveOwnedCompanyIds — the same Entity-ownership scope every
+ *   other company-less create/import flow in this codebase uses). A BU name
+ *   that belongs to a different Admin/Entity's company never resolves here,
+ *   even if the name string collides.
  *
- * Rows sharing the same Service PO Name (case-insensitive) are grouped into
- * one Service PO. Within the insert phase, each group's Service PO
- * create-or-reuse + all of its hierarchy node creates run inside a single
- * DB transaction — a failure partway through a group rolls back that whole
- * group (never "PO created but hierarchy partially created"), while other
- * groups in the same file continue independently, exactly like the existing
- * per-row insert loop's failure semantics.
- *
- * @param {string} filePath - Absolute path to the saved upload file
- * @param {number} userId   - ID of the authenticated user performing the import
- * @param {import('express').Request} req - for resolveCreateCompanyId: a
- *   BU-scoped actor's own req.companyId always wins; a company-less
- *   Admin/Entity Admin must supply `company_id` in the multipart form body,
- *   validated against their own owned Companies — replaces the previous
- *   raw `req.companyId` passthrough, which crashed for those actors.
- * @returns {Promise<{ total, imported, existing_po_reused, hierarchy_created, skipped, error_rows }>}
+ * @param {object[]} rawRows
+ * @param {{ companyId: number|null, hierarchyRank: number|null, employeeId: number|null }} authContext
+ * @param {boolean} hasBuNameColumn
+ * @returns {Promise<{ rowsByCompanyId: Map<number, object[]>, errorRows: object[] }>}
+ * @throws {Error} 422 if a company-less actor's sheet has no "BU Name" column at all
  */
-async function importServicePOs(filePath, userId, req) {
-  const bodyCompanyId = req.body && req.body.company_id ? parseInt(req.body.company_id, 10) : undefined;
-  const companyId = await resolveCreateCompanyId(
-    { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId },
-    bodyCompanyId,
-    'a Service PO import'
-  );
+async function resolveRowBusinessUnits(rawRows, authContext, hasBuNameColumn) {
+  if (authContext.companyId != null) {
+    return { rowsByCompanyId: new Map([[authContext.companyId, rawRows]]), errorRows: [] };
+  }
 
-  // 1. Parse Excel / CSV
-  const rawRows = parseServicePOFile(filePath);
-
-  if (!rawRows.length) {
-    const err = new Error('The uploaded file contains no data rows.');
+  if (!hasBuNameColumn) {
+    const err = new Error(
+      'Missing required column "BU Name". Admin/Entity Admin imports must specify which ' +
+      'Business Unit each Service PO belongs to.'
+    );
     err.statusCode = 422;
     throw err;
   }
 
-  // 2. Batch-fetch reference data to avoid N+1 queries — scoped to this
-  // company, so a code/name that only exists in another company never
-  // resolves here (matches uq_service_pos_company_code's per-company scope).
+  const ownedCompanyIds = (await resolveOwnedCompanyIds(authContext.hierarchyRank, authContext.employeeId)) || [];
+  const ownedCompanies = ownedCompanyIds.length
+    ? await Company.findAll({
+      where: { id: { [Op.in]: ownedCompanyIds }, is_deleted: false },
+      attributes: ['id', 'company_name'],
+      raw: true,
+    })
+    : [];
+  const companyByName = new Map(ownedCompanies.map((c) => [c.company_name.trim().toLowerCase(), c]));
+
+  const rowsByCompanyId = new Map();
+  const errorRows = [];
+
+  for (const raw of rawRows) {
+    const buNameRaw = String(raw.bu_name || '').trim();
+    if (!buNameRaw) {
+      errorRows.push({ row_number: raw._rowNum, row_data: buildRowData(raw), errors: ['BU Name is required.'] });
+      continue;
+    }
+    const company = companyByName.get(buNameRaw.toLowerCase());
+    if (!company) {
+      errorRows.push({ row_number: raw._rowNum, row_data: buildRowData(raw), errors: [`BU "${buNameRaw}" not found.`] });
+      continue;
+    }
+    if (!rowsByCompanyId.has(company.id)) rowsByCompanyId.set(company.id, []);
+    rowsByCompanyId.get(company.id).push(raw);
+  }
+
+  return { rowsByCompanyId, errorRows };
+}
+
+/**
+ * Batch-fetch every reference table scoped to ONE company, and build the
+ * lookup maps (`ctx`) the rest of the pipeline resolves rows against.
+ * Extracted from importServicePOs() so it can run once per resolved Business
+ * Unit — a company-less actor's file can span several BUs at once (each row
+ * naming its own "BU Name"), each needing its own independently-scoped
+ * reference data, exactly as if it were imported as its own separate file.
+ *
+ * @param {number} companyId
+ * @returns {Promise<{ ctx: object, existingCodes: Set<string> }>}
+ */
+async function buildCompanyImportContext(companyId) {
   const [existingPOs, clients, projects, serviceTypes, employees] = await Promise.all([
     ServicePO.findAll({ where: { company_id: companyId }, attributes: ['id', 'service_po_code', 'service_po_name', 'client_id', 'project_id'], raw: true }),
     Client.findAll({ where: { company_id: companyId }, attributes: ['id', 'client_code', 'client_name', 'status'], raw: true }),
     Project.findAll({ where: { company_id: companyId, is_deleted: false }, attributes: ['id', 'project_code', 'project_name', 'client_id', 'status', 'is_deleted'], raw: true }),
+    // Service Type is a single GLOBAL master now (company_id IS NULL — see
+    // serviceTypeService.js's GLOBAL_COMPANY_ID and database/migrations/
+    // 20260890_seed_global_service_types_categories.sql), shared by every
+    // Business Unit instead of being duplicated per-BU. Scoping this lookup
+    // by `companyId` (the resolved Business Unit) would never match any real
+    // row and made every Service Type fail to resolve during import.
     ServiceType.findAll({
-      where: { is_deleted: false, company_id: companyId },
+      where: { is_deleted: false, company_id: null },
       attributes: ['id', 'service_type_name'],
       include: [{ model: ServiceCategory, as: 'serviceCategory', attributes: ['id', 'name', 'report_bucket_key'] }],
     }),
@@ -890,23 +946,38 @@ async function importServicePOs(filePath, userId, req) {
     existingHierarchyByPOId: new Map(), // filled in below, after we know which existing POs are actually referenced
   };
 
-  // 3. Detect a completely unnamed row up front (never reaches a group).
+  return { ctx, existingCodes };
+}
+
+/**
+ * Group + validate one Business Unit's rows against its own `ctx` — the
+ * grouping/conflict/hierarchy-shape validation half of the original
+ * importServicePOs() pipeline (no DB writes here), extracted so it can run
+ * once per resolved company.
+ *
+ * @param {object[]} rows
+ * @param {object} ctx
+ * @returns {Promise<{ errorRows: object[], pendingGroups: object[] }>}
+ */
+async function validateRowsForCompany(rows, ctx) {
   const errorRows = [];
-  for (const raw of rawRows) {
+
+  // Detect a completely unnamed row up front (never reaches a group).
+  for (const raw of rows) {
     if (isBlank(raw.service_po_name)) {
       errorRows.push({ row_number: raw._rowNum, row_data: buildRowData(raw), errors: ['Service PO Name is required.'] });
     }
   }
 
-  // 4. Group remaining rows by Service PO Name (case-insensitive).
-  const groups = groupRowsByServicePOName(rawRows.filter((r) => !isBlank(r.service_po_name)));
+  // Group remaining rows by Service PO Name (case-insensitive).
+  const groups = groupRowsByServicePOName(rows.filter((r) => !isBlank(r.service_po_name)));
 
-  // 5. First pass over groups WITHOUT the existing-hierarchy cross-check
-  // (that needs to know which existing POs are referenced first) — this pass
+  // First pass over groups WITHOUT the existing-hierarchy cross-check (that
+  // needs to know which existing POs are referenced first) — this pass
   // resolves defining rows, detects conflicts, and parses hierarchy shape.
   const pendingGroups = [];
-  for (const [key, rows] of groups) {
-    const result = processGroup(key, rows, ctx);
+  for (const [key, groupRows] of groups) {
+    const result = processGroup(key, groupRows, ctx);
     if (!result.ok) {
       errorRows.push(...result.errorRows);
     } else {
@@ -914,7 +985,7 @@ async function importServicePOs(filePath, userId, req) {
     }
   }
 
-  // 6. Batch-fetch existing hierarchy for every matched existing PO in one
+  // Batch-fetch existing hierarchy for every matched existing PO in one
   // query, then re-run ONLY the existing-hierarchy cross-check per group
   // (cheap, in-memory) — this is why processGroup() is structured to accept
   // a pre-populated ctx.existingHierarchyByPOId and re-validate is safe/idempotent.
@@ -960,26 +1031,30 @@ async function importServicePOs(filePath, userId, req) {
     }
   }
 
-  // 6a. Validation gate — if anything failed anywhere, stop here. Nothing is inserted.
-  if (errorRows.length > 0) {
-    logger.info('Service PO import aborted — validation errors found, nothing inserted', {
-      userId,
-      total: rawRows.length,
-      skipped: errorRows.length,
-    });
+  return { errorRows, pendingGroups };
+}
 
-    return {
-      total: rawRows.length,
-      imported: 0,
-      existing_po_reused: 0,
-      hierarchy_created: 0,
-      skipped: errorRows.length,
-      error_rows: errorRows,
-    };
-  }
+/**
+ * Insert phase for one Business Unit's already-fully-validated groups — one
+ * transaction per Service PO group (create-or-reuse the PO, then create
+ * every genuinely-missing hierarchy node under it). A failure partway
+ * through a group rolls back that whole group only; other groups (including
+ * ones from a different Business Unit in the same file) continue
+ * independently.
+ *
+ * @param {object[]} pendingGroups
+ * @param {number} companyId
+ * @param {Set<string>} existingCodes
+ * @param {object} ctx - for ctx.existingHierarchyByPOId (populated by validateRowsForCompany())
+ * @param {number} userId
+ * @returns {Promise<{ importedCount: number, existingReusedCount: number, hierarchyCreatedCount: number, errorRows: object[] }>}
+ */
+async function insertGroupsForCompany(pendingGroups, companyId, existingCodes, ctx, userId) {
+  const errorRows = [];
 
-  // 7. Every group passed validation — auto-generate a unique PO code for
-  // each NEW Service PO (never taken from the sheet) before inserting.
+  // Auto-generate a unique PO code for each NEW Service PO in this Business
+  // Unit (never taken from the sheet) before inserting — uniqueness is
+  // per-company, so this Set is intentionally fresh per Business Unit.
   const seenCodes = new Set();
   for (const group of pendingGroups) {
     if (!group.isNew) continue;
@@ -1002,12 +1077,6 @@ async function importServicePOs(filePath, userId, req) {
     seenCodes.add(code);
   }
 
-  // 8. Insert phase — one transaction per Service PO group (create-or-reuse
-  // the PO, then create every genuinely-missing hierarchy node under it).
-  // A failure partway through a group rolls back that whole group only;
-  // other groups continue independently — same failure granularity the
-  // existing per-row insert loop already had, now scoped to "one PO + its
-  // hierarchy" as the atomic unit instead of "one row".
   let importedCount = 0;
   let existingReusedCount = 0;
   let hierarchyCreatedCount = 0;
@@ -1107,13 +1176,119 @@ async function importServicePOs(filePath, userId, req) {
     }
   }
 
+  return { importedCount, existingReusedCount, hierarchyCreatedCount, errorRows };
+}
+
+/**
+ * Parse, validate, and import Service POs (and their hierarchy) from the
+ * uploaded file.
+ *
+ * Validation-first, all-or-nothing: every row/group is fully validated
+ * before anything is written to the database. If even one row/group fails,
+ * the import is aborted immediately and NOTHING is inserted — only once
+ * every group passes does the insert phase run. This mirrors
+ * employeeImportService.js / clientImportService.js's parse → validate →
+ * insert structure and response shape, extended with `existing_po_reused`
+ * and `hierarchy_created`.
+ *
+ * Rows sharing the same Service PO Name (case-insensitive) are grouped into
+ * one Service PO. Within the insert phase, each group's Service PO
+ * create-or-reuse + all of its hierarchy node creates run inside a single
+ * DB transaction — a failure partway through a group rolls back that whole
+ * group (never "PO created but hierarchy partially created"), while other
+ * groups in the same file continue independently, exactly like the existing
+ * per-row insert loop's failure semantics.
+ *
+ * BUSINESS UNIT RESOLUTION (see resolveRowBusinessUnits() for the full
+ * rationale): a BU-scoped actor's (BU Admin and below) own currently-active
+ * Business Unit — already resolved and authorized upstream by
+ * resolveCompany.js before this function ever runs — applies to every row
+ * in the file, exactly as before this feature was added. A company-less
+ * actor (Admin/Entity Admin) instead has each row name its own "BU Name"
+ * column, resolved against only the Companies that actor owns; a file from
+ * this actor MAY therefore span several Business Units at once (each
+ * processed with its own independently-scoped reference data, as if it were
+ * its own separate import), while still participating in the SAME
+ * validation-first, all-or-nothing gate as every other row/group check — a
+ * BU error on even one row aborts the entire import, same as any other
+ * validation error always has.
+ *
+ * @param {string} filePath - Absolute path to the saved upload file
+ * @param {number} userId   - ID of the authenticated user performing the import
+ * @param {import('express').Request} req
+ * @returns {Promise<{ total, imported, existing_po_reused, hierarchy_created, skipped, error_rows }>}
+ */
+async function importServicePOs(filePath, userId, req) {
+  const authContext = { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId };
+
+  // 1. Parse Excel / CSV
+  const { rows: rawRows, hasBuNameColumn } = parseServicePOFile(filePath);
+
+  if (!rawRows.length) {
+    const err = new Error('The uploaded file contains no data rows.');
+    err.statusCode = 422;
+    throw err;
+  }
+
+  // 2. Resolve each row's Business Unit — may throw 422 (company-less actor,
+  // no "BU Name" column at all) before anything else runs.
+  const { rowsByCompanyId, errorRows: buErrorRows } = await resolveRowBusinessUnits(rawRows, authContext, hasBuNameColumn);
+
+  // 3. Build reference data + validate groups independently for each
+  // resolved Business Unit, accumulating every error into ONE shared list —
+  // the all-or-nothing gate below judges the whole file at once, exactly as
+  // it always has, just now potentially spanning more than one company.
+  const errorRows = [...buErrorRows];
+  const companyBatches = [];
+  for (const [companyId, rows] of rowsByCompanyId) {
+    const { ctx, existingCodes } = await buildCompanyImportContext(companyId);
+    const { errorRows: groupErrorRows, pendingGroups } = await validateRowsForCompany(rows, ctx);
+    errorRows.push(...groupErrorRows);
+    companyBatches.push({ companyId, ctx, existingCodes, pendingGroups });
+  }
+
+  // 3a. Validation gate — if anything failed anywhere, stop here. Nothing is inserted.
+  if (errorRows.length > 0) {
+    logger.info('Service PO import aborted — validation errors found, nothing inserted', {
+      userId,
+      total: rawRows.length,
+      skipped: errorRows.length,
+    });
+
+    return {
+      total: rawRows.length,
+      imported: 0,
+      existing_po_reused: 0,
+      hierarchy_created: 0,
+      skipped: errorRows.length,
+      error_rows: errorRows,
+    };
+  }
+
+  // 4. Every group in every Business Unit passed validation — insert each
+  // Business Unit's groups independently (a DB failure partway through one
+  // group only rolls back that group; other groups, including ones under a
+  // different Business Unit, continue).
+  let importedCount = 0;
+  let existingReusedCount = 0;
+  let hierarchyCreatedCount = 0;
+  const finalErrorRows = [];
+
+  for (const { companyId, ctx, existingCodes, pendingGroups } of companyBatches) {
+    const result = await insertGroupsForCompany(pendingGroups, companyId, existingCodes, ctx, userId);
+    importedCount += result.importedCount;
+    existingReusedCount += result.existingReusedCount;
+    hierarchyCreatedCount += result.hierarchyCreatedCount;
+    finalErrorRows.push(...result.errorRows);
+  }
+
   logger.info('Service PO import completed', {
     userId,
     total: rawRows.length,
     imported: importedCount,
     existing_po_reused: existingReusedCount,
     hierarchy_created: hierarchyCreatedCount,
-    skipped: errorRows.length,
+    skipped: finalErrorRows.length,
   });
 
   return {
@@ -1121,8 +1296,8 @@ async function importServicePOs(filePath, userId, req) {
     imported: importedCount,
     existing_po_reused: existingReusedCount,
     hierarchy_created: hierarchyCreatedCount,
-    skipped: errorRows.length,
-    error_rows: errorRows,
+    skipped: finalErrorRows.length,
+    error_rows: finalErrorRows,
   };
 }
 

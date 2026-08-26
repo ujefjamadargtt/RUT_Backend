@@ -11,6 +11,7 @@ const FINANCE_UPLOAD_DIR  = path.resolve(__dirname, '../uploads/finance');
 const EMPLOYEE_UPLOAD_DIR = path.resolve(__dirname, '../uploads/employees');
 const CLIENT_UPLOAD_DIR   = path.resolve(__dirname, '../uploads/clients');
 const SERVICE_PO_UPLOAD_DIR = path.resolve(__dirname, '../uploads/service-pos');
+const PROJECT_UPLOAD_DIR    = path.resolve(__dirname, '../uploads/projects');
 
 // Ensure upload directories exist at startup
 if (!fs.existsSync(UPLOAD_DIR)) {
@@ -27,6 +28,9 @@ if (!fs.existsSync(CLIENT_UPLOAD_DIR)) {
 }
 if (!fs.existsSync(SERVICE_PO_UPLOAD_DIR)) {
   fs.mkdirSync(SERVICE_PO_UPLOAD_DIR, { recursive: true });
+}
+if (!fs.existsSync(PROJECT_UPLOAD_DIR)) {
+  fs.mkdirSync(PROJECT_UPLOAD_DIR, { recursive: true });
 }
 
 // ── Allowed MIME Types & Extensions ──────────────────────────────────────────
@@ -288,6 +292,44 @@ const handleServicePOUpload = (req, res, next) => {
   });
 };
 
+// ── Disk Storage: Project Import uploads ──────────────────────────────────────
+const projectStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, PROJECT_UPLOAD_DIR);
+  },
+  filename: (req, file, cb) => {
+    const ext      = path.extname(file.originalname).toLowerCase();
+    const baseName = path
+      .basename(file.originalname, ext)
+      .replace(/[^a-z0-9_\-]/gi, '_')
+      .toLowerCase()
+      .slice(0, 60);
+    const datePrefix = dateHelper.nowFilenamePrefix();
+    const userId     = req.userId ? `_u${req.userId}` : '';
+    cb(null, `${datePrefix}${userId}_${baseName}${ext}`);
+  },
+});
+
+const uploadProjectExcel = multer({
+  storage: projectStorage,
+  fileFilter: timesheetFileFilter,
+  limits: { fileSize: MAX_FILE_SIZE_BYTES, files: 1 },
+});
+
+const handleProjectUpload = (req, res, next) => {
+  uploadProjectExcel.single('file')(req, res, (err) => {
+    if (err) return next(err);
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        code: 'NO_FILE',
+        message: 'No file was uploaded. Please attach a .xlsx or .csv file in the "file" field.',
+      });
+    }
+    next();
+  });
+};
+
 module.exports = {
   uploadExcel,
   handleTimesheetUpload,
@@ -304,4 +346,7 @@ module.exports = {
   uploadServicePOExcel,
   handleServicePOUpload,
   SERVICE_PO_UPLOAD_DIR,
+  uploadProjectExcel,
+  handleProjectUpload,
+  PROJECT_UPLOAD_DIR,
 };

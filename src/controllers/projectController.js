@@ -1,6 +1,7 @@
 'use strict';
 
 const projectService = require('../services/projectService');
+const projectImportService = require('../services/projectImportService');
 const {
   sendSuccess,
   sendCreated,
@@ -142,6 +143,31 @@ const getActiveProjects = async (req, res) => {
   }
 };
 
+/**
+ * POST /api/v1/projects/import
+ * Import projects from an uploaded Excel/CSV file.
+ * Returns a summary: total rows, imported, skipped, and any error rows.
+ */
+const importProjects = async (req, res) => {
+  try {
+    const { path: filePath } = req.file;
+    const result = await projectImportService.importProjects(filePath, req.userId, req);
+
+    const message =
+      `Import complete. ${result.imported} project(s) imported, ` +
+      `${result.skipped} duplicate(s) skipped, ` +
+      `${result.error_rows.length - result.skipped} error(s).`;
+
+    return sendSuccess(res, result, message, 200);
+  } catch (error) {
+    if (error.statusCode) {
+      return sendError(res, error.message, error.statusCode);
+    }
+    logger.error('importProjects error', { error: error.message, userId: req.userId });
+    return sendError(res, error.message, 500);
+  }
+};
+
 module.exports = {
   getAllProjects,
   getProjectById,
@@ -149,4 +175,5 @@ module.exports = {
   updateProject,
   deleteProject,
   getActiveProjects,
+  importProjects,
 };
