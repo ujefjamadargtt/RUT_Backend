@@ -8,7 +8,7 @@ const employeeBusinessUnitRepository = require('../repositories/employeeBusiness
 const servicePOHierarchyRepository = require('../repositories/servicePOHierarchyRepository');
 const timesheetRepository = require('../repositories/timesheetRepository');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
-const { resolveActorCompanyScope, resolveCreateCompanyId, resolveOptionalCreateCompanyId } = require('./companyAccessControlService');
+const { resolveActorCompanyScope, resolveCreateCompanyId, resolveOptionalCreateCompanyId, resolveActorCompanyScopeForSelectedBU } = require('./companyAccessControlService');
 const { Employee, Company } = require('../models');
 const { Op } = require('sequelize');
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
@@ -124,12 +124,22 @@ async function assertValidDeliveryHead(employeeId, companyId) {
 /**
  * Return a paginated list of Service POs.
  *
+ * Respects an OPTIONALLY selected Global Business Unit (X-Company-Id
+ * header) for a company-less actor (Admin/Entity Admin), same as
+ * getActivePOs() below — this is the "Search Service PO..." dropdown's own
+ * list endpoint, so it must narrow the same way when a BU is selected,
+ * instead of always returning every owned Company's POs regardless of the
+ * UI's current BU selection. Falls back to the full owned set when none is
+ * selected, unchanged from before. A BU-scoped actor is unaffected either
+ * way (already limited to their own single active BU).
+ *
  * @param {object} query - req.query
  * @param {object} authContext - { companyId, hierarchyRank, employeeId }
+ * @param {number|null} [headerCompanyId] - parsed X-Company-Id header, if any
  * @returns {Promise<{ data: ServicePO[], meta: object }>}
  */
-const getAll = async (query = {}, authContext) => {
-  const companyId = await resolveActorCompanyScope(authContext);
+const getAll = async (query = {}, authContext, headerCompanyId = null) => {
+  const companyId = await resolveActorCompanyScopeForSelectedBU(authContext, headerCompanyId);
   const { page, limit, offset } = getPaginationParams(query);
 
   const filters = {
@@ -676,13 +686,22 @@ const getUtilisation = async (poId, authContext) => {
 };
 
 /**
- * Return a lightweight list of active POs.
+ * Return a lightweight list of active POs — the Service PO dropdown data
+ * source for BU-dependent screens (e.g. Cost Budget Master's "select a
+ * Service PO" picker). Respects an OPTIONALLY selected Global Business Unit
+ * (X-Company-Id header) for a company-less actor (Admin/Entity Admin): when
+ * one is selected, the list narrows to just that BU's active POs; when none
+ * is selected, it falls back to every owned Company's active POs, same as
+ * before this narrowing existed — see resolveActorCompanyScopeForSelectedBU's
+ * doc comment. A BU-scoped actor is unaffected either way (already limited
+ * to their own single active BU).
  *
  * @param {object} authContext - { companyId, hierarchyRank, employeeId }
+ * @param {number|null} [headerCompanyId] - parsed X-Company-Id header, if any
  * @returns {Promise<ServicePO[]>}
  */
-const getActivePOs = async (authContext) => {
-  const companyId = await resolveActorCompanyScope(authContext);
+const getActivePOs = async (authContext, headerCompanyId = null) => {
+  const companyId = await resolveActorCompanyScopeForSelectedBU(authContext, headerCompanyId);
   return servicePORepository.getActivePOs(companyId, authContext.employeeId);
 };
 

@@ -59,7 +59,14 @@ const { importLimiter } = require('../middlewares/rateLimiters');
  *                   .xlsx or .csv file. Expected columns (header row flexible):
  *                   Employee Code*, Full Name*, Designation, Total Experience,
  *                   Company Experience, Email ID, Resource Description,
- *                   Date of Joining, Date of Leaving, Status
+ *                   Date of Joining, Date of Leaving, Status, Business Units.
+ *                   Business Units is optional — a comma-separated list of
+ *                   Business Unit names, resolved within the importing
+ *                   actor's own authorized Business Units (never the
+ *                   currently-selected Global Business Unit). Left blank, the
+ *                   employee is imported with no Business Unit mapping. A
+ *                   name that doesn't resolve fails that row with a
+ *                   validation error rather than being silently ignored.
  *     responses:
  *       200:
  *         description: Import summary
@@ -195,6 +202,10 @@ router.get(
  *       - in: query
  *         name: designation
  *         schema: { type: string }
+ *       - in: query
+ *         name: business_unit_id
+ *         schema: { type: integer }
+ *         description: Narrows the list to employees mapped to this ONE Business Unit — stacks on top of (never widens) the caller's own access scope.
  *       - in: query
  *         name: sort_by
  *         schema: { type: string, default: full_name }

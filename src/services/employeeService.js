@@ -223,7 +223,7 @@ async function attachRoleAndBusinessUnitInfo(employees) {
  * getByIdWithEmail() below — this list endpoint previously returned every
  * Employee in the company to any authenticated caller regardless of role.
  *
- * @param {object} query - Express req.query (page, limit, search, status, designation, sort_by, sort_order)
+ * @param {object} query - Express req.query (page, limit, search, status, designation, business_unit_id, sort_by, sort_order)
  * @param {object} authContext - { userId, employeeId, companyId, hierarchyRank, roleNames } — see controller
  * @returns {Promise<{ data: Employee[], meta: object }>}
  */
@@ -231,12 +231,27 @@ const getAll = async (query = {}, authContext) => {
   const { page, limit, offset } = getPaginationParams(query);
   const accessWhere = await employeeAccessControlService.resolveEmployeeAccessWhere(authContext);
 
+  // Business Unit list-filter (the "Business Unit" dropdown on the Employee
+  // Master filter bar) — narrows the caller's own accessWhere scope down to
+  // ONE specific Business Unit. Parsed here rather than via Joi (this
+  // endpoint's query validation, listEmployeesQuerySchema, is currently not
+  // wired to the route at all) — an invalid/non-numeric value is simply
+  // ignored (no filter applied) rather than erroring, matching this
+  // endpoint's existing permissive handling of `designation` etc. See
+  // employeeRepository.findAll()'s doc comment for why this can only NARROW
+  // results, never widen them beyond accessWhere.
+  const parsedBusinessUnitId = Number(query.business_unit_id);
+  const businessUnitId = Number.isInteger(parsedBusinessUnitId) && parsedBusinessUnitId > 0
+    ? parsedBusinessUnitId
+    : null;
+
   const filters = {
     search: query.search || '',
     status: query.status || 'active',
     designation: query.designation || '',
     companyId: authContext.companyId,
     accessWhere,
+    businessUnitId,
   };
 
   const sort = {

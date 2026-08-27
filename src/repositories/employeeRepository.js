@@ -83,13 +83,23 @@ async function employeeScope(companyId) {
 /**
  * Fetch a paginated, filtered, sorted list of employees.
  *
- * @param {object} filters    - { search, status, designation }
+ * `businessUnitId`, when given, narrows the result down to employees
+ * mapped to (or, for a legacy row, carrying the company_id of) that ONE
+ * Business Unit — combined via a separate `Op.and` key so it stacks on top
+ * of whatever `accessWhere`/`companyId` already restricted the query to,
+ * rather than replacing it; it can only further narrow the caller's own
+ * access scope, never widen it. Uses employeeScope() (not a bare
+ * `company_id` match) for the same reason accessWhere already does — an
+ * Employee created after the Employee-Business-Unit redesign never gets
+ * its own `company_id` populated.
+ *
+ * @param {object} filters    - { search, status, designation, businessUnitId }
  * @param {object} pagination - { limit, offset }
  * @param {object} sort       - { sortBy, sortOrder }
  * @returns {Promise<{ rows: Employee[], count: number }>}
  */
 const findAll = async (filters = {}, pagination = {}, sort = {}) => {
-  const { search, status, designation, companyId, accessWhere } = filters;
+  const { search, status, designation, companyId, accessWhere, businessUnitId } = filters;
   const { limit = 20, offset = 0 } = pagination;
   const { sortBy: requestedSortBy = 'created_at', sortOrder = 'DESC' } = sort;
   // Defense-in-depth allowlist matching employeeValidation.js's sort_by enum
@@ -128,6 +138,13 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
       { employee_code: { [Op.iLike]: term } },
       { designation: { [Op.iLike]: term } },
     ];
+  }
+
+  // Business Unit filter — see this function's doc comment. `Op.and` is not
+  // used anywhere else in this function, so this never collides with the
+  // `Op.or` key search may have just set above.
+  if (businessUnitId) {
+    where[Op.and] = [await employeeScope(businessUnitId)];
   }
 
   return Employee.findAndCountAll({

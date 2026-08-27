@@ -31,10 +31,18 @@ function buildAuthContext(req) {
 
 /**
  * GET /api/v1/service-pos
+ *
+ * Passes the raw X-Company-Id header through so a company-less actor
+ * (Admin/Entity Admin) gets the list narrowed to their currently selected
+ * Global Business Unit when one is sent — same as getActivePOs() below.
+ * Optional: omitting the header keeps the existing full-owned-scope
+ * behavior, so this is not a breaking change for any other caller.
  */
 const getAllServicePOs = async (req, res) => {
   try {
-    const { data, meta } = await servicePOService.getAll(req.query, buildAuthContext(req));
+    const rawHeader = req.headers['x-company-id'];
+    const headerCompanyId = rawHeader ? parseInt(rawHeader, 10) : null;
+    const { data, meta } = await servicePOService.getAll(req.query, buildAuthContext(req), headerCompanyId);
     return sendPaginated(res, data, meta, 'Service POs fetched successfully.');
   } catch (error) {
     logger.error('getAllServicePOs error', { error: error.message });
@@ -44,10 +52,19 @@ const getAllServicePOs = async (req, res) => {
 
 /**
  * GET /api/v1/service-pos/active/list
+ *
+ * Passes the raw X-Company-Id header through so a company-less actor
+ * (Admin/Entity Admin) gets the list narrowed to their currently selected
+ * Global Business Unit when one is sent — see servicePOService.getActivePOs'
+ * doc comment. Optional: omitting the header keeps the existing full-owned-
+ * scope behavior, so this is not a breaking change for any other caller of
+ * this endpoint.
  */
 const getActivePOs = async (req, res) => {
   try {
-    const pos = await servicePOService.getActivePOs(buildAuthContext(req));
+    const rawHeader = req.headers['x-company-id'];
+    const headerCompanyId = rawHeader ? parseInt(rawHeader, 10) : null;
+    const pos = await servicePOService.getActivePOs(buildAuthContext(req), headerCompanyId);
     return sendSuccess(res, pos, 'Active Service POs fetched successfully.');
   } catch (error) {
     logger.error('getActivePOs error', { error: error.message });
