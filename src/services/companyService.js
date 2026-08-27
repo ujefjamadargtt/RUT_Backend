@@ -3,6 +3,7 @@
 const companyRepository = require('../repositories/companyRepository');
 const employeeBusinessUnitRepository = require('../repositories/employeeBusinessUnitRepository');
 const { createAuditLog } = require('../middlewares/auditLog');
+const { getPaginationMeta } = require('../utils/pagination');
 const logger = require('../utils/logger');
 
 /**
@@ -21,8 +22,31 @@ const fail = (message, statusCode) => {
   throw err;
 };
 
+/**
+ * @param {object} query - Express req.query (page, limit, status, search, entity_id, sort_by, sort_order)
+ * @param {number[]} entityIds - the calling Entity Admin's own owned Entities (req.entityIds)
+ * @returns {Promise<{ data: Company[], meta: object }>}
+ */
 const getAll = async (query = {}, entityIds) => {
-  return companyRepository.findAllForEntities(entityIds, { search: query.search, status: query.status });
+  const page = query.page || 1;
+  const limit = query.limit || 10;
+  const offset = (page - 1) * limit;
+
+  const filters = {
+    search: query.search || null,
+    status: query.status || 'active',
+    entity_id: query.entity_id || null,
+  };
+
+  const sort = {
+    sortBy: query.sort_by || 'company_name',
+    sortOrder: query.sort_order || 'ASC',
+  };
+
+  const { rows, count } = await companyRepository.findAllForEntities(entityIds, filters, { limit, offset }, sort);
+  const meta = getPaginationMeta(count, page, limit);
+
+  return { data: rows, meta };
 };
 
 /**

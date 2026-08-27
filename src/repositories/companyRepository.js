@@ -1,7 +1,7 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { Company } = require('../models');
+const { Company, Entity } = require('../models');
 
 /**
  * Company Repository
@@ -72,19 +72,34 @@ const update = async (id, data) => {
 };
 
 /**
- * Fetch all companies belonging to any of the given Entities, with
- * optional search/status filter — the Entity-Admin-scoped equivalent of
- * findAll() above (which was Platform-Admin-scoped, i.e. unscoped).
+ * Fetch a paginated, filtered, sorted page of companies belonging to any of
+ * the given Entities — the Entity-Admin-scoped equivalent of findAll() above
+ * (which was Platform-Admin-scoped, i.e. unscoped). Mirrors
+ * entityRepository.findAll()'s pagination/sort contract, plus an Entity join
+ * so the BU Master list can show each Company's Entity name.
  *
- * @param {number[]} entityIds
- * @param {object} filters - { search, status }
- * @returns {Promise<Company[]>}
+ * @param {number[]} entityIds - the caller's own owned Entities (scope)
+ * @param {object} filters - { search, status, entity_id }
+ * @param {{ limit: number, offset: number }} pagination
+ * @param {{ sortBy: string, sortOrder: string }} sort
+ * @returns {Promise<{ rows: Company[], count: number }>}
  */
-const findAllForEntities = async (entityIds, filters = {}) => {
-  if (!entityIds || entityIds.length === 0) return [];
+const findAllForEntities = async (entityIds, filters = {}, pagination = {}, sort = {}) => {
+  if (!entityIds || entityIds.length === 0) return { rows: [], count: 0 };
 
-  const { search, status } = filters;
+  const { search, status, entity_id } = filters;
+  const { limit = 10, offset = 0 } = pagination;
+  const { sortBy = 'company_name', sortOrder = 'ASC' } = sort;
+
   const where = { is_deleted: false, entity_id: { [Op.in]: entityIds } };
+
+  // Narrowing to a single Entity (e.g. the "Manage BUs" link from Entity
+  // Master) must still respect the caller's own scope — an entity_id outside
+  // entityIds resolves to no rows rather than silently widening back to it.
+  if (entity_id) {
+    const requestedEntityId = Number(entity_id);
+    where.entity_id = entityIds.includes(requestedEntityId) ? requestedEntityId : -1;
+  }
 
   if (status && status !== 'all') {
     where.status = status;
@@ -97,7 +112,19 @@ const findAllForEntities = async (entityIds, filters = {}) => {
     ];
   }
 
-  return Company.findAll({ where, order: [['company_name', 'ASC']] });
+  const allowedSortColumns = ['company_name', 'company_code', 'status', 'created_at'];
+  const safeSortBy = allowedSortColumns.includes(sortBy) ? sortBy : 'company_name';
+  const safeSortOrder = ['ASC', 'DESC'].includes(sortOrder.toUpperCase())
+    ? sortOrder.toUpperCase()
+    : 'ASC';
+
+  return Company.findAndCountAll({
+    where,
+    limit,
+    offset,
+    order: [[safeSortBy, safeSortOrder]],
+    include: [{ model: Entity, as: 'entity', attributes: ['id', 'entity_name', 'entity_code'] }],
+  });
 };
 
 /**

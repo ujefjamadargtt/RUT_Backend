@@ -1,7 +1,7 @@
 'use strict';
 
 const companyService = require('../services/companyService');
-const { sendSuccess, sendCreated, sendError, sendNotFound } = require('../utils/response');
+const { sendSuccess, sendCreated, sendPaginated, sendError, sendNotFound } = require('../utils/response');
 const { getIpAddress } = require('../middlewares/auditLog');
 
 /**
@@ -16,10 +16,12 @@ const { getIpAddress } = require('../middlewares/auditLog');
 
 const getAll = async (req, res, next) => {
   try {
-    const companies = req.employeeBUsOnly
-      ? await companyService.getAllForEmployee(req.query, req.employeeId)
-      : await companyService.getAll(req.query, req.entityIds);
-    return sendSuccess(res, companies, 'Companies fetched successfully.');
+    if (req.employeeBUsOnly) {
+      const companies = await companyService.getAllForEmployee(req.query, req.employeeId);
+      return sendSuccess(res, companies, 'Companies fetched successfully.');
+    }
+    const { data, meta } = await companyService.getAll(req.query, req.entityIds);
+    return sendPaginated(res, data, meta, 'Companies fetched successfully.');
   } catch (err) {
     next(err);
   }

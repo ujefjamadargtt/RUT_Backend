@@ -74,11 +74,19 @@ const updateCompanySchema = Joi.object({
   .messages({ 'object.min': 'At least one field must be provided for update.' });
 
 /**
- * GET /companies — list query params
+ * GET /companies — list query params.
+ * limit's max (500) is deliberately higher than the 100 most other masters
+ * cap at — several "load BUs" dropdowns (Service PO/Employee/BU Head forms)
+ * call this same endpoint with limit=200 expecting the full unpaginated set.
  */
 const listCompaniesQuerySchema = Joi.object({
+  page: Joi.number().integer().min(1).default(1),
+  limit: Joi.number().integer().min(1).max(500).default(10),
   status: Joi.string().valid('active', 'inactive', 'all').default('active'),
   search: Joi.string().trim().max(150).optional().allow(''),
+  entity_id: Joi.number().integer().positive().optional(),
+  sort_by: Joi.string().valid('company_name', 'company_code', 'status', 'created_at').default('company_name'),
+  sort_order: Joi.string().valid('ASC', 'DESC', 'asc', 'desc').default('ASC'),
 });
 
 module.exports = {
