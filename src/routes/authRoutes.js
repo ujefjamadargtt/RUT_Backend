@@ -9,6 +9,7 @@ const {
   loginSchema,
   microsoftLoginSchema,
   selectRoleSchema,
+  switchRoleSchema,
   refreshTokenSchema,
   directChangePasswordSchema,
   forgotPasswordSchema,
@@ -490,6 +491,71 @@ router.post('/logout', authController.logout);
  *         description: User not found
  */
 router.get('/profile', authenticate, authController.getProfile);
+
+/**
+ * @swagger
+ * /auth/switch-role:
+ *   post:
+ *     summary: Switch the authenticated employee's active role, without logging out
+ *     description: |
+ *       For an employee holding MULTIPLE active roles (e.g. Admin and BU
+ *       Admin): switches the active role of the CURRENT session to another
+ *       one of their own currently-active roles, and issues a fresh
+ *       access/refresh token pair scoped to it — same session architecture
+ *       as POST /auth/login and POST /auth/select-role, just triggered from
+ *       an already-authenticated request instead of a pre-auth
+ *       `loginTicket`. The employee is resolved from the caller's own
+ *       Bearer access token, never from the request body, and `roleId`
+ *       is validated server-side against THIS employee's own active roles
+ *       — requesting a role not assigned to the caller, or no longer
+ *       active, is rejected with 403. The prior session/refresh token is
+ *       NOT revoked by a role switch (same as select-role); it simply
+ *       expires or is revoked separately via /auth/logout.
+ *
+ *       BU (Business Unit) mapping is completely unaffected by a role
+ *       switch — existing BU authorization/selection behavior for the new
+ *       active role applies unchanged, same as any other login.
+ *     tags: [Auth]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [roleId]
+ *             properties:
+ *               roleId:
+ *                 type: integer
+ *                 description: Must be one of the caller's own currently active roles.
+ *     responses:
+ *       200:
+ *         description: Role switched successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 message: { type: string, example: Role switched successfully. }
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     accessToken: { type: string }
+ *                     refreshToken: { type: string }
+ *                     expiresIn: { type: string, example: "15m" }
+ *                     employee: { type: object }
+ *                     roles: { type: array, items: { type: object } }
+ *                     forms: { type: object }
+ *       401:
+ *         description: Missing or invalid access token
+ *       403:
+ *         description: Account is inactive, or the requested role is not assigned/active for this employee
+ *       422:
+ *         description: Validation error
+ */
+router.post('/switch-role', authLimiter, authenticate.authenticateIdentity, validate(switchRoleSchema), authController.switchRole);
 
 /**
  * @swagger

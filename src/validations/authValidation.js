@@ -62,6 +62,22 @@ const selectRoleSchema = Joi.object({
 });
 
 /**
+ * POST /auth/switch-role
+ * Switches an already-authenticated employee's active role to one of
+ * their OTHER currently-active roles — see authService.switchRole().
+ */
+const switchRoleSchema = Joi.object({
+  roleId: Joi.number()
+    .integer()
+    .positive()
+    .required()
+    .messages({
+      'number.base': 'roleId must be a number.',
+      'any.required': 'roleId is required.',
+    }),
+});
+
+/**
  * POST /auth/microsoft
  *
  * Body carries ONLY the raw Microsoft ID token — the frontend must never
@@ -223,6 +239,7 @@ module.exports = {
   loginSchema,
   microsoftLoginSchema,
   selectRoleSchema,
+  switchRoleSchema,
   refreshTokenSchema,
   changePasswordSchema,
   directChangePasswordSchema,

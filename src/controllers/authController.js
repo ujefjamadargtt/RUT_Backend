@@ -121,6 +121,41 @@ const selectRole = async (req, res, next) => {
 };
 
 /**
+ * POST /api/auth/switch-role
+ *
+ * Switches an already-authenticated employee's active role to one of their
+ * OTHER currently-active roles, without logging out — issues a fresh
+ * access/refresh token pair scoped to the new role over the same session
+ * architecture as login/select-role. The acting employee is resolved from
+ * the verified Bearer token (req.employeeId, set by the `authenticate`
+ * middleware) — never from the request body — so `roleId` is the only
+ * thing the caller can influence, and it is validated against THIS
+ * employee's own currently-active roles server-side (see
+ * authService.switchRole()); a role not assigned to the caller, or no
+ * longer active, is rejected with 403.
+ *
+ * Request body: { roleId: number }
+ * Response 200: { success: true, message: string, data: { accessToken, refreshToken, expiresIn, employee, roles, forms } }
+ * Response 403: account inactive, or the requested role is not assigned/active for this employee
+ */
+const switchRole = async (req, res, next) => {
+  try {
+    const { roleId } = req.body;
+    const ipAddress = resolveIp(req);
+    const userAgent = req.headers['user-agent'] || '';
+
+    const result = await authService.switchRole(req.employeeId, roleId, ipAddress, userAgent);
+
+    return sendSuccess(res, result, 'Role switched successfully.');
+  } catch (err) {
+    if (err.statusCode === 401 || err.statusCode === 403) {
+      return sendError(res, err.message, err.statusCode);
+    }
+    next(err);
+  }
+};
+
+/**
  * POST /api/auth/logout
  *
  * Invalidate the current session using the provided refresh token.
@@ -321,6 +356,7 @@ module.exports = {
   login,
   loginWithMicrosoft,
   selectRole,
+  switchRole,
   logout,
   refreshToken,
   getProfile,

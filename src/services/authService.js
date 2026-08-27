@@ -455,6 +455,56 @@ async function selectRole(loginTicket, roleId, ipAddress, userAgent) {
 }
 
 /**
+ * POST /auth/switch-role
+ *
+ * Switches an ALREADY-AUTHENTICATED employee's active role to one of their
+ * OTHER currently-active roles, without ending the current login — same
+ * "issue a fresh session scoped to exactly one role" completion path as
+ * selectRole(), just triggered from a live access token (`employeeId`
+ * resolved from the verified JWT via middlewares/auth.js, see
+ * authController.switchRole()) instead of a pre-auth `loginTicket`. The
+ * requested `roleId` is NEVER trusted blindly — it must be one of this
+ * SAME employee's own currently-active roles (getActiveRoles()), exactly
+ * like selectRole(), or this throws ROLE_NOT_AVAILABLE.
+ *
+ * Does not revoke the prior session — same behavior as selectRole()/login()
+ * issuing a new session without touching old ones; the old access/refresh
+ * token pair simply ages out or is revoked separately via /auth/logout.
+ *
+ * @param {number} employeeId - resolved from the verified JWT, never the request body
+ * @param {number} roleId - must be one of the SAME employee's currently active roles
+ * @param {string} [ipAddress]
+ * @param {string} [userAgent]
+ * @returns {Promise<{ accessToken, refreshToken, expiresIn, employee, roles, forms }>}
+ * @throws {{ statusCode: number, message: string, isOperational: boolean }}
+ */
+async function switchRole(employeeId, roleId, ipAddress, userAgent) {
+  const employee = await authRepository.findEmployeeById(employeeId);
+  if (!employee || employee.status !== 'active' || employee.is_deleted) {
+    logger.warn('Role switch for inactive/missing employee', { employeeId });
+    const err = new Error('Your account has been deactivated. Please contact the administrator.');
+    err.statusCode = 403;
+    err.code = 'ACCOUNT_INACTIVE';
+    err.isOperational = true;
+    throw err;
+  }
+
+  const activeRoles = getActiveRoles(employee);
+  const selectedRole = activeRoles.find((role) => role.id === roleId);
+  if (!selectedRole) {
+    logger.warn('Role switch to a role not assigned/active for this employee', { employeeId: employee.id, roleId });
+    const err = new Error('The selected role is not available for this account.');
+    err.statusCode = 403;
+    err.code = 'ROLE_NOT_AVAILABLE';
+    err.isOperational = true;
+    throw err;
+  }
+
+  logger.info('Employee switched active role', { employeeId: employee.id, roleId });
+  return issueSession(employee, [selectedRole], ipAddress, userAgent);
+}
+
+/**
  * Invalidate an employee session by revoking it (soft-revoke, same
  * mechanism as rotation) so a subsequent replay of this same refresh token
  * is recognized as reuse, not silently forgotten. Idempotent.
@@ -693,6 +743,7 @@ module.exports = {
   login,
   loginWithMicrosoft,
   selectRole,
+  switchRole,
   logout,
   refreshToken,
   getProfile,
