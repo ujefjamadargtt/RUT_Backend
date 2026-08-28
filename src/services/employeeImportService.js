@@ -1,11 +1,13 @@
 'use strict';
 
 const xlsx = require('xlsx');
-const { sequelize, Role } = require('../models');
+const { sequelize, Role, Company } = require('../models');
+const { Op } = require('sequelize');
 const employeeRepository = require('../repositories/employeeRepository');
 const employeeRoleRepository = require('../repositories/employeeRoleRepository');
+const employeeBusinessUnitRepository = require('../repositories/employeeBusinessUnitRepository');
 const employeeServicePOMappingService = require('./employeeServicePOMappingService');
-const { resolveOptionalCreateCompanyId } = require('./companyAccessControlService');
+const { resolveOptionalCreateCompanyId, resolveOwnedCompanyIds } = require('./companyAccessControlService');
 const logger = require('../utils/logger');
 
 // Bulk-imported logins all get this same default password rather than a
@@ -54,6 +56,13 @@ const HEADER_MAP = {
   'email id': 'email',
   'emailid': 'email',
   'email address': 'email',
+  'business units': 'business_units_raw',
+  'business unit': 'business_units_raw',
+  'business_units': 'business_units_raw',
+  'business_unit': 'business_units_raw',
+  'bu': 'business_units_raw',
+  'bu name': 'business_units_raw',
+  'bu_name': 'business_units_raw',
 };
 
 const CODE_RE = /^[A-Z0-9_/#-]{2,20}$/;
@@ -284,6 +293,83 @@ function validateRow(raw, existingCodes, seenCodes, existingEmails, seenEmails) 
 }
 
 /**
+ * Build a case-insensitive "Business Unit name" -> id lookup, scoped to
+ * exactly the Business Units the IMPORTING actor is authorized to assign —
+ * never the currently-selected Global BU (X-Company-Id), which must have no
+ * bearing on which BU an imported row's "Business Units" column resolves
+ * to.
+ *
+ * - BU-scoped actor (req.companyId set): every Business Unit they are
+ *   ACTIVELY mapped to (req.employeeBusinessUnits — already the full
+ *   Company rows, from auth.js), not just whichever one is momentarily
+ *   active via the header. Same "don't limit a multi-BU actor to today's
+ *   selection" rule employeeService.js's resolveBUAssignmentScope() already
+ *   applies to the manual Role & BU Mapping screen — a BU Admin mapped to
+ *   BU 1 + BU 2 must be able to import a row naming either.
+ * - Company-less actor (Admin/Entity Admin — req.companyId is null): every
+ *   Company they own (resolveOwnedCompanyIds), the same scope every other
+ *   company-less create/import flow in this codebase uses — mirrors
+ *   servicePOImportService.js's resolveRowBusinessUnits().
+ *
+ * @param {import('express').Request} req
+ * @returns {Promise<Map<string, number>>} lowercased, trimmed company_name -> id
+ */
+async function buildImportBuNameLookup(req) {
+  let companies;
+
+  if (req.companyId != null) {
+    companies = (req.employeeBusinessUnits || []).map((bu) => ({ id: bu.id, company_name: bu.company_name }));
+  } else {
+    const ownedCompanyIds = (await resolveOwnedCompanyIds(req.hierarchyRank, req.employeeId)) || [];
+    companies = ownedCompanyIds.length
+      ? await Company.findAll({
+        where: { id: { [Op.in]: ownedCompanyIds }, is_deleted: false },
+        attributes: ['id', 'company_name'],
+        raw: true,
+      })
+      : [];
+  }
+
+  return new Map(companies.map((c) => [String(c.company_name).trim().toLowerCase(), c.id]));
+}
+
+/**
+ * Resolve one row's raw "Business Units" cell against the pre-built name
+ * lookup. Blank/missing is valid and simply means "no BU mapping from this
+ * row" (never a default, and never the Global BU) — see this file's header
+ * comment on the overall BU-mapping rule. Supports a comma-separated list
+ * of names in the same cell (the underlying employee_business_units table
+ * already natively supports many-to-many BU membership — see
+ * employeeBusinessUnitRepository.replaceForEmployee() — so a multi-name
+ * cell simply maps to that existing capability, not a new format).
+ *
+ * @param {object} raw - parsed row (see parseEmployeeFile)
+ * @param {Map<string, number>} buNameMap
+ * @returns {{ ids: number[], errors: string[] }}
+ */
+function resolveRowBusinessUnitIds(raw, buNameMap) {
+  const rawValue = String(raw.business_units_raw || '').trim();
+  if (!rawValue) return { ids: [], errors: [] };
+
+  const names = rawValue.split(',').map((n) => n.trim()).filter(Boolean);
+  const ids = [];
+  const errors = [];
+  const seen = new Set();
+
+  for (const name of names) {
+    const id = buNameMap.get(name.toLowerCase());
+    if (id === undefined) {
+      errors.push(`Business Unit "${name}" not found.`);
+    } else if (!seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+    }
+  }
+
+  return { ids, errors };
+}
+
+/**
  * Parse, validate, and import employees from the uploaded file.
  *
  * @param {string} filePath - Absolute path to the saved upload file
@@ -316,11 +402,14 @@ async function importEmployees(filePath, userId, req) {
   }
 
   // 2. Batch-fetch existing codes (scoped to this company — per-company
-  // uniqueness) and existing emails (global — see users_email_key) to avoid
-  // N+1 queries.
+  // uniqueness), existing emails (global — see users_email_key), and the
+  // "Business Units" name -> id lookup (see buildImportBuNameLookup's doc
+  // comment — scoped to the IMPORTING actor's own authorized BUs, never the
+  // Global BU selector) to avoid N+1 queries.
   const existingForCompany = await employeeRepository.findAllForImport(companyId);
   const existingCodes = new Set(existingForCompany.map((e) => e.employee_code.toUpperCase()));
   const existingEmails = new Set(await employeeRepository.findAllEmails());
+  const buNameMap = await buildImportBuNameLookup(req);
 
   // 3. Validate all rows; track codes/emails seen within this file to catch duplicates
   const seenCodes = new Set();
@@ -330,9 +419,12 @@ async function importEmployees(filePath, userId, req) {
 
   for (const raw of rawRows) {
     const { errors, data } = validateRow(raw, existingCodes, seenCodes, existingEmails, seenEmails);
-    if (errors.length) {
-      errorRows.push({ row: raw._rowNum, errors });
+    const { ids: businessUnitIds, errors: buErrors } = resolveRowBusinessUnitIds(raw, buNameMap);
+    const allErrors = buErrors.length ? [...errors, ...buErrors] : errors;
+    if (allErrors.length) {
+      errorRows.push({ row: raw._rowNum, errors: allErrors });
     } else {
+      data.business_unit_ids = businessUnitIds;
       validRows.push(data);
       seenCodes.add(data.employee_code);
       if (data.email) seenEmails.add(data.email);
@@ -362,7 +454,7 @@ async function importEmployees(filePath, userId, req) {
   const credentials = [];
 
   for (const row of validRows) {
-    const { email, ...employeeFields } = row;
+    const { email, business_unit_ids: businessUnitIds, ...employeeFields } = row;
     try {
       await sequelize.transaction(async (transaction) => {
         const employee = await employeeRepository.create({
@@ -376,6 +468,13 @@ async function importEmployees(filePath, userId, req) {
         if (email) {
           await employeeRoleRepository.replaceForEmployee(employee.id, [employeeRole.id], userId, transaction);
           credentials.push({ employee_code: employee.employee_code, email, temporaryPassword: DEFAULT_IMPORT_PASSWORD });
+        }
+
+        // "Business Units" column mapping — see resolveRowBusinessUnitIds's
+        // doc comment. A blank column resolved to an empty array, so this is
+        // simply skipped for that row (no mapping created, never a default).
+        if (businessUnitIds.length > 0) {
+          await employeeBusinessUnitRepository.replaceForEmployee(employee.id, businessUnitIds, userId, transaction);
         }
 
         await employeeServicePOMappingService.autoMapCentralisedServicePOs(employee.id, companyId, userId, transaction);

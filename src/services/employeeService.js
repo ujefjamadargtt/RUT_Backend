@@ -7,6 +7,7 @@ const employeeRoleRepository = require('../repositories/employeeRoleRepository')
 const employeeBusinessUnitRepository = require('../repositories/employeeBusinessUnitRepository');
 const managerEmployeeMappingRepository = require('../repositories/managerEmployeeMappingRepository');
 const employeeServicePOMappingService = require('./employeeServicePOMappingService');
+const servicePORepository = require('../repositories/servicePORepository');
 const roleHierarchyService = require('./roleHierarchyService');
 const employeeAccessControlService = require('./employeeAccessControlService');
 const companyAccessControlService = require('./companyAccessControlService');
@@ -223,13 +224,54 @@ async function attachRoleAndBusinessUnitInfo(employees) {
  * getByIdWithEmail() below — this list endpoint previously returned every
  * Employee in the company to any authenticated caller regardless of role.
  *
- * @param {object} query - Express req.query (page, limit, search, status, designation, business_unit_id, sort_by, sort_order)
- * @param {object} authContext - { userId, employeeId, companyId, hierarchyRank, roleNames } — see controller
+ * `service_po_id`, when given, is the SAME "Service PO -> Map Employees"
+ * escape hatch as employeeService.getActiveEmployees()'s servicePOId param
+ * (see its doc comment for the full rationale) — bypasses
+ * resolveEmployeeAccessWhere()'s per-role "own team" scope entirely in
+ * favor of the caller's FULL Admin/company/tenant scope, reusing
+ * employeeServicePOMappingService.resolveEmployeeMappingScope() rather than
+ * duplicating it. `business_unit_id`/`search`/`status`/pagination all keep
+ * working exactly as before, applied ON TOP of this broadened scope. An
+ * unknown/out-of-tenant-scope `service_po_id` 404s, matching
+ * getActiveEmployees()'s same choice not to silently fall back.
+ *
+ * @param {object} query - Express req.query (page, limit, search, status, designation, business_unit_id, service_po_id, sort_by, sort_order)
+ * @param {object} authContext - { userId, employeeId, companyId, hierarchyRank, roleNames, employeeBusinessUnits } — see controller
  * @returns {Promise<{ data: Employee[], meta: object }>}
+ * @throws {{ statusCode: 404 }} service_po_id given but not found in the caller's tenant scope
  */
 const getAll = async (query = {}, authContext) => {
   const { page, limit, offset } = getPaginationParams(query);
-  const accessWhere = await employeeAccessControlService.resolveEmployeeAccessWhere(authContext);
+
+  const parsedServicePOId = Number(query.service_po_id);
+  const servicePOId = Number.isInteger(parsedServicePOId) && parsedServicePOId > 0 ? parsedServicePOId : null;
+
+  let accessWhere;
+  let companyId = authContext.companyId;
+
+  if (servicePOId) {
+    // resolveEmployeeMappingScope() (not resolveActorCompanyScope()) — a
+    // multi-BU BU Admin/Service PO Admin/Delivery Head must be able to
+    // reach a Service PO in ANY of their managed BUs, not just whichever
+    // one is currently selected.
+    const tenantScope = await employeeServicePOMappingService.resolveEmployeeMappingScope(authContext);
+    const po = await servicePORepository.findById(servicePOId, tenantScope, authContext.employeeId);
+    if (!po) {
+      const err = new Error(`Service PO #${servicePOId} was not found.`);
+      err.statusCode = 404;
+      throw err;
+    }
+    // resolveEmployeeMappingAccessScope() (not resolveEmployeeMappingScope()
+    // directly) — for an Admin/Entity Admin this preserves
+    // resolveEmployeeAccessWhere()'s "employee I directly created but
+    // haven't assigned a Business Unit to yet" fallback, which a plain
+    // companyId/resolveOwnedCompanyIds scope would silently drop. See
+    // employeeServicePOMappingService.resolveEmployeeMappingAccessScope()'s
+    // doc comment.
+    ({ companyId, accessWhere } = await employeeServicePOMappingService.resolveEmployeeMappingAccessScope(authContext));
+  } else {
+    accessWhere = await employeeAccessControlService.resolveEmployeeAccessWhere(authContext);
+  }
 
   // Business Unit list-filter (the "Business Unit" dropdown on the Employee
   // Master filter bar) — narrows the caller's own accessWhere scope down to
@@ -249,7 +291,7 @@ const getAll = async (query = {}, authContext) => {
     search: query.search || '',
     status: query.status || 'active',
     designation: query.designation || '',
-    companyId: authContext.companyId,
+    companyId,
     accessWhere,
     businessUnitId,
   };
@@ -911,12 +953,63 @@ const deleteEmployee = async (id, userId, ipAddress = null, authContext) => {
  * owned-Company employees instead of every employee on the platform (the
  * GET /employees/active/list leak fix).
  *
- * @param {object} authContext - { userId, employeeId, companyId, hierarchyRank, roleNames }
+ * `servicePOId`, when given, switches this into the Service PO -> Map
+ * Employees screen's data source: instead of resolveEmployeeAccessWhere()'s
+ * per-role scope (which, for a Service PO Admin/Manager/etc, is a narrow
+ * "my own team" data-driven scope — appropriate for Employee Master, wrong
+ * for a mapping picker), this returns every active Employee across the
+ * caller's ENTIRE authorized Admin/company/tenant scope — the same
+ * "ignore Business Unit, respect Admin scope" rule
+ * employeeServicePOMappingService.getEmployeeOptionsForServicePO() already
+ * implements and is tested against (reused here via
+ * resolveEmployeeMappingScope(), not duplicated). Deliberately does NOT
+ * narrow to the Service PO's own single company_id, and deliberately
+ * ignores the caller's currently SELECTED Global Business Unit
+ * (authContext.companyId) in favor of their full employeeBusinessUnits set
+ * — a BU Admin whose selector is on BU 3 mapping a BU 7 PO still gets BU
+ * 7 (and every other BU they manage)'s employees. Applies identically
+ * whether the PO is Centralised (no company_id) or not — the caller's own
+ * resolved scope is what matters, not the PO's.
+ *
+ * The Service PO itself is independently re-verified against the caller's
+ * own tenant scope (employeeServicePOMappingService.resolveEmployeeMappingScope
+ * + servicePORepository.findById — the FULL Business-Unit-membership scope,
+ * not just the currently selected one) — an id outside that scope, or a
+ * nonexistent one, 404s rather than silently falling back to the
+ * unscoped/no-servicePOId behavior (a silent fallback would be
+ * indistinguishable from "no scoping happened" to a caller testing this).
+ *
+ * @param {object} authContext - { userId, employeeId, companyId, hierarchyRank, roleNames, employeeBusinessUnits }
+ * @param {number} [servicePOId] - when given, switches to the Admin/tenant-wide scope described above
  * @returns {Promise<Employee[]>}
+ * @throws {{ statusCode: 404 }} servicePOId given but not found in the caller's tenant scope
  */
-const getActiveEmployees = async (authContext) => {
-  const accessWhere = await employeeAccessControlService.resolveEmployeeAccessWhere(authContext);
-  return employeeRepository.getActiveEmployees(authContext.companyId, accessWhere);
+const getActiveEmployees = async (authContext, servicePOId) => {
+  if (!servicePOId) {
+    const accessWhere = await employeeAccessControlService.resolveEmployeeAccessWhere(authContext);
+    return employeeRepository.getActiveEmployees(authContext.companyId, accessWhere);
+  }
+
+  // resolveEmployeeMappingScope() (not resolveActorCompanyScope()) — a
+  // multi-BU BU Admin/Service PO Admin/Delivery Head must be able to reach
+  // a Service PO in ANY of their managed BUs, not just whichever one is
+  // currently selected.
+  const tenantScope = await employeeServicePOMappingService.resolveEmployeeMappingScope(authContext);
+  const po = await servicePORepository.findById(servicePOId, tenantScope, authContext.employeeId);
+  if (!po) {
+    const err = new Error(`Service PO #${servicePOId} was not found.`);
+    err.statusCode = 404;
+    throw err;
+  }
+
+  // resolveEmployeeMappingAccessScope() (not resolveEmployeeMappingScope()
+  // directly) — for an Admin/Entity Admin this preserves
+  // resolveEmployeeAccessWhere()'s "employee I directly created but haven't
+  // assigned a Business Unit to yet" fallback; see that function's doc
+  // comment in employeeServicePOMappingService.js.
+  const { companyId: employeeScopeId, accessWhere: employeeAccessWhere } =
+    await employeeServicePOMappingService.resolveEmployeeMappingAccessScope(authContext);
+  return employeeRepository.getActiveEmployees(employeeScopeId, employeeAccessWhere);
 };
 
 /**

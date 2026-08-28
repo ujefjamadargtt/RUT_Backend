@@ -9,6 +9,7 @@ const {
   assignMappingSchema,
   listMappingsQuerySchema,
   saveEmployeeMappingsSchema,
+  getServicePOEmployeeOptionsQuerySchema,
 } = require('../validations/employeeServicePOMappingValidation');
 const controller = require('../controllers/employeeServicePOMappingController');
 
@@ -167,6 +168,13 @@ router.put(
  * /employee-servicepo-mapping/service-po/{servicePOId}:
  *   get:
  *     summary: Get every Employee mapped to one Service PO
+ *     description: |
+ *       Uses identity-only authentication (no mandatory X-Company-Id) — a
+ *       BU Admin / Service PO Admin / Delivery Head mapped to MULTIPLE
+ *       Business Units can open ANY Service PO within their own managed
+ *       set without first selecting that exact BU via the Global BU
+ *       selector; company/tenant authorization is still fully enforced
+ *       (a Service PO outside the caller's own managed scope 404s).
  *     tags: [Employee Service PO Mapping]
  *     security:
  *       - bearerAuth: []
@@ -181,12 +189,93 @@ router.put(
  *     responses:
  *       200:
  *         description: Mapping list
+ *       404:
+ *         description: Service PO not found, or outside the caller's authorized scope
  */
 router.get(
   '/service-po/:servicePOId',
-  authenticate,
+  authenticate.authenticateIdentity,
   validate(listMappingsQuerySchema, 'query'),
   controller.getServicePOEmployees
+);
+
+/**
+ * @swagger
+ * /employee-servicepo-mapping/service-po/{servicePOId}/options:
+ *   get:
+ *     summary: >
+ *       Get eligible Employee options for a Service PO, plus their current
+ *       mappings — data source for the "Map Employees" action launched
+ *       from a Service PO (the REVERSE direction of
+ *       .../employee/{employeeId}/options above).
+ *     description: >
+ *       Restricted to callers who hold Service PO mapping authority (BU
+ *       Admin / Service PO Admin / Delivery Head, or Admin/Entity Admin) —
+ *       checked server-side from the caller's own verified role, never a
+ *       role/mode the request could assert. For those callers, the
+ *       returned Employee list spans their ENTIRE authorized Admin/company
+ *       scope — it is NEVER narrowed by Business Unit: not the Service
+ *       PO's own BU, not the caller's currently selected Global BU, and
+ *       not whether the Employee has a BU at all. Only cross-company/
+ *       cross-tenant Employees are excluded.
+ *     tags: [Employee Service PO Mapping]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: servicePOId
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: search
+ *         schema: { type: string }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 20 }
+ *     responses:
+ *       200:
+ *         description: Eligible Employee options and current mappings
+ *       403:
+ *         description: Caller does not hold Service PO mapping authority
+ *       404:
+ *         description: Service PO not found
+ */
+router.get(
+  '/service-po/:servicePOId/options',
+  authenticate.authenticateIdentity,
+  validate(getServicePOEmployeeOptionsQuerySchema, 'query'),
+  controller.getServicePOEmployeeOptions
+);
+
+/**
+ * @swagger
+ * /employee-servicepo-mapping/filter-options:
+ *   get:
+ *     summary: >
+ *       Get the Entity / Business Unit filter dropdown options for the
+ *       "Map Employees" screen's own Entity → BU filter bar.
+ *     description: >
+ *       Same authorization and scope as GET .../service-po/{id}/options
+ *       above (BU Admin / Service PO Admin / Delivery Head get their owning
+ *       Admin's full scope; Admin/Entity Admin get their own owned scope) —
+ *       not scoped to one Service PO, since that scope is identical across
+ *       every Service PO the caller can open this screen for.
+ *     tags: [Employee Service PO Mapping]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Entities and Business Units within the caller's authorized scope
+ *       403:
+ *         description: Caller does not hold Service PO mapping authority
+ */
+router.get(
+  '/filter-options',
+  authenticate.authenticateIdentity,
+  controller.getMappingFilterOptions
 );
 
 /**

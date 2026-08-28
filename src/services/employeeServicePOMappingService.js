@@ -1,14 +1,18 @@
 'use strict';
 
+const { Op } = require('sequelize');
 const employeeServicePOMappingRepository = require('../repositories/employeeServicePOMappingRepository');
 const employeeRepository = require('../repositories/employeeRepository');
 const employeeBusinessUnitRepository = require('../repositories/employeeBusinessUnitRepository');
 const employeeRoleRepository = require('../repositories/employeeRoleRepository');
 const servicePORepository = require('../repositories/servicePORepository');
+const companyRepository = require('../repositories/companyRepository');
 // NOT destructured — kept as a module reference so tests can monkey-patch
 // individual functions on it (same pattern as employeeService.js), unlike a
 // destructured import which captures the function value at require-time.
 const companyAccessControlService = require('./companyAccessControlService');
+const employeeAccessControlService = require('./employeeAccessControlService');
+const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
 const logger = require('../utils/logger');
 
 /**
@@ -267,13 +271,26 @@ const getEmployeeMappings = async (employeeId, companyId, status) => {
  * PO, its mappings are listed unscoped by company_id — servicePOId already
  * narrows to exactly one, already-authorized PO.
  *
+ * Uses resolveEmployeeMappingScope() (below) — NOT resolveActorCompanyScope()
+ * — for this PO-access check: a BU Admin/Service PO Admin/Delivery Head
+ * mapped to MULTIPLE Business Units must be able to open ANY Service PO
+ * within their own managed set without first selecting that exact BU via
+ * X-Company-Id (the route this backs uses authenticateIdentity, not the
+ * full authenticate, specifically so resolveCompany's mandatory-header gate
+ * for a multi-BU actor never applies here — see employeeServicePOMapping.
+ * routes.js). resolveActorCompanyScope() would instead fall back to ONLY
+ * the currently-selected req.companyId, incorrectly 404ing (or demanding a
+ * header) for a PO in one of the caller's OTHER managed BUs. Admin/Entity
+ * Admin behavior is unchanged either way — both helpers resolve identically
+ * for those two ranks.
+ *
  * @param {number} servicePOId
- * @param {{ companyId: number|null, hierarchyRank: number|null, employeeId: number|null }} authContext
+ * @param {{ companyId: number|null, hierarchyRank: number|null, employeeId: number|null, employeeBusinessUnits: number[] }} authContext
  * @param {string} [status]
  * @returns {Promise<EmployeeServicePOMapping[]>}
  */
 const getServicePOEmployees = async (servicePOId, authContext, status) => {
-  const companyId = await companyAccessControlService.resolveActorCompanyScope(authContext);
+  const companyId = await resolveEmployeeMappingScope(authContext);
   const po = await servicePORepository.findById(servicePOId, companyId, authContext.employeeId);
   if (!po) {
     throw notFoundError(`Service PO #${servicePOId} was not found.`);
@@ -501,6 +518,287 @@ const saveEmployeeServicePOMappings = async (employeeId, servicePOIds, userId, a
   return employeeServicePOMappingRepository.findByEmployee(employeeId, companyId);
 };
 
+/**
+ * Role-name fragments (matched case-insensitively, by substring, from the
+ * caller's own SERVER-VERIFIED active role — req.userRoles, resolved by
+ * middlewares/auth.js from the verified JWT — never a role/mode a request
+ * parameter could assert) that grant authority to manage Service PO ->
+ * Employee mappings: see getEmployeeOptionsForServicePO() below. Distinct
+ * from UNRESTRICTED_SERVICE_PO_ROLE_FRAGMENTS above — that one governs
+ * "which Service POs can an EMPLOYEE be mapped to" (Employee -> PO
+ * direction); this one governs "who may open the Service PO -> Employee
+ * Mapping screen at all" (the reverse direction, PO -> Employee).
+ */
+const SERVICE_PO_MAPPING_AUTHORITY_ROLE_FRAGMENTS = ['bu admin', 'service po admin', 'delivery head'];
+
+/**
+ * @param {string[]} roleNames - the CALLER's own actual active role(s),
+ *   always server-resolved (req.userRoles) — never trusted from the request.
+ * @returns {boolean}
+ */
+function hasServicePOMappingAuthority(roleNames = []) {
+  return roleNames.some((name) => {
+    const normalized = (name || '').toLowerCase();
+    return SERVICE_PO_MAPPING_AUTHORITY_ROLE_FRAGMENTS.some((fragment) => normalized.includes(fragment));
+  });
+}
+
+/**
+ * Resolve the "same Admin/company scope" Employee list scope for the
+ * Service PO -> Employee Mapping screen (getEmployeeOptionsForServicePO()
+ * below) — deliberately NOT the Service PO's own single company_id, and
+ * NOT just the caller's currently SELECTED Global Business Unit
+ * (authContext.companyId, a single value even for a multi-BU actor).
+ *
+ * For a BU Admin/Service PO Admin/Delivery Head, "same Admin/company
+ * scope" means the ENTIRE tenant their owning Admin manages — the same
+ * full scope that Admin themselves would see — NOT merely the Business
+ * Unit(s) this specific actor personally happens to be mapped to (a BU
+ * Admin managing only 2 of 5 BUs under the same Admin must still see every
+ * Employee across all 5, matching the "BU Admin/Service PO Admin/Delivery
+ * Head are operating under the Admin's scope" business rule). Resolved via
+ * companyAccessControlService.resolveAdminScopeForBusinessUnits(), walking
+ * UP from the caller's own Business Unit(s) (authContext.employeeBusinessUnits
+ * — every BU they're actively mapped to, populated by middlewares/auth.js,
+ * independent of X-Company-Id/whichever ONE is "selected" right now) to
+ * the Admin who owns them, then back DOWN to that Admin's full scope.
+ *
+ * Admin/Entity Admin (company-less) keep using the SAME owned-Company-array
+ * resolution every other part of this codebase already uses for them
+ * (companyAccessControlService.resolveOwnedCompanyIds) — this function
+ * changes nothing for those two tiers.
+ *
+ * @param {{ hierarchyRank: number|null, employeeId: number|null, companyId: number|null, employeeBusinessUnits: number[] }} authContext
+ * @returns {Promise<number[]>}
+ */
+async function resolveEmployeeMappingScope({ hierarchyRank, employeeId, companyId, employeeBusinessUnits = [] }) {
+  if (hierarchyRank === 2 || hierarchyRank === 3) {
+    const owned = await companyAccessControlService.resolveOwnedCompanyIds(hierarchyRank, employeeId);
+    return owned || [];
+  }
+  const ownBusinessUnits = employeeBusinessUnits.length > 0
+    ? employeeBusinessUnits
+    : (companyId != null ? [companyId] : []);
+  if (ownBusinessUnits.length === 0) return [];
+  return companyAccessControlService.resolveAdminScopeForBusinessUnits(ownBusinessUnits);
+}
+
+/**
+ * Resolve the `{ companyId, accessWhere }` pair to spread straight into
+ * employeeRepository.findAll()/getActiveEmployees()'s `filters` for the
+ * Service PO -> Employee Mapping / `service_po_id` flows
+ * (getEmployeeOptionsForServicePO() below; employeeService.getAll()/
+ * getActiveEmployees()'s servicePOId branches) — NOT for authorizing the
+ * Service PO itself (getServicePOEmployees() above correctly keeps using
+ * plain resolveEmployeeMappingScope() for that, since a Service PO always
+ * carries a real company_id, so the gap described below never applies
+ * there — only to Employees).
+ *
+ * For Admin (rank 2) / Entity Admin (rank 3): reuses
+ * employeeAccessControlService.resolveEmployeeAccessWhere() AS-IS. Its
+ * scope for these two ranks is ALREADY tenant-wide (every Company under
+ * their owned Entity hierarchy) with NO Business-Unit narrowing — AND,
+ * critically, for Admin it already includes the "Employee this Admin
+ * directly created but hasn't assigned a Business Unit to yet"
+ * (`created_by: employeeId`) fallback (see that function's own doc
+ * comment).
+ *
+ * For every other rank (BU Admin, Service PO Admin, Delivery Head, and
+ * anyone else): resolveEmployeeAccessWhere() would instead apply its
+ * narrow "my own team" scope — bypassed here in favor of the caller's
+ * OWNING Admin's full scope (companyAccessControlService.
+ * resolveAdminOwnershipForBusinessUnits()) — but that scope MUST be built
+ * as the SAME kind of accessWhere fragment the Admin themselves gets, not
+ * a bare companyId/employeeScope() call: an Employee the owning Admin
+ * directly created but never assigned a Business Unit to (confirmed root
+ * cause of a BU Admin/Service PO Admin/Delivery Head seeing fewer
+ * Employees — e.g. "10 of 18" — than their owning Admin's real total)
+ * matches NEITHER a plain company_id/employee_business_units check NOR
+ * `{ id: adminId }` — only `{ created_by: adminId }`. So this builds
+ * `{ id: adminId } OR { created_by: adminId } OR employeeScope(companyIds) }`
+ * for each resolved owning Admin, exactly mirroring
+ * resolveEmployeeAccessWhere()'s own rank-2 formula.
+ *
+ * @param {object} authContext - { hierarchyRank, employeeId, companyId, employeeBusinessUnits, ... } — the CALLER's
+ * @returns {Promise<{ companyId: number|number[]|undefined, accessWhere: object|undefined }>}
+ */
+async function resolveEmployeeMappingAccessScope(authContext) {
+  if (authContext.hierarchyRank === 2 || authContext.hierarchyRank === 3) {
+    const accessWhere = await employeeAccessControlService.resolveEmployeeAccessWhere(authContext);
+    return { companyId: undefined, accessWhere };
+  }
+
+  const ownBusinessUnits = authContext.employeeBusinessUnits && authContext.employeeBusinessUnits.length > 0
+    ? authContext.employeeBusinessUnits
+    : (authContext.companyId != null ? [authContext.companyId] : []);
+  if (ownBusinessUnits.length === 0) {
+    return { companyId: [], accessWhere: undefined };
+  }
+
+  const { adminIds, companyIds } = await companyAccessControlService.resolveAdminOwnershipForBusinessUnits(ownBusinessUnits);
+  if (adminIds.length === 0) {
+    // No owning Admin resolvable at all (legacy/edge-case data) — fall
+    // back to the plain Business-Unit scope, same defensive behavior as
+    // resolveEmployeeMappingScope().
+    return { companyId: companyIds, accessWhere: undefined };
+  }
+
+  const employeeScopeWhere = await employeeRepository.employeeScope(companyIds);
+  const orConditions = [];
+  for (const adminId of adminIds) {
+    orConditions.push({ id: adminId }, { created_by: adminId });
+  }
+  if (employeeScopeWhere[Op.or]) {
+    orConditions.push(...employeeScopeWhere[Op.or]);
+  } else if (Object.keys(employeeScopeWhere).length > 0) {
+    orConditions.push(employeeScopeWhere);
+  }
+
+  return { companyId: undefined, accessWhere: { [Op.or]: orConditions } };
+}
+
+/**
+ * GET the Service PO -> Employee Mapping screen's data — the REVERSE
+ * direction of getServicePOOptionsForEmployee(): every Employee within the
+ * caller's authorized Admin/company scope, plus which of them are already
+ * mapped to THIS ONE Service PO, so the frontend can render a checkbox
+ * list (☑ mapped / ☐ not mapped) without a second round-trip.
+ *
+ * MOST IMPORTANT BUSINESS RULE, deliberately the OPPOSITE of
+ * getServicePOOptionsForEmployee()/servicePORepository.getEligibleForMapping()
+ * above: the returned Employee list is NEVER *automatically* narrowed by
+ * Business Unit — not the Service PO's own BU, not the caller's currently
+ * selected Global BU, not even whether the Employee has a BU at all.
+ * Employee BU is not an ambient access restriction for this specific
+ * screen; only the caller's authorized Admin/company/tenant scope is
+ * (resolveEmployeeMappingScope() above) — a cross-company/cross-tenant
+ * Employee is still never exposed. See this function's own tests for the
+ * exact scenarios this covers.
+ *
+ * `options.business_unit_id`, if given, is a DIFFERENT thing: the frontend
+ * panel's own opt-in Entity → BU filter dropdowns, explicitly chosen by the
+ * caller to narrow what THEY see — same as `options.search` — applied via
+ * employeeRepository.findAll()'s `businessUnitId` filter strictly ON TOP OF
+ * the full scope above, never in place of it. It does not change, and must
+ * never be made to change, the rule above.
+ *
+ * Restricted to callers who actually hold Service PO mapping authority
+ * (hasServicePOMappingAuthority() above, or Admin/Entity Admin who are
+ * senior to all three roles it names) — resolved from the caller's own
+ * server-verified active role, never a role/mode the request could assert.
+ *
+ * @param {number} servicePOId
+ * @param {object} authContext - { companyId, hierarchyRank, employeeId, roleNames, employeeBusinessUnits } — the CALLER's
+ * @param {object} [options] - { search, page, limit, business_unit_id }
+ * @returns {Promise<{ service_po_id: number, eligible_employees: object[], mapped_employee_ids: number[], meta: object }>}
+ * @throws {{ statusCode: 403 }} caller lacks Service PO mapping authority
+ * @throws {{ statusCode: 404 }} Service PO not found (or outside the caller's tenant scope)
+ */
+const getEmployeeOptionsForServicePO = async (servicePOId, authContext, options = {}) => {
+  const isSeniorTier = authContext.hierarchyRank != null && authContext.hierarchyRank <= 3;
+  if (!isSeniorTier && !hasServicePOMappingAuthority(authContext.roleNames)) {
+    const err = new Error('You are not authorized to manage Service PO employee mappings.');
+    err.statusCode = 403;
+    throw err;
+  }
+
+  // resolveEmployeeMappingScope() here too (NOT resolveActorCompanyScope())
+  // — same reasoning as getServicePOEmployees() above: a multi-BU BU Admin/
+  // Service PO Admin/Delivery Head must be able to open ANY Service PO
+  // within their own managed set without X-Company-Id having been set to
+  // that exact BU first.
+  const tenantScope = await resolveEmployeeMappingScope(authContext);
+  const po = await servicePORepository.findById(servicePOId, tenantScope, authContext.employeeId);
+  if (!po) {
+    throw notFoundError(`Service PO #${servicePOId} was not found.`);
+  }
+
+  const { companyId: employeeScopeId, accessWhere: employeeAccessWhere } = await resolveEmployeeMappingAccessScope(authContext);
+
+  // The panel's own opt-in Entity → BU filter — see this function's doc comment. Invalid/absent
+  // values are simply ignored (no filter applied), matching getAll()'s same permissive handling of
+  // this field.
+  const parsedBusinessUnitId = Number(options.business_unit_id);
+  const businessUnitId = Number.isInteger(parsedBusinessUnitId) && parsedBusinessUnitId > 0
+    ? parsedBusinessUnitId
+    : null;
+
+  const { page, limit, offset } = getPaginationParams(options);
+  const [{ rows, count }, mappedRows] = await Promise.all([
+    employeeRepository.findAll(
+      { search: options.search || '', status: 'active', companyId: employeeScopeId, accessWhere: employeeAccessWhere, businessUnitId },
+      { limit, offset },
+      { sortBy: 'full_name', sortOrder: 'ASC' }
+    ),
+    employeeServicePOMappingRepository.findByServicePO(servicePOId, 'active'),
+  ]);
+
+  return {
+    service_po_id: servicePOId,
+    eligible_employees: rows.map((employee) => {
+      const plain = employee.toJSON ? employee.toJSON() : { ...employee };
+      return {
+        id: plain.id,
+        full_name: plain.full_name,
+        employee_code: plain.employee_code,
+        designation: plain.designation,
+        status: plain.status,
+      };
+    }),
+    mapped_employee_ids: mappedRows.map((row) => row.employee_id),
+    meta: getPaginationMeta(count, page, limit),
+  };
+};
+
+/**
+ * GET the Entity → Business Unit filter dropdown options for the Service PO
+ * -> Map Employees screen (EntityBuFilterBar / `business_unit_id` on
+ * getEmployeeOptionsForServicePO() above).
+ *
+ * Deliberately NOT backed by GET /entities or GET /companies: both 403 a BU
+ * Admin/Service PO Admin/Delivery Head (Entity Admin/Admin only), and even
+ * for a BU Admin, GET /companies ignores `entity_id` and returns only that
+ * BU Admin's own directly-mapped BUs — narrower than the "owning Admin's
+ * full scope" getEmployeeOptionsForServicePO() itself is scoped to (see its
+ * doc comment). Reusing resolveEmployeeMappingScope() — the SAME plain
+ * company/BU id list already used above to authorize the PO lookup — means
+ * these dropdowns can never offer an Entity/BU wider (or narrower) than what
+ * the eligible-employee query itself would actually honour.
+ *
+ * @param {object} authContext - { companyId, hierarchyRank, employeeId, roleNames, employeeBusinessUnits } — the CALLER's
+ * @returns {Promise<{ entities: {id: number, entity_name: string}[], business_units: {id: number, company_name: string, entity_id: number}[] }>}
+ * @throws {{ statusCode: 403 }} caller lacks Service PO mapping authority
+ */
+const getEmployeeMappingFilterOptions = async (authContext) => {
+  const isSeniorTier = authContext.hierarchyRank != null && authContext.hierarchyRank <= 3;
+  if (!isSeniorTier && !hasServicePOMappingAuthority(authContext.roleNames)) {
+    const err = new Error('You are not authorized to manage Service PO employee mappings.');
+    err.statusCode = 403;
+    throw err;
+  }
+
+  const businessUnitIds = await resolveEmployeeMappingScope(authContext);
+  const companies = await companyRepository.findByIdsWithEntity(businessUnitIds);
+
+  const business_units = companies.map((c) => ({
+    id: c.id,
+    company_name: c.company_name,
+    entity_id: c.entity_id,
+  }));
+
+  // Deduped by entity_id, in first-seen order (companies already arrive
+  // sorted by company_name) — good enough for a filter dropdown, no
+  // separate sort pass needed.
+  const entityMap = new Map();
+  for (const c of companies) {
+    if (c.entity && !entityMap.has(c.entity_id)) {
+      entityMap.set(c.entity_id, { id: c.entity_id, entity_name: c.entity.entity_name });
+    }
+  }
+
+  return { entities: Array.from(entityMap.values()), business_units };
+};
+
 module.exports = {
   assign,
   autoMapCentralisedServicePOs,
@@ -512,4 +810,9 @@ module.exports = {
   hasUnrestrictedServicePOVisibility,
   getServicePOOptionsForEmployee,
   saveEmployeeServicePOMappings,
+  hasServicePOMappingAuthority,
+  getEmployeeOptionsForServicePO,
+  getEmployeeMappingFilterOptions,
+  resolveEmployeeMappingScope,
+  resolveEmployeeMappingAccessScope,
 };

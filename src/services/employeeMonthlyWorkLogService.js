@@ -102,6 +102,17 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data) => {
 
   const { endDate, startDate } = dateHelper.getMonthBounds(month, year);
 
+  // Deliberately does NOT reject when Daily entries (TIME_BASED or HOURLY)
+  // already exist for this month — submitting a Monthly Work Log is
+  // ALLOWED to consolidate/replace them: deleteByEmployeeAndDateRange below
+  // wipes every existing row (Daily or Monthly) for the month before
+  // inserting the new Monthly ones, same as it always has. The REVERSE
+  // direction (a Monthly Work Log already exists -> Daily creation is
+  // blocked) is intentionally still enforced, by
+  // employeeTimesheetService.assertNoMonthlyLogForDate on every Daily write
+  // path — only THIS direction (Daily existing -> Monthly attempted) is
+  // unrestricted.
+
   // Two lines at the same (service_po_id, hierarchy_node_id) would collide
   // on insert — reject up front, same as Daily's replaceDailyEntries.
   const seenKeys = new Set();

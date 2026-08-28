@@ -140,12 +140,17 @@ module.exports = (sequelize) => {
           isIn: { args: [['daily', 'monthly']], msg: 'log_type must be daily or monthly.' },
         },
       },
+      // NOT NULL (a value is always written — empty string when nothing was
+      // supplied), but NOT required to be non-empty at the model layer: a
+      // plain HOURLY line still requires a real description, enforced by
+      // Joi (employeeTimesheetValidation.dailyEntryLineSchema); a TIME_BASED
+      // line's description is fully optional (its segments may carry their
+      // own instead — see EmployeeWorkLogTimeEntry.js) and simply defaults
+      // to blank when nothing is supplied anywhere — see
+      // employeeTimesheetService.js's withFallbackDescription().
       description: {
         type: DataTypes.TEXT,
         allowNull: false,
-        validate: {
-          notEmpty: { msg: 'Description is required.' },
-        },
       },
       // 'pending'  - entered by the employee, awaiting approval (or Sync,
       //              if approval isn't required for this employee). Also

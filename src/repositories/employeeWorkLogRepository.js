@@ -910,6 +910,64 @@ const hasMonthlyEntry = async (employeeId, startDate, endDate, companyId) => {
   return !!row;
 };
 
+/**
+ * For one employee + date range, determine which Work Log "modes" already
+ * exist — TIME_BASED (a 'daily' row backed by 1+
+ * employee_work_log_time_entries segments), HOURLY (a 'daily' row with
+ * none), and MONTHLY (log_type: 'monthly') — one row scan, computed via a
+ * correlated EXISTS rather than joining/eager-loading every segment, since
+ * only presence/absence per row is needed here.
+ *
+ * Used to enforce that an employee's Work Log entries for one month stay in
+ * exactly ONE mode (see employeeTimesheetService.assertConsistentDailyEntryMode
+ * and employeeMonthlyWorkLogService.submitMonthlyWorkLog's own check) —
+ * TIME_BASED, HOURLY, and MONTHLY may never coexist for the same
+ * employee+month, though multiple TIME_BASED entries (different Service
+ * POs/Projects/Tasks/dates/slots) freely coexist with each other, same for
+ * multiple HOURLY entries.
+ *
+ * @param {number} employeeId
+ * @param {string} startDate - "YYYY-MM-DD"
+ * @param {string} endDate - "YYYY-MM-DD"
+ * @param {number} companyId
+ * @param {{ excludeDate?: string, excludeId?: number }} [options] - exclude
+ *   either one date (replaceDailyEntries, checking the REST of the month
+ *   while that date's own rows are about to be wiped and reinserted fresh)
+ *   or one specific row (updateEntry, editing that row's own mode in
+ *   place) — never both at once in practice.
+ * @returns {Promise<{ hasMonthly: boolean, hasTimeBased: boolean, hasHourly: boolean }>}
+ */
+const getMonthEntryModeSummary = async (employeeId, startDate, endDate, companyId, options = {}) => {
+  const { excludeDate, excludeId } = options;
+  const where = {
+    employee_id: employeeId,
+    work_date: { [Op.gte]: startDate, [Op.lte]: endDate },
+    company_id: companyId,
+  };
+  if (excludeDate) where.work_date = { ...where.work_date, [Op.ne]: excludeDate };
+  if (excludeId) where.id = { [Op.ne]: excludeId };
+
+  const rows = await EmployeeWorkLog.findAll({
+    attributes: [
+      'log_type',
+      [
+        literal(
+          'EXISTS (SELECT 1 FROM employee_work_log_time_entries te WHERE te.employee_work_log_id = "EmployeeWorkLog"."id")'
+        ),
+        'has_time_entries',
+      ],
+    ],
+    where,
+    raw: true,
+  });
+
+  return {
+    hasMonthly: rows.some((r) => r.log_type === 'monthly'),
+    hasTimeBased: rows.some((r) => r.log_type === 'daily' && r.has_time_entries),
+    hasHourly: rows.some((r) => r.log_type === 'daily' && !r.has_time_entries),
+  };
+};
+
 module.exports = {
   findAll,
   findById,
@@ -929,6 +987,7 @@ module.exports = {
   getMonthlyLogHierarchyBreakdown,
   deleteMonthlyEntries,
   hasMonthlyEntry,
+  getMonthEntryModeSummary,
   findForSync,
   markSyncedByTuples,
   revertSyncStatusByImportIds,

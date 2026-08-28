@@ -24,6 +24,12 @@ const createAdminSchema = Joi.object({
   password: passwordComplexity.required(),
 });
 
+const updateAdminSchema = Joi.object({
+  email: Joi.string().email({ tlds: { allow: false } }).lowercase().trim().max(100).optional(),
+})
+  .min(1)
+  .messages({ 'object.min': 'At least one field must be provided for update.' });
+
 const listAdminsQuerySchema = Joi.object({
   page: Joi.number().integer().min(1).default(1),
   limit: Joi.number().integer().min(1).max(200).default(20),
@@ -35,5 +41,6 @@ const listAdminsQuerySchema = Joi.object({
 
 module.exports = {
   createAdminSchema,
+  updateAdminSchema,
   listAdminsQuerySchema,
 };

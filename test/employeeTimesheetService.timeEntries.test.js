@@ -419,37 +419,29 @@ test('addTimeEntries: a new segment overlapping one already saved by an earlier 
   restore();
 });
 
-test('addTimeEntries: description is required the first time a Module/Task is logged, not on later additive calls', async () => {
+test('addTimeEntries: description is fully optional, including on the FIRST call for a Module/Task — defaults to blank, never rejected', async () => {
   stubCommonDeps();
   installFakeWorkLogStore();
 
-  await assert.rejects(
-    () => employeeTimesheetService.addTimeEntries(101, 10, {
-      work_date: '2026-08-01',
-      service_po_id: 401,
-      hierarchy_node_id: 92,
-      time_entries: [{ start_time: '03:00', end_time: '04:00' }],
-      // no description — must fail, this is the first entry for T1
-    }),
-    { statusCode: 400 }
-  );
-
-  await employeeTimesheetService.addTimeEntries(101, 10, {
+  const first = await employeeTimesheetService.addTimeEntries(101, 10, {
     work_date: '2026-08-01',
     service_po_id: 401,
     hierarchy_node_id: 92,
     time_entries: [{ start_time: '03:00', end_time: '04:00' }],
-    description: 'Task T1',
+    // no description at all — must succeed, defaulting to blank
   });
+  assert.equal(first.description, '');
 
-  // Second call on the SAME (now-existing) T1 entry: no description needed.
+  // Second call on the SAME entry: still no description needed, and the
+  // blank description from the first call is preserved (omitting means
+  // "don't change", same as every other field here).
   const second = await employeeTimesheetService.addTimeEntries(101, 10, {
     work_date: '2026-08-01',
     service_po_id: 401,
     hierarchy_node_id: 92,
     time_entries: [{ start_time: '04:00', end_time: '05:00' }],
   });
-  assert.equal(second.description, 'Task T1');
+  assert.equal(second.description, '');
   assert.equal(second.hours, 2);
 
   restore();

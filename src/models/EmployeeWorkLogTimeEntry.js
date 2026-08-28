@@ -87,6 +87,24 @@ module.exports = (sequelize) => {
           min: { args: [0.01], msg: 'Duration must be greater than 0.' },
         },
       },
+      // Each slot's OWN description — deliberately separate from the parent
+      // employee_work_logs.description (which Sync/reports/older rows still
+      // read for the Module/Task as a whole). Introduced by
+      // database/migrations/20260887_add_time_entry_description.sql;
+      // backfilled from the parent row's description for every pre-existing
+      // segment. Never merged with other slots' text — a caller that DOES
+      // supply its own per-segment description gets exactly that text.
+      // Fully OPTIONAL, including genuinely blank: a caller that omits it
+      // (e.g. one time_entry per line, description sent once at the line
+      // level, or no description anywhere at all) gets it defaulted — to
+      // the line's own description, or an empty string if that's ALSO
+      // absent — applied by the service layer BEFORE this table is ever
+      // written to (see employeeTimesheetService.withFallbackDescription) —
+      // this column is NOT NULL but never required to be non-empty.
+      description: {
+        type: DataTypes.TEXT,
+        allowNull: false,
+      },
       created_by: {
         type: DataTypes.INTEGER,
         allowNull: true,

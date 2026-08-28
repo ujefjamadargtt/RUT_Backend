@@ -50,8 +50,25 @@ const getById = async (req, res, next) => {
   }
 };
 
+const update = async (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id) || id < 1) {
+      return sendError(res, 'Invalid Admin ID.', 400);
+    }
+    const user = await adminService.update(id, req.body, req.userId, req);
+    return sendSuccess(res, user, 'Admin updated successfully.');
+  } catch (err) {
+    if (err.statusCode === 404) {
+      return sendNotFound(res, 'Admin');
+    }
+    next(err);
+  }
+};
+
 module.exports = {
   create,
   getAll,
   getById,
+  update,
 };

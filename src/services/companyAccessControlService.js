@@ -281,6 +281,165 @@ async function resolveSingleCompanyIdForCompanyLessActor(hierarchyRank, employee
   return { companyId: headerCompanyId };
 }
 
+/**
+ * Same purpose as resolveActorCompanyScope(), but for a BU-DEPENDENT
+ * dropdown/list read that should respect an OPTIONALLY selected Global
+ * Business Unit (X-Company-Id header) for a company-less actor (Admin/
+ * Entity Admin) WITHOUT requiring one. Unlike
+ * resolveCompanyContextForCompanyLessActors.js (mandatory header — 400/403
+ * when missing/invalid for a multi-BU owner, used by Reports/Dashboard/
+ * Timesheet Admin/Cost Budget/Service PO Monthly Budget, all of which read
+ * `req.companyId` directly with no array concept), this degrades gracefully
+ * to the actor's full owned-Company-id ARRAY when no Business Unit is
+ * currently selected — so a resource whose OTHER read/write paths
+ * legitimately span every owned Company (e.g. Service PO's own list/detail,
+ * and Cost Budget's create/update, which validates a submitted
+ * `service_po_id` against the full owned set on purpose — see
+ * costBudget.routes.js's doc comment) keeps that existing behavior
+ * unchanged by default, while a specific BU-DEPENDENT read (e.g. the Active
+ * Service PO dropdown a Cost Budget screen populates) can narrow to
+ * exactly the selected BU when the caller's Global BU selector actually
+ * sends one.
+ *
+ * A BU-scoped actor (`authContext.companyId` already set) is returned
+ * unchanged — same as resolveActorCompanyScope(). A header naming a
+ * Company the actor doesn't own is REJECTED (403), never silently ignored
+ * or silently widened back to the full set — same trust rule as every
+ * other X-Company-Id validation in this codebase.
+ *
+ * @param {{ companyId: number|null, hierarchyRank: number|null, employeeId: number|null }} authContext
+ * @param {number|null} headerCompanyId - parsed X-Company-Id header, if any
+ * @returns {Promise<number|number[]>} plain companyId (BU-scoped actor, or a
+ *   company-less actor with a valid selected BU narrows to `[headerCompanyId]`),
+ *   or the full owned-Company-id array when no BU is selected
+ * @throws {Error} 403 if the header names a Company not in the actor's owned set
+ */
+async function resolveActorCompanyScopeForSelectedBU(authContext, headerCompanyId) {
+  if (authContext.companyId != null) {
+    return authContext.companyId;
+  }
+
+  const ownedCompanyIds = (await resolveOwnedCompanyIds(authContext.hierarchyRank, authContext.employeeId)) || [];
+
+  if (headerCompanyId == null) {
+    return ownedCompanyIds;
+  }
+
+  if (!ownedCompanyIds.includes(headerCompanyId)) {
+    const err = new Error('Access denied: the selected Business Unit is not assigned to your account.');
+    err.statusCode = 403;
+    throw err;
+  }
+
+  return [headerCompanyId];
+}
+
+/**
+ * Resolve the Admin (hierarchy_rank 2) employeeId that ultimately owns a
+ * given Company (Business Unit) — walks Company -> Entity ->
+ * Entity.created_by. Entity Master management is Admin-only (see
+ * entityRepository.js's own doc comments), so an Entity's `created_by` is
+ * the Admin who created it — the "normal case going forward" per
+ * entityRepository.findIdsOwnedByAdmin()'s doc comment, which this
+ * mirrors in reverse (Admin -> owned Entities, here Entity -> owning
+ * Admin). Does NOT handle the legacy "Entity re-assigned to a different
+ * Entity Admin" fallback that function's OR-clause covers — deliberately:
+ * that's about which Entities an Admin's FORWARD scope includes, not about
+ * finding a stable single owner to resolve scope FROM.
+ *
+ * @param {number} companyId
+ * @returns {Promise<number|null>} the owning Admin's employeeId, or null if unresolvable
+ */
+async function resolveOwningAdminIdForCompany(companyId) {
+  const company = await Company.findOne({
+    where: { id: companyId, is_deleted: false },
+    attributes: ['id', 'entity_id'],
+  });
+  if (!company || company.entity_id == null) return null;
+
+  const entity = await Entity.findOne({
+    where: { id: company.entity_id, is_deleted: false },
+    attributes: ['id', 'created_by'],
+  });
+  return entity ? entity.created_by : null;
+}
+
+/**
+ * Resolve BOTH the owning Admin id(s) AND the FULL Company scope for a BU
+ * Admin/Service PO Admin/Delivery Head (or any other non-Admin/Entity-
+ * Admin actor) — "operating under the Admin's scope," per the Service PO ->
+ * Employee Mapping requirement: these roles must see EVERY Company/
+ * employee their owning Admin sees, not just the Business Unit(s) they
+ * personally happen to be mapped to (a BU Admin managing only 2 of 5 BUs
+ * under the same Admin must still see all 5 BUs' worth of Employees here,
+ * matching what the Admin themselves would see for their own scope).
+ *
+ * Exposes `adminIds` (not just the resolved Company scope) because the
+ * Admin's own Employee-visibility rule (resolveEmployeeAccessWhere's rank-2
+ * branch) is `{ id: adminId } OR { created_by: adminId } OR
+ * employeeScope(companyIds)` — an Employee the Admin directly created but
+ * hasn't assigned a Business Unit to yet matches NEITHER `id` NOR
+ * `employeeScope`, only `created_by`. A caller that only asked for the
+ * Company scope (resolveAdminScopeForBusinessUnits below, used for Service
+ * PO authorization — a Service PO always carries a real company_id, so this
+ * gap never applies there) would silently drop those Employees from an
+ * Employee-list query — the actual root cause of a BU Admin/Service PO
+ * Admin/Delivery Head seeing FEWER Employees than their owning Admin does
+ * for the exact same tenant (confirmed: BU-mapped Employees only account
+ * for part of an Admin's total — the rest were created directly by that
+ * Admin and never assigned to any Business Unit at all).
+ *
+ * Resolves the owning Admin from each of the actor's OWN Business Units
+ * (resolveOwningAdminIdForCompany above — normally all the same Admin, but
+ * unioned in case of legacy data spanning more than one). Falls back to
+ * the actor's own Business Unit ids as the Company scope (empty adminIds)
+ * if no owning Admin can be resolved at all — defensive, so legacy/edge-
+ * case data never locks an actor out of even their own BUs.
+ *
+ * @param {number[]} ownBusinessUnitIds - the actor's own employee_business_units ids (or their single active companyId, wrapped)
+ * @returns {Promise<{ adminIds: number[], companyIds: number[] }>}
+ */
+async function resolveAdminOwnershipForBusinessUnits(ownBusinessUnitIds) {
+  if (!ownBusinessUnitIds || ownBusinessUnitIds.length === 0) {
+    return { adminIds: [], companyIds: [] };
+  }
+
+  const adminIds = new Set();
+  for (const businessUnitId of ownBusinessUnitIds) {
+    const adminId = await resolveOwningAdminIdForCompany(businessUnitId);
+    if (adminId != null) adminIds.add(adminId);
+  }
+  if (adminIds.size === 0) {
+    return { adminIds: [], companyIds: ownBusinessUnitIds };
+  }
+
+  const scopeSets = await Promise.all(
+    [...adminIds].map((adminId) => resolveOwnedCompanyIds(2, adminId))
+  );
+  const companyIds = [...new Set(scopeSets.flat())];
+  return {
+    adminIds: [...adminIds],
+    companyIds: companyIds.length > 0 ? companyIds : ownBusinessUnitIds,
+  };
+}
+
+/**
+ * Same resolution as resolveAdminOwnershipForBusinessUnits() above, but for
+ * callers that only need the Company SCOPE (e.g. Service PO authorization
+ * — a Service PO always carries a real company_id, so the "created_by, no
+ * BU assigned" gap that function's doc comment describes never applies to
+ * POs, only to Employees). Kept as a thin wrapper so existing callers don't
+ * need to unpack `{ adminIds, companyIds }` when they only ever used the
+ * scope array.
+ *
+ * @param {number[]} ownBusinessUnitIds
+ * @returns {Promise<number[]>}
+ */
+async function resolveAdminScopeForBusinessUnits(ownBusinessUnitIds) {
+  const { companyIds } = await resolveAdminOwnershipForBusinessUnits(ownBusinessUnitIds);
+  return companyIds;
+}
+
 module.exports = {
   resolveOwnedCompanyIds,
   resolveCompanyIdsOwnedByCreator,
@@ -289,4 +448,8 @@ module.exports = {
   resolveCreateCompanyId,
   resolveOptionalCreateCompanyId,
   resolveSingleCompanyIdForCompanyLessActor,
+  resolveActorCompanyScopeForSelectedBU,
+  resolveOwningAdminIdForCompany,
+  resolveAdminOwnershipForBusinessUnits,
+  resolveAdminScopeForBusinessUnits,
 };

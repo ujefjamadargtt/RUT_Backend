@@ -159,6 +159,27 @@ const findByIdForEntities = async (id, entityIds) => {
   return Company.findOne({ where: { id, entity_id: { [Op.in]: entityIds }, is_deleted: false } });
 };
 
+/**
+ * Fetch the given Companies (by id) with their Entity attached — the source
+ * for the Service PO "Map Employees" screen's Entity → BU filter dropdowns
+ * (employeeServicePOMappingService.getEmployeeMappingFilterOptions()), which
+ * needs an arbitrary, already-resolved BU id list (not one Entity Admin's/
+ * Admin's owned Entities — see findAllForEntities() above, which the caller
+ * lacks the standing to use here) turned into `{ id, company_name, entity_id,
+ * entity_name }` rows.
+ *
+ * @param {number[]} companyIds
+ * @returns {Promise<Company[]>}
+ */
+const findByIdsWithEntity = async (companyIds) => {
+  if (!companyIds || companyIds.length === 0) return [];
+  return Company.findAll({
+    where: { id: { [Op.in]: companyIds }, is_deleted: false, status: 'active' },
+    include: [{ model: Entity, as: 'entity', attributes: ['id', 'entity_name'] }],
+    order: [['company_name', 'ASC']],
+  });
+};
+
 module.exports = {
   findAll,
   findById,
@@ -168,4 +189,5 @@ module.exports = {
   findIdsByEntityIds,
   findByIdForEntities,
   findAllForEntities,
+  findByIdsWithEntity,
 };

@@ -144,9 +144,19 @@ const getServicePOEmployees = async (req, res, next) => {
     // PO (servicePORepository.findById), which is what correctly handles a
     // Centralised (BU-less) PO the caller created; see
     // employeeServicePOMappingService.getServicePOEmployees()'s doc comment.
+    // employeeBusinessUnits is required here — this route runs
+    // authenticateIdentity (not the full authenticate), so req.companyId is
+    // never set; the service resolves scope from employeeBusinessUnits
+    // instead, letting a multi-BU BU Admin/Service PO Admin/Delivery Head
+    // open a PO in ANY of their managed BUs without an X-Company-Id header.
     const mappings = await employeeServicePOMappingService.getServicePOEmployees(
       servicePOId,
-      { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId },
+      {
+        companyId: req.companyId,
+        hierarchyRank: req.hierarchyRank,
+        employeeId: req.employeeId,
+        employeeBusinessUnits: (req.employeeBusinessUnits || []).map((bu) => bu.id),
+      },
       req.query.status
     );
     return sendSuccess(res, mappings, 'Service PO employee mappings fetched successfully.');
@@ -218,6 +228,73 @@ const saveMappings = async (req, res, next) => {
   }
 };
 
+/**
+ * GET /api/v1/employee-servicepo-mapping/service-po/:servicePOId/options
+ *
+ * Data source for the "Map Employees" screen launched from a Service PO:
+ * every Employee within the caller's authorized Admin/company scope
+ * (NEVER narrowed by Business Unit — see employeeServicePOMappingService.
+ * getEmployeeOptionsForServicePO()'s doc comment), plus which of them are
+ * already mapped to this Service PO. The caller's own role/authority is
+ * resolved server-side (req.userRoles/req.hierarchyRank, from the verified
+ * JWT) — the frontend never asserts it.
+ */
+const getServicePOEmployeeOptions = async (req, res, next) => {
+  try {
+    const servicePOId = parseInt(req.params.servicePOId, 10);
+    if (isNaN(servicePOId)) {
+      return sendError(res, 'Invalid Service PO ID.', 400);
+    }
+    const options = await employeeServicePOMappingService.getEmployeeOptionsForServicePO(
+      servicePOId,
+      {
+        companyId: req.companyId,
+        hierarchyRank: req.hierarchyRank,
+        employeeId: req.employeeId,
+        roleNames: req.userRoles,
+        employeeBusinessUnits: (req.employeeBusinessUnits || []).map((bu) => bu.id),
+      },
+      req.query
+    );
+    return sendSuccess(res, options, 'Eligible Employee options fetched successfully.');
+  } catch (err) {
+    if (err.statusCode === 404) {
+      return sendNotFound(res, 'Service PO');
+    }
+    if (err.statusCode === 403) {
+      return sendError(res, err.message, 403);
+    }
+    next(err);
+  }
+};
+
+/**
+ * GET /api/v1/employee-servicepo-mapping/filter-options
+ *
+ * Entity → Business Unit filter dropdown options for the "Map Employees"
+ * screen (see employeeServicePOMappingService.getEmployeeMappingFilterOptions()'s
+ * doc comment for why this can't just reuse GET /entities or GET /companies).
+ * Not scoped to one Service PO — the caller's authorized scope is the same
+ * across every Service PO they can open this screen for.
+ */
+const getMappingFilterOptions = async (req, res, next) => {
+  try {
+    const options = await employeeServicePOMappingService.getEmployeeMappingFilterOptions({
+      companyId: req.companyId,
+      hierarchyRank: req.hierarchyRank,
+      employeeId: req.employeeId,
+      roleNames: req.userRoles,
+      employeeBusinessUnits: (req.employeeBusinessUnits || []).map((bu) => bu.id),
+    });
+    return sendSuccess(res, options, 'Filter options fetched successfully.');
+  } catch (err) {
+    if (err.statusCode === 403) {
+      return sendError(res, err.message, 403);
+    }
+    next(err);
+  }
+};
+
 module.exports = {
   assign,
   removeMapping,
@@ -227,4 +304,6 @@ module.exports = {
   getServicePOEmployees,
   getServicePOOptions,
   saveMappings,
+  getServicePOEmployeeOptions,
+  getMappingFilterOptions,
 };

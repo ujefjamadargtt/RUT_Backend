@@ -3,7 +3,7 @@
 const employeeRepository = require('../repositories/employeeRepository');
 const employeeRoleRepository = require('../repositories/employeeRoleRepository');
 const roleRepository = require('../repositories/roleRepository');
-const { createAuditLog } = require('../middlewares/auditLog');
+const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
 const logger = require('../utils/logger');
 
@@ -118,8 +118,30 @@ const getById = async (id, actorId) => {
   return employee;
 };
 
+/**
+ * @param {number} id
+ * @param {object} data
+ * @param {number} actorId - the calling Platform Admin — an Admin created
+ *   by a DIFFERENT Platform Admin 404s here, via getById.
+ * @param {object} req
+ * @returns {Promise<Employee>}
+ */
+const update = async (id, data, actorId, req) => {
+  const existing = await getById(id, actorId);
+
+  const oldValues = { email: existing.email, status: existing.status };
+  const updated = await employeeRepository.update(id, { ...data, updated_by: actorId }, null);
+
+  await createAuditLog(actorId, 'UPDATE', 'employees', id, oldValues, data, getIpAddress(req));
+
+  logger.info('Admin updated by Platform Admin', { employeeId: id, actorId });
+
+  return updated;
+};
+
 module.exports = {
   createAdmin,
   getAll,
   getById,
+  update,
 };

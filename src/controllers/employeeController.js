@@ -55,6 +55,9 @@ const getAll = async (req, res, next) => {
     const { data, meta } = await employeeService.getAll(req.query, buildEmployeeAuthContext(req));
     return sendPaginated(res, data, meta, 'Employees fetched successfully.');
   } catch (err) {
+    if (err.statusCode === 404) {
+      return sendNotFound(res, 'Service PO');
+    }
     next(err);
   }
 };
@@ -184,12 +187,22 @@ const deleteEmployee = async (req, res, next) => {
 
 /**
  * GET /api/v1/employees/active/list
+ *
+ * `?service_po_id=` (optional) switches this into the Service PO -> Map
+ * Employees screen's data source — see employeeService.getActiveEmployees()'s
+ * doc comment. Omitted entirely, behavior is unchanged from before.
  */
 const getActiveEmployees = async (req, res, next) => {
   try {
-    const employees = await employeeService.getActiveEmployees(buildEmployeeAuthContext(req));
+    const parsedServicePOId = parseInt(req.query.service_po_id, 10);
+    const servicePOId = Number.isInteger(parsedServicePOId) && parsedServicePOId > 0 ? parsedServicePOId : null;
+
+    const employees = await employeeService.getActiveEmployees(buildEmployeeAuthContext(req), servicePOId);
     return sendSuccess(res, employees, 'Active employees fetched successfully.');
   } catch (err) {
+    if (err.statusCode === 404) {
+      return sendNotFound(res, 'Service PO');
+    }
     next(err);
   }
 };

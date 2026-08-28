@@ -95,22 +95,88 @@ async function assertProjectMapped(employeeId, servicePOId) {
   }
 }
 
+// Shared display labels for the 3 Work Log entry modes — used to build a
+// consistent "You already have X entries for this month, Y cannot be added"
+// message from whichever direction the conflict is detected (see
+// assertNoMonthlyLogForDate and assertConsistentDailyEntryMode below).
+// NOTE: this mutual-exclusivity rule is intentionally ONE-DIRECTIONAL for
+// the Monthly axis — a Monthly Work Log already existing blocks new Daily
+// (TIME_BASED/HOURLY) writes (assertNoMonthlyLogForDate), but Daily entries
+// already existing do NOT block submitting a Monthly Work Log — see
+// employeeMonthlyWorkLogService.submitMonthlyWorkLog's own comment: Monthly
+// submission is allowed to consolidate/replace whatever Daily entries
+// already exist for that month.
+const ENTRY_MODE_LABEL = {
+  TIME_BASED: 'Start/End Time based',
+  HOURLY: 'Hourly',
+  MONTHLY: 'Monthly',
+};
+
 /**
  * Reject a Daily create/update for a date whose month already has a
  * Monthly Work Log entry (employeeMonthlyWorkLogService.submitMonthlyWorkLog)
  * — the two modes are mutually exclusive per month, so a Daily row can never
  * coexist with (and double-count against) a Monthly total for the same
  * month. No-op when no Monthly entry exists for that month.
+ *
+ * @param {number} employeeId
+ * @param {string} dateStr
+ * @param {number} companyId
+ * @param {'TIME_BASED'|'HOURLY'|null} [attemptedMode] - which mode this
+ *   write is attempting, for a precise "X already exists, Y cannot be
+ *   added" message; omitted (e.g. replaceDailyEntries clearing a date, with
+ *   no resulting mode of its own) falls back to a generic message.
  */
-async function assertNoMonthlyLogForDate(employeeId, dateStr, companyId) {
+async function assertNoMonthlyLogForDate(employeeId, dateStr, companyId, attemptedMode = null) {
   const year = parseInt(dateStr.slice(0, 4), 10);
   const month = parseInt(dateStr.slice(5, 7), 10);
   const { startDate, endDate } = dateHelper.getMonthBounds(month, year);
   const hasMonthly = await employeeWorkLogRepository.hasMonthlyEntry(employeeId, startDate, endDate, companyId);
   if (hasMonthly) {
     throw conflictError(
-      `A Monthly Work Log already exists for ${dateHelper.formatDate(dateStr, 'MMMM YYYY')}. ` +
-      'Delete it before logging daily entries for this month.'
+      attemptedMode
+        ? `You already have Monthly timesheet entries for this month. ` +
+          `${ENTRY_MODE_LABEL[attemptedMode]} timesheet entries cannot be added for the same month.`
+        : `A Monthly Work Log already exists for ${dateHelper.formatDate(dateStr, 'MMMM YYYY')}. ` +
+          'Delete it before logging daily entries for this month.'
+    );
+  }
+}
+
+/**
+ * Reject a Daily entry (create or update) whose resulting mode — TIME_BASED
+ * (has a `time_entries` breakdown) or HOURLY (a plain `hours` number, no
+ * breakdown) — conflicts with the OTHER mode already present elsewhere in
+ * the same employee+month. The Monthly axis is a SEPARATE, already-existing
+ * check (assertNoMonthlyLogForDate, called unconditionally alongside this
+ * one everywhere) — this only covers the TIME_BASED-vs-HOURLY axis within
+ * 'daily' rows. Multiple entries of the SAME mode (different Service
+ * POs/Projects/Tasks/dates/slots) are always allowed — this never rejects
+ * on account of a same-mode entry, only the OPPOSITE one.
+ *
+ * @param {number} employeeId
+ * @param {string} dateStr - "YYYY-MM-DD", used only to resolve the month
+ * @param {number} companyId
+ * @param {'TIME_BASED'|'HOURLY'} incomingMode - the mode this write is producing
+ * @param {{ excludeDate?: string, excludeId?: number }} [excludeOptions] - see
+ *   employeeWorkLogRepository.getMonthEntryModeSummary's doc comment
+ */
+async function assertConsistentDailyEntryMode(employeeId, dateStr, companyId, incomingMode, excludeOptions = {}) {
+  const year = parseInt(dateStr.slice(0, 4), 10);
+  const month = parseInt(dateStr.slice(5, 7), 10);
+  const { startDate, endDate } = dateHelper.getMonthBounds(month, year);
+  const { hasTimeBased, hasHourly } = await employeeWorkLogRepository.getMonthEntryModeSummary(
+    employeeId, startDate, endDate, companyId, excludeOptions
+  );
+
+  const existingMode = incomingMode === 'TIME_BASED' && hasHourly ? 'HOURLY'
+    : incomingMode === 'HOURLY' && hasTimeBased ? 'TIME_BASED'
+    : null;
+
+  if (existingMode) {
+    throw badRequestError(
+      `You already have ${ENTRY_MODE_LABEL[existingMode]} timesheet entries for this month. ` +
+      `${ENTRY_MODE_LABEL[incomingMode]} timesheet entries cannot be added for the same month.`
     );
   }
 }
@@ -143,16 +209,149 @@ async function resolveHierarchyNode(hierarchyNodeId, servicePOId) {
  * @param {Array<{ start_time: string, end_time: string }>} timeEntries
  * @returns {{ hours: number, resolvedEntries: Array<{ start_time: string, end_time: string, duration_hours: number }> }}
  */
+/**
+ * Fill in a missing per-segment `description` from a fallback (the owning
+ * line's own top-level `description`) — a segment that supplied its own
+ * description is left exactly as given, never overwritten. Lets a caller
+ * that only ever sends one description per request (one time_entry per
+ * line — the common case) omit the now-optional per-segment field entirely,
+ * while a caller that DOES want distinct text per slot can still supply it.
+ *
+ * @param {Array<{ start_time: string, end_time: string, description?: string }>} timeEntries
+ * @param {string} fallbackDescription
+ * @returns {Array<{ start_time: string, end_time: string, description: string }>}
+ */
+function withFallbackDescription(timeEntries, fallbackDescription) {
+  return timeEntries.map((entry) => ({
+    ...entry,
+    // Own description wins; else the line's; else genuinely blank — never
+    // undefined/null, since employee_work_log_time_entries.description is
+    // NOT NULL (see EmployeeWorkLogTimeEntry.js's doc comment — blank is
+    // an intentionally allowed value now, undefined is not).
+    description: entry.description || fallbackDescription || '',
+  }));
+}
+
 function resolveTimeEntries(timeEntries) {
   assertNoOverlappingEntries(timeEntries);
 
   const resolvedEntries = timeEntries.map((entry) => ({
     start_time: entry.start_time,
     end_time: entry.end_time,
+    // Each segment's own description, carried through untouched — never
+    // merged with another segment's text and never defaulted from the
+    // parent line (see EmployeeWorkLogTimeEntry.js's doc comment).
+    description: entry.description,
     duration_hours: calculateHoursFromTimes(entry.start_time, entry.end_time),
   }));
 
   return { hours: sumHours(resolvedEntries.map((entry) => entry.duration_hours)), resolvedEntries };
+}
+
+/**
+ * Group a REPLACE SAVE payload's lines by (service_po_id, hierarchy_node_id)
+ * so multiple TIME-BASED lines against the same Module/Task/date — e.g. the
+ * frontend sending one array element per slot, rather than one line with a
+ * multi-item `time_entries` array — are merged into a single logical line
+ * instead of being rejected as duplicates. A key is only ever merged when
+ * EVERY line under it is time-based (has a non-empty `time_entries`); a key
+ * repeated on a plain hours-only line still throws the original duplicate
+ * error, unchanged from before — this only loosens the rule for time-based
+ * entries (see this file's header comment / replaceDailyEntries doc).
+ *
+ * Merging concatenates `time_entries` in payload order and keeps the first
+ * line's other fields (sub_project_id, top-level description) — overlap
+ * across the merged set (including two lines each supplying the exact same
+ * slot) is still caught downstream by resolveTimeEntries/
+ * assertNoOverlappingEntries, so this never silently drops a genuine
+ * conflict.
+ *
+ * @param {Array<object>} rawLines - the raw `entries` array from the request
+ * @returns {Array<object>} one line per (service_po_id, hierarchy_node_id) key
+ */
+function mergeDuplicateKeyLines(rawLines) {
+  const groups = new Map();
+  const order = [];
+
+  for (const raw of rawLines) {
+    const key = `${raw.service_po_id}|${raw.hierarchy_node_id || 'po'}`;
+    const isTimeBased = Array.isArray(raw.time_entries) && raw.time_entries.length > 0;
+    // Each of THIS line's own segments falls back to THIS line's own
+    // description when it didn't supply one of its own — applied before
+    // merging, so a later line's description is never lost/overwritten by
+    // an earlier line's (see withFallbackDescription's doc comment).
+    const timeEntriesWithDescription = isTimeBased
+      ? withFallbackDescription(raw.time_entries, raw.description)
+      : null;
+
+    const existingGroup = groups.get(key);
+    if (!existingGroup) {
+      groups.set(key, { base: raw, timeEntries: timeEntriesWithDescription, isTimeBased });
+      order.push(key);
+      continue;
+    }
+
+    if (!isTimeBased || !existingGroup.isTimeBased) {
+      const nodeSuffix = raw.hierarchy_node_id ? ` / hierarchy node #${raw.hierarchy_node_id}` : '';
+      throw badRequestError(`Duplicate entry for Service PO #${raw.service_po_id}${nodeSuffix} in the same request.`);
+    }
+
+    existingGroup.timeEntries.push(...timeEntriesWithDescription);
+  }
+
+  return order.map((key) => {
+    const group = groups.get(key);
+    return group.isTimeBased ? { ...group.base, time_entries: group.timeEntries } : group.base;
+  });
+}
+
+/**
+ * Preserve an EXISTING TIME_BASED row's segments when the incoming REPLACE
+ * SAVE line for the SAME (service_po_id, hierarchy_node_id) key doesn't
+ * supply its own `time_entries` at all.
+ *
+ * Why this is needed: `GET /employee-timesheets/daily` (the natural data
+ * source for a screen showing multiple Service POs/Tasks with per-task
+ * "Add Slot" actions) only ever returns an AGGREGATE `hours` number per
+ * node — never a `time_entries` breakdown (see getDailyEntries/
+ * buildServicePOsForDate/getDailyHierarchyBreakdown, a `SUM(hours) GROUP BY`
+ * query). So a caller adding a slot for a DIFFERENT Project/Task under the
+ * same Service PO, then resending the whole day via replaceDailyEntries
+ * (REPLACE SAVE — the frontend has no other endpoint capable of adding a
+ * brand-new line), has no way to include a breakdown it was never given for
+ * the OTHER, untouched entries. Without this fallback, that untouched line
+ * would be (mis)treated as a fresh HOURLY entry — the reported "existing
+ * TIME_BASED entry silently converted to Hourly" bug — even though nothing
+ * about it was meant to change.
+ *
+ * Only ever ADDS a breakdown to a line that didn't specify one; a line that
+ * DOES supply `time_entries` (including an intentional edit, or an
+ * intentional conversion via a different flow) is always left exactly as
+ * given, never overridden.
+ *
+ * @param {object[]} lines - merged lines, see mergeDuplicateKeyLines()
+ * @param {object[]} existingRows - this date's CURRENT employee_work_logs
+ *   rows, each with `timeEntries` eager-loaded (see employeeWorkLogRepository.findAll)
+ * @returns {object[]}
+ */
+function preserveExistingTimeEntries(lines, existingRows) {
+  const existingByKey = new Map();
+  for (const row of existingRows) {
+    const key = `${row.service_po_id}|${row.hierarchy_node_id || 'po'}`;
+    const timeEntries = (row.timeEntries || []).map((entry) => ({
+      start_time: entry.start_time,
+      end_time: entry.end_time,
+      description: entry.description,
+    }));
+    if (timeEntries.length > 0) existingByKey.set(key, timeEntries);
+  }
+
+  return lines.map((line) => {
+    if (line.time_entries !== undefined) return line;
+    const key = `${line.service_po_id}|${line.hierarchy_node_id || 'po'}`;
+    const existingTimeEntries = existingByKey.get(key);
+    return existingTimeEntries ? { ...line, time_entries: existingTimeEntries } : line;
+  });
 }
 
 /**
@@ -205,6 +404,13 @@ async function assertDailyCap(employeeId, dateStr, hoursRequested, companyId, ex
  * from before this call can collide with what's being inserted now. Passing
  * an empty `entries` array is valid and clears the date entirely.
  *
+ * A line that omits `time_entries` but matches an existing TIME_BASED row's
+ * key has that row's breakdown carried forward automatically instead of
+ * being flattened into a plain HOURLY row — see
+ * preserveExistingTimeEntries()'s doc comment. This date's resulting mix of
+ * TIME_BASED/HOURLY entries is also checked for consistency against the
+ * rest of the month — see assertConsistentDailyEntryMode().
+ *
  * Every line is validated (project mapping, employee-active/PO-eligible/
  * sub-project-belongs-to-PO, hierarchy node ownership) and the 12-hour/day
  * cap is checked against the SUM of this payload's hours alone — BEFORE the
@@ -221,21 +427,29 @@ async function assertDailyCap(employeeId, dateStr, hoursRequested, companyId, ex
  */
 const replaceDailyEntries = async (employeeId, companyId, data) => {
   const dateStr = assertNotFutureDate(data.timesheet_date);
-  await assertNoMonthlyLogForDate(employeeId, dateStr, companyId);
-  const lines = data.entries || [];
 
   // Two lines at the same (service_po_id, hierarchy_node_id) would collide
-  // on insert (uq_employee_work_logs) — reject up front rather than letting
-  // the transaction fail on a DB constraint violation partway through.
-  const seenKeys = new Set();
-  for (const line of lines) {
-    const key = `${line.service_po_id}|${line.hierarchy_node_id || 'po'}`;
-    if (seenKeys.has(key)) {
-      const nodeSuffix = line.hierarchy_node_id ? ` / hierarchy node #${line.hierarchy_node_id}` : '';
-      throw badRequestError(`Duplicate entry for Service PO #${line.service_po_id}${nodeSuffix} in the same request.`);
-    }
-    seenKeys.add(key);
-  }
+  // on insert (uq_employee_work_logs) — for a PLAIN hours-only line that's
+  // still rejected up front, same as before. For TIME-BASED lines (each
+  // carrying its own `time_entries`) it no longer is: multiple slots
+  // against the same Module/Task/date are a valid, expected shape, so those
+  // lines are merged into one combined line per key instead — see
+  // mergeDuplicateKeyLines().
+  const mergedLines = mergeDuplicateKeyLines(data.entries || []);
+
+  // A line that didn't supply its own `time_entries` but matches an
+  // EXISTING TIME_BASED row's key gets that row's breakdown carried
+  // forward automatically — see preserveExistingTimeEntries's doc comment
+  // for why this is necessary (GET /daily can't expose enough for the
+  // caller to do this itself). No-op for a line that supplies its own
+  // time_entries, or one whose key has no existing TIME_BASED row.
+  const existingRowsForDate = mergedLines.length > 0
+    ? (await employeeWorkLogRepository.findAll(
+        { employeeId, startDate: dateStr, endDate: dateStr, companyId },
+        { limit: 1000 }
+      )).rows
+    : [];
+  const lines = preserveExistingTimeEntries(mergedLines, existingRowsForDate);
 
   // Resolve the authoritative hours/time-entry breakdown for every line
   // FIRST — when a line supplies time_entries, this recalculates hours as
@@ -254,6 +468,27 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
     throw badRequestError(
       `Total hours for ${dateStr} cannot exceed ${DAILY_HOUR_CAP}. This request totals ${Math.round(totalHours * 100) / 100} hours.`
     );
+  }
+
+  // Monthly entry-mode consistency: this date's own lines must not mix
+  // TIME_BASED and HOURLY with EACH OTHER, nor with whatever mode (Daily OR
+  // Monthly) already exists elsewhere in the same month — checked AFTER
+  // resolving every line so the resulting mode (if any) is known, letting
+  // both checks below name it precisely in their message. Skipped entirely
+  // when this payload clears the date (empty `lines`, dayMode stays null) —
+  // nothing to validate; assertNoMonthlyLogForDate then falls back to its
+  // generic message, same as before this change.
+  const dayHasTimeBased = resolvedTimes.some((r) => r.resolvedEntries.length > 0);
+  const dayHasHourly = resolvedTimes.some((r) => r.resolvedEntries.length === 0);
+  if (dayHasTimeBased && dayHasHourly) {
+    throw badRequestError(
+      'Start/End Time based and Hourly timesheet entries cannot be mixed within the same month.'
+    );
+  }
+  const dayMode = dayHasTimeBased ? 'TIME_BASED' : dayHasHourly ? 'HOURLY' : null;
+  await assertNoMonthlyLogForDate(employeeId, dateStr, companyId, dayMode);
+  if (dayMode) {
+    await assertConsistentDailyEntryMode(employeeId, dateStr, companyId, dayMode, { excludeDate: dateStr });
   }
 
   // Resolve/validate every line before touching the database at all.
@@ -288,7 +523,10 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
         hierarchy_node_id: line.hierarchy_node_id || null,
         work_date: dateStr,
         hours: resolvedTimes[i].hours,
-        description: line.description,
+        // Required by Joi for a plain HOURLY line; optional (may be
+        // undefined) for a TIME_BASED line, which the DB's NOT NULL column
+        // still needs a real value for — default to blank, never a crash.
+        description: line.description || '',
         company_id: companyId,
         status: 'pending',
         created_by: employeeId,
@@ -332,6 +570,7 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
 
   return insertedRows.map((row, i) => ({
     ...row.get({ plain: true }),
+    entry_type: resolvedTimes[i].resolvedEntries.length > 0 ? 'TIME_BASED' : 'HOURLY',
     time_entries: resolvedTimes[i].resolvedEntries,
     service_po_breadcrumb: servicePOHierarchyDTO.buildBreadcrumb(
       resolvedLines[i].po.service_po_name,
@@ -375,16 +614,33 @@ const updateEntry = async (employeeId, companyId, id, data) => {
   // a caller-supplied `hours` in `data` is discarded in that case, never
   // trusted (same rule as create). Only when the effective set is empty does
   // `data.hours` (or the existing hours) apply.
+  // Same fallback as create: a segment in an explicitly-supplied
+  // `data.time_entries` that didn't provide its own description falls back
+  // to this update's effective description (the new one if given, else
+  // whatever the row already had) — see withFallbackDescription's doc
+  // comment.
+  const effectiveDescription = data.description !== undefined ? data.description : existing.description;
   const effectiveTimeEntries = data.time_entries !== undefined
-    ? data.time_entries
-    : (existing.timeEntries || []).map((entry) => ({ start_time: entry.start_time, end_time: entry.end_time }));
+    ? withFallbackDescription(data.time_entries, effectiveDescription)
+    : (existing.timeEntries || []).map((entry) => ({
+        start_time: entry.start_time,
+        end_time: entry.end_time,
+        description: entry.description,
+      }));
 
   const { hours, resolvedEntries } = effectiveTimeEntries.length > 0
     ? resolveTimeEntries(effectiveTimeEntries)
     : { hours: data.hours ?? existing.hours, resolvedEntries: [] };
 
   const dateStr = data.timesheet_date ? assertNotFutureDate(data.timesheet_date) : existing.work_date;
-  await assertNoMonthlyLogForDate(employeeId, dateStr, companyId);
+
+  // This row's resulting mode (after applying this update) must not
+  // conflict with whatever mode the REST of the month already has — see
+  // assertConsistentDailyEntryMode's doc comment. Excludes this row itself
+  // from the "existing" scan since it's the one being changed in place.
+  const updatedMode = resolvedEntries.length > 0 ? 'TIME_BASED' : 'HOURLY';
+  await assertNoMonthlyLogForDate(employeeId, dateStr, companyId, updatedMode);
+  await assertConsistentDailyEntryMode(employeeId, dateStr, companyId, updatedMode, { excludeId: id });
 
   await assertProjectMapped(employeeId, servicePOId, companyId);
 
@@ -413,7 +669,7 @@ const updateEntry = async (employeeId, companyId, id, data) => {
       hierarchy_node_id: hierarchyNodeId || null,
       work_date: dateStr,
       hours,
-      description: data.description !== undefined ? data.description : existing.description,
+      description: effectiveDescription,
       updated_by: employeeId,
       // Any edit invalidates a prior sync snapshot — revert unconditionally
       // to 'pending' (a no-op if it was already 'pending') EXCEPT when the
@@ -449,6 +705,7 @@ const updateEntry = async (employeeId, companyId, id, data) => {
 
   return {
     ...updated.get({ plain: true }),
+    entry_type: resolvedEntries.length > 0 ? 'TIME_BASED' : 'HOURLY',
     time_entries: resolvedEntries,
     service_po_breadcrumb: servicePOHierarchyDTO.buildBreadcrumb(po.service_po_name, hierarchyNode),
   };
@@ -486,7 +743,7 @@ const updateEntry = async (employeeId, companyId, id, data) => {
  */
 const addTimeEntries = async (employeeId, companyId, data) => {
   const dateStr = assertNotFutureDate(data.work_date);
-  await assertNoMonthlyLogForDate(employeeId, dateStr, companyId);
+  await assertNoMonthlyLogForDate(employeeId, dateStr, companyId, 'TIME_BASED');
   await assertProjectMapped(employeeId, data.service_po_id, companyId);
 
   const { po } = await timesheetService.resolveManualEntryReferences(
@@ -501,26 +758,43 @@ const addTimeEntries = async (employeeId, companyId, data) => {
   );
   const existing = existingRef ? await employeeWorkLogRepository.findById(existingRef.id, companyId) : null;
 
-  if (!existing && data.description === undefined) {
-    throw badRequestError('description is required when logging this Module/Task for the first time on this date.');
-  }
+  // This endpoint always produces a TIME_BASED row (time_entries is
+  // required by its own schema) — must not conflict with an existing
+  // HOURLY entry elsewhere in the month. The row being appended to (if any)
+  // is already TIME_BASED itself, so excluding it is purely defensive, not
+  // load-bearing — see assertConsistentDailyEntryMode's doc comment.
+  await assertConsistentDailyEntryMode(
+    employeeId, dateStr, companyId, 'TIME_BASED', existing ? { excludeId: existing.id } : {}
+  );
 
   const existingEntries = existing
-    ? (existing.timeEntries || []).map((entry) => ({ start_time: entry.start_time, end_time: entry.end_time }))
+    ? (existing.timeEntries || []).map((entry) => ({
+        start_time: entry.start_time,
+        end_time: entry.end_time,
+        description: entry.description,
+      }))
     : [];
+
+  // Computed BEFORE resolving the new segments so a segment that didn't
+  // supply its own description can fall back to it (see
+  // withFallbackDescription's doc comment). Fully optional, including on
+  // this Module/Task's very first entry for this date — a missing
+  // description anywhere (line-level or every new segment) resolves to an
+  // empty string, never a validation error.
+  const effectiveDescription = (data.description !== undefined
+    ? data.description
+    : (existing ? existing.description : data.description)) || '';
 
   // Overlap-checked and hours-computed across the COMBINED set — a new
   // segment overlapping one already saved is rejected even though it wasn't
-  // resent in THIS request.
+  // resent in THIS request. Only the NEW segments (not the already-saved
+  // `existingEntries`, which already carry their own real descriptions) get
+  // the fallback applied.
   const { hours: newTotalHours, resolvedEntries: combinedResolvedEntries } =
-    resolveTimeEntries([...existingEntries, ...data.time_entries]);
+    resolveTimeEntries([...existingEntries, ...withFallbackDescription(data.time_entries, effectiveDescription)]);
   const newlyResolvedEntries = combinedResolvedEntries.slice(existingEntries.length);
 
   await assertDailyCap(employeeId, dateStr, newTotalHours, companyId, existing ? existing.id : null);
-
-  const effectiveDescription = data.description !== undefined
-    ? data.description
-    : (existing ? existing.description : data.description);
 
   const workLogId = await sequelize.transaction(async (transaction) => {
     let id;
@@ -588,6 +862,8 @@ const addTimeEntries = async (employeeId, companyId, data) => {
     work_date: dateStr,
     hours: newTotalHours,
     description: effectiveDescription,
+    // Always TIME_BASED — this endpoint's own schema requires time_entries.
+    entry_type: 'TIME_BASED',
     time_entries: combinedResolvedEntries,
     service_po_breadcrumb: servicePOHierarchyDTO.buildBreadcrumb(po.service_po_name, hierarchyNode),
   };
@@ -628,7 +904,8 @@ const resubmitEntry = async (employeeId, companyId, id) => {
     throw conflictError(`Only a rejected work log entry can be resubmitted (current status: ${existing.status}).`);
   }
 
-  await assertNoMonthlyLogForDate(employeeId, existing.work_date, companyId);
+  const existingMode = (existing.timeEntries || []).length > 0 ? 'TIME_BASED' : 'HOURLY';
+  await assertNoMonthlyLogForDate(employeeId, existing.work_date, companyId, existingMode);
   await assertProjectMapped(employeeId, existing.service_po_id, companyId);
   await timesheetService.resolveManualEntryReferences(
     { employee_id: employeeId, service_po_id: existing.service_po_id, sub_project_id: existing.sub_project_id },
@@ -642,7 +919,10 @@ const resubmitEntry = async (employeeId, companyId, id) => {
 
   logger.info('Employee resubmitted a rejected work log entry', { workLogId: id, employeeId, companyId });
 
-  return updated;
+  // Resubmit never touches time_entries/hours — the row's mode is exactly
+  // what it already was (existingMode, computed above), carried through
+  // explicitly rather than left for the caller to re-infer.
+  return { ...updated, entry_type: existingMode };
 };
 
 /**
@@ -680,6 +960,13 @@ const getEntries = async (employeeId, companyId, query) => {
     const plain = row.toJSON();
     return {
       ...plain,
+      // The ORIGINAL entry type, explicit rather than left for the caller
+      // to infer from `timeEntries`' presence — never derived from
+      // `hours` (a TIME_BASED row's calculated total is still just a
+      // number, it never implies HOURLY). See EmployeeWorkLog.js's
+      // log_type doc comment for the separate Daily/Monthly axis this is
+      // independent of.
+      entry_type: (plain.timeEntries && plain.timeEntries.length > 0) ? 'TIME_BASED' : 'HOURLY',
       rejected_by_name: plain.rejectedByEmployee?.full_name || null,
     };
   });

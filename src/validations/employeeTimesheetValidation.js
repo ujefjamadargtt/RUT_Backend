@@ -25,14 +25,31 @@ const timeEntrySchema = Joi.object({
     'any.required': 'end_time is required for every time entry.',
     'string.pattern.base': 'end_time must be in HH:MM (24-hour) format.',
   }),
+  // Each slot's OWN description — fully optional per segment, including
+  // genuinely blank: a caller that wants distinct text per slot (Slot 1
+  // "API development", Slot 2 "Bug fixing") may supply it here, and it's
+  // kept exactly as given, never merged with another segment's text. A
+  // caller that omits this (or the line's own description too) gets an
+  // empty string stored, never a validation error — see
+  // employeeTimesheetService.js's withFallbackDescription() and
+  // EmployeeWorkLogTimeEntry.js's doc comment.
+  description: Joi.string().trim().max(2000).allow('').optional().messages({
+    'string.max': 'description cannot exceed 2000 characters.',
+  }),
 });
 
 /**
  * A single line item within a POST /employee-timesheets/entries REPLACE SAVE
  * payload — no timesheet_date of its own (the whole array shares the one
- * top-level date), no duplicate-entry concerns (the service layer wipes and
- * reinserts every entry for that date in one transaction, so there is no
- * "existing" row to collide with — see replaceDailyEntriesSchema).
+ * top-level date). The service layer wipes and reinserts every entry for
+ * that date in one transaction, so there is never a collision against an
+ * "existing" DB row — but two lines in the SAME payload can still collide
+ * with each other. Two lines sharing (service_po_id, hierarchy_node_id) are
+ * allowed when EVERY one of them is time-based (carries `time_entries`) —
+ * they're merged into that Module/Task's combined slot list (still subject
+ * to the usual overlap check across the merged set). The same key repeated
+ * on a plain hours-only line (no `time_entries`) is still rejected as a
+ * duplicate — see employeeTimesheetService.replaceDailyEntries.
  */
 const dailyEntryLineSchema = Joi.object({
   service_po_id: Joi.number().integer().positive().required().messages({
@@ -62,9 +79,17 @@ const dailyEntryLineSchema = Joi.object({
     'number.positive': 'Hours must be greater than 0.',
     'number.max': 'Hours cannot exceed 12 per day.',
   }),
-  description: Joi.string().trim().min(1).max(2000).required().messages({
+  // Required for a plain HOURLY line (no time_entries) — unchanged. Fully
+  // optional (including blank) for a TIME_BASED line: each segment may
+  // carry its own description instead (see timeEntrySchema above), and a
+  // caller relying purely on per-segment text no longer needs to also fill
+  // in a line-level one.
+  description: Joi.string().trim().max(2000).allow('').when('time_entries', {
+    is: Joi.array().min(1).required(),
+    then: Joi.optional(),
+    otherwise: Joi.required(),
+  }).messages({
     'any.required': 'Description is required.',
-    'string.min': 'Description cannot be empty.',
     'string.max': 'Description cannot exceed 2000 characters.',
   }),
 });
@@ -110,8 +135,7 @@ const updateEntrySchema = Joi.object({
     'number.positive': 'Hours must be greater than 0.',
     'number.max': 'Hours cannot exceed 12 per day.',
   }),
-  description: Joi.string().trim().min(1).max(2000).optional().messages({
-    'string.min': 'Description cannot be empty.',
+  description: Joi.string().trim().max(2000).allow('').optional().messages({
     'string.max': 'Description cannot exceed 2000 characters.',
   }),
   timesheet_date: Joi.date().iso().optional().messages({
@@ -190,12 +214,13 @@ const addTimeEntriesSchema = Joi.object({
     'any.required': 'time_entries is required.',
     'array.min': 'time_entries must contain at least one entry.',
   }),
-  // Required only when this Module/Task has no existing entry yet for this
-  // date — employeeTimesheetService.addTimeEntries() enforces that at the
-  // service layer (where it can check), not here. When the entry already
-  // exists, omitting this leaves its current description untouched.
-  description: Joi.string().trim().min(1).max(2000).optional().messages({
-    'string.min': 'Description cannot be empty.',
+  // Fully optional, including on this Module/Task's very first entry for
+  // this date — a segment may carry its own description instead (see
+  // timeEntrySchema), and a missing description anywhere resolves to an
+  // empty string, never a validation error. Omitting this on an EXISTING
+  // entry leaves its current description untouched (see addTimeEntries()'s
+  // doc comment).
+  description: Joi.string().trim().max(2000).allow('').optional().messages({
     'string.max': 'Description cannot exceed 2000 characters.',
   }),
 });

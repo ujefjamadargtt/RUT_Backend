@@ -208,9 +208,13 @@ router.get(
  *     summary: >
  *       REPLACE SAVE the employee's complete set of timesheet entries for
  *       one date. Deletes every existing entry for (employee, date) and
- *       reinserts exactly the given `entries` list, in one transaction —
- *       never a duplicate-entry error. Pass an empty `entries` array to
- *       clear the date entirely.
+ *       reinserts exactly the given `entries` list, in one transaction.
+ *       Multiple lines against the same Service PO + hierarchy node are
+ *       allowed as long as each one is time-based (carries `time_entries`)
+ *       — they're merged into that Module/Task's combined slot list rather
+ *       than rejected as a duplicate; a repeated key on a plain hours-only
+ *       line is still rejected. Pass an empty `entries` array to clear the
+ *       date entirely.
  *     tags: [Employee Timesheet]
  *     security:
  *       - bearerAuth: []
@@ -234,11 +238,27 @@ router.get(
  *                     hierarchy_node_id: { type: integer }
  *                     hours: { type: number }
  *                     description: { type: string }
+ *                     time_entries:
+ *                       type: array
+ *                       description: >
+ *                         One or more Start Time/End Time slots for this
+ *                         line, each with its OWN description. When given,
+ *                         `hours` is recalculated server-side as their sum.
+ *                       items:
+ *                         type: object
+ *                         required: [start_time, end_time, description]
+ *                         properties:
+ *                           start_time: { type: string, example: "09:00" }
+ *                           end_time: { type: string, example: "10:00" }
+ *                           description: { type: string }
  *     responses:
  *       200:
  *         description: The date's entries after the replace (array)
  *       400:
- *         description: Future date, daily hour cap exceeded, or duplicate (service_po_id, hierarchy_node_id) within the payload
+ *         description: >
+ *           Future date, daily hour cap exceeded, overlapping time entries,
+ *           or a duplicate (service_po_id, hierarchy_node_id) within the
+ *           payload on a plain hours-only line
  *       403:
  *         description: A Service PO in the payload is not mapped to this employee
  *       422:
@@ -317,11 +337,12 @@ router.put(
  *                 minItems: 1
  *                 items:
  *                   type: object
- *                   required: [start_time, end_time]
+ *                   required: [start_time, end_time, description]
  *                   properties:
  *                     start_time: { type: string, example: "09:30" }
  *                     end_time: { type: string, example: "10:20" }
- *               description: { type: string, description: "Required only when no entry exists yet for this Module/Task/date" }
+ *                     description: { type: string, description: "This slot's own description — required on every segment" }
+ *               description: { type: string, description: "Module/Task-level description; required only when no entry exists yet for this Module/Task/date" }
  *     responses:
  *       200:
  *         description: Entry after the add — includes the FULL time_entries breakdown (old + new)

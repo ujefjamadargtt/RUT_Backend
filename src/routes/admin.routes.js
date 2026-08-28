@@ -18,7 +18,7 @@ const router = express.Router();
 const authenticate = require('../middlewares/auth');
 const requirePlatformAdmin = require('../middlewares/requirePlatformAdmin');
 const { validate } = require('../middlewares/validateRequest');
-const { createAdminSchema, listAdminsQuerySchema } = require('../validations/adminValidation');
+const { createAdminSchema, updateAdminSchema, listAdminsQuerySchema } = require('../validations/adminValidation');
 const adminController = require('../controllers/adminController');
 
 /**
@@ -112,6 +112,33 @@ router.get(
   authenticate,
   requirePlatformAdmin,
   adminController.getById
+);
+
+/**
+ * @swagger
+ * /admins/{id}:
+ *   put:
+ *     summary: Edit an Admin (Platform Admin only)
+ *     tags: [Admins]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Admin updated
+ *       404:
+ *         description: Not found
+ */
+router.put(
+  '/:id',
+  authenticate,
+  requirePlatformAdmin,
+  validate(updateAdminSchema),
+  adminController.update
 );
 
 module.exports = router;

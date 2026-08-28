@@ -18,7 +18,7 @@ const { EmployeeWorkLogTimeEntry } = require('../models');
  * already computed server-side — see workLogTimeHelper.calculateHoursFromTimes)
  * by the service layer; this is a plain insert.
  * @param {number} employeeWorkLogId
- * @param {Array<{ entry_date: string, start_time: string, end_time: string, duration_hours: number }>} entries
+ * @param {Array<{ entry_date: string, start_time: string, end_time: string, duration_hours: number, description: string }>} entries
  * @param {number} actorId
  * @param {object} transaction
  * @returns {Promise<EmployeeWorkLogTimeEntry[]>}
@@ -32,6 +32,7 @@ const bulkCreate = async (employeeWorkLogId, entries, actorId, transaction) => {
       start_time: entry.start_time,
       end_time: entry.end_time,
       duration_hours: entry.duration_hours,
+      description: entry.description,
       created_by: actorId,
       updated_by: actorId,
     })),

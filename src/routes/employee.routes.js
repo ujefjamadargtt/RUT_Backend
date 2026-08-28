@@ -27,12 +27,30 @@ const { importLimiter } = require('../middlewares/rateLimiters');
  * /employees/active/list:
  *   get:
  *     summary: Get all active employees (lightweight list for dropdowns)
+ *     description: |
+ *       Without `service_po_id`, behavior is unchanged: scoped via the
+ *       caller's usual per-role access rules.
+ *
+ *       With `service_po_id`, this becomes the Service PO -> Map Employees
+ *       screen's data source: the caller's per-role "own team" restriction
+ *       is bypassed entirely in favor of their FULL authorized Admin/
+ *       company/tenant scope — every Business Unit they manage, not just
+ *       the Service PO's own BU or the currently selected Global BU. The
+ *       Service PO id itself is still verified against the caller's
+ *       tenant scope; an unknown or out-of-scope id 404s.
  *     tags: [Employees]
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: service_po_id
+ *         schema: { type: integer }
+ *         description: Switches to the Service PO -> Map Employees scope described above.
  *     responses:
  *       200:
  *         description: Active employee list
+ *       404:
+ *         description: service_po_id given but not found in the caller's tenant scope
  */
 // NOTE: Static routes must be declared BEFORE /:id to avoid being parsed as an id parameter.
 
@@ -206,6 +224,15 @@ router.get(
  *         name: business_unit_id
  *         schema: { type: integer }
  *         description: Narrows the list to employees mapped to this ONE Business Unit — stacks on top of (never widens) the caller's own access scope.
+ *       - in: query
+ *         name: service_po_id
+ *         schema: { type: integer }
+ *         description: >
+ *           Service PO -> Map Employees data source. Bypasses the caller's
+ *           normal per-role "own team" scope in favor of their FULL
+ *           authorized Admin/company/tenant scope (every Business Unit they
+ *           manage, not just the Service PO's own BU or the currently
+ *           selected Global BU). An unknown/out-of-scope id 404s.
  *       - in: query
  *         name: sort_by
  *         schema: { type: string, default: full_name }

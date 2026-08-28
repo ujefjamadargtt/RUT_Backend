@@ -40,8 +40,21 @@ const saveEmployeeMappingsSchema = Joi.object({
   }),
 });
 
+/**
+ * GET /employee-servicepo-mapping/service-po/:servicePOId/options
+ */
+const getServicePOEmployeeOptionsQuerySchema = Joi.object({
+  search: Joi.string().trim().max(100).optional().allow(''),
+  page: Joi.number().integer().min(1).default(1),
+  limit: Joi.number().integer().min(1).max(200).default(20),
+  // Panel's own opt-in Entity → BU filter dropdowns — see
+  // employeeServicePOMappingService.getEmployeeOptionsForServicePO()'s doc comment.
+  business_unit_id: Joi.number().integer().positive().optional(),
+});
+
 module.exports = {
   assignMappingSchema,
   listMappingsQuerySchema,
   saveEmployeeMappingsSchema,
+  getServicePOEmployeeOptionsQuerySchema,
 };
