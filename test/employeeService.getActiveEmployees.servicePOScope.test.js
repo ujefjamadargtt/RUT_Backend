@@ -48,12 +48,18 @@ function stubScopePassthrough() {
 function captureRepoCall(rows = []) {
   let capturedCompanyId;
   let capturedAccessWhere;
-  employeeRepository.getActiveEmployees = async (companyId, accessWhere) => {
+  let capturedBusinessUnitId;
+  employeeRepository.getActiveEmployees = async (companyId, accessWhere, businessUnitId) => {
     capturedCompanyId = companyId;
     capturedAccessWhere = accessWhere;
+    capturedBusinessUnitId = businessUnitId;
     return rows;
   };
-  return { getCompanyId: () => capturedCompanyId, getAccessWhere: () => capturedAccessWhere };
+  return {
+    getCompanyId: () => capturedCompanyId,
+    getAccessWhere: () => capturedAccessWhere,
+    getBusinessUnitId: () => capturedBusinessUnitId,
+  };
 }
 
 // Service PO Admin mapped to BU 3 and BU 7, currently viewing (selected)

@@ -3,6 +3,7 @@
 const reportService = require('../services/reportService');
 const { sendPaginated, sendSuccess, sendError } = require('../utils/response');
 const logger = require('../utils/logger');
+const employeeWorkLogHoursSummaryService = require('../services/employeeWorkLogHoursSummaryService');
 
 /**
  * Report Controller
@@ -20,7 +21,7 @@ const logger = require('../utils/logger');
 async function getEmployeeHourlyRate(req, res, next) {
   try {
     const filters = { ...req.body, ...req.query };
-    const { data, meta } = await reportService.getEmployeeHourlyRate(filters, req.companyId);
+    const { data, meta } = await reportService.getEmployeeHourlyRate(filters, req.companyIds);
     return sendPaginated(res, data, meta, 'Employee hourly rate report fetched successfully.');
   } catch (err) {
     if (err.statusCode) {
@@ -28,6 +29,57 @@ async function getEmployeeHourlyRate(req, res, next) {
     }
     logger.error('getEmployeeHourlyRate error', { error: err.message, stack: err.stack });
     next(err);
+  }
+}
+
+/**
+ * GET /api/v1/reports/employee-work-log-hours-summary
+ * One aggregated row per authorized employee for a date or calendar month.
+ */
+async function getEmployeeWorkLogHoursSummary(req, res, next) {
+  try {
+    const result = await employeeWorkLogHoursSummaryService.getSummary(
+      req.query,
+      {
+        userId: req.userId,
+        employeeId: req.employeeId,
+        hierarchyRank: req.hierarchyRank,
+        roleNames: req.userRoles,
+      },
+      req.companyIds
+    );
+    return sendPaginated(res, { period: result.period, records: result.data }, result.meta,
+      'Employee work log hours summary fetched successfully.');
+  } catch (err) {
+    if (err.statusCode) return sendError(res, err.message, err.statusCode);
+    logger.error('getEmployeeWorkLogHoursSummary error', { error: err.message, stack: err.stack });
+    return next(err);
+  }
+}
+
+/**
+ * GET /api/v1/reports/employee-work-log-hours-summary/:employeeId/details
+ * Detail rows are authorized independently from the summary row selection.
+ */
+async function getEmployeeWorkLogHoursSummaryDetails(req, res, next) {
+  try {
+    const result = await employeeWorkLogHoursSummaryService.getDetails(
+      req.params.employeeId,
+      req.query,
+      {
+        userId: req.userId,
+        employeeId: req.employeeId,
+        hierarchyRank: req.hierarchyRank,
+        roleNames: req.userRoles,
+      },
+      req.companyIds
+    );
+    const { meta, ...data } = result;
+    return sendPaginated(res, data, meta, 'Employee work log history fetched successfully.');
+  } catch (err) {
+    if (err.statusCode) return sendError(res, err.message, err.statusCode);
+    logger.error('getEmployeeWorkLogHoursSummaryDetails error', { error: err.message, stack: err.stack });
+    return next(err);
   }
 }
 
@@ -41,7 +93,7 @@ async function getEmployeeHourlyRate(req, res, next) {
 async function getMonthlyCostSummary(req, res, next) {
   try {
     const filters = { ...req.body, ...req.query };
-    const { data, meta, summary } = await reportService.getMonthlyCostSummary(filters, req.companyId);
+    const { data, meta, summary } = await reportService.getMonthlyCostSummary(filters, req.companyIds);
     const response = { records: data, summary };
     return sendPaginated(res, response, meta, 'Monthly cost summary fetched successfully.');
   } catch (err) {
@@ -64,7 +116,7 @@ async function getMonthlyCostSummary(req, res, next) {
 async function getTimesheetSummary(req, res, next) {
   try {
     const filters = { ...req.body, ...req.query };
-    const { data, meta, summary } = await reportService.getTimesheetSummary(filters, req.companyId);
+    const { data, meta, summary } = await reportService.getTimesheetSummary(filters, req.companyIds);
     const response = { records: data, summary };
     return sendPaginated(res, response, meta, 'Timesheet summary fetched successfully.');
   } catch (err) {
@@ -87,7 +139,7 @@ async function getTimesheetSummary(req, res, next) {
 async function getServicePOUtilisation(req, res, next) {
   try {
     const filters = { ...req.body, ...req.query };
-    const { data, meta } = await reportService.getServicePOUtilisation(filters, req.companyId);
+    const { data, meta } = await reportService.getServicePOUtilisation(filters, req.companyIds);
     return sendPaginated(res, data, meta, 'Service PO utilisation report fetched successfully.');
   } catch (err) {
     if (err.statusCode) {
@@ -109,7 +161,7 @@ async function getServicePOUtilisation(req, res, next) {
 async function getSubProjectHours(req, res, next) {
   try {
     const filters = { ...req.body, ...req.query };
-    const { data, meta, summary } = await reportService.getSubProjectHours(filters, req.companyId);
+    const { data, meta, summary } = await reportService.getSubProjectHours(filters, req.companyIds);
     const response = { records: data, summary };
     return sendPaginated(res, response, meta, 'Sub-project hours report fetched successfully.');
   } catch (err) {
@@ -133,7 +185,7 @@ async function getSubProjectHours(req, res, next) {
 async function getResourceAllocation(req, res, next) {
   try {
     const filters = { ...req.body, ...req.query };
-    const { data, meta } = await reportService.getResourceAllocation(filters, req.companyId);
+    const { data, meta } = await reportService.getResourceAllocation(filters, req.companyIds);
     return sendPaginated(res, data, meta, 'Resource allocation report fetched successfully.');
   } catch (err) {
     if (err.statusCode) {
@@ -155,7 +207,7 @@ async function getResourceAllocation(req, res, next) {
 async function getOperationalCostBreakdown(req, res, next) {
   try {
     const filters = { ...req.body, ...req.query };
-    const { data, meta, summary } = await reportService.getOperationalCostBreakdown(filters, req.companyId);
+    const { data, meta, summary } = await reportService.getOperationalCostBreakdown(filters, req.companyIds);
     const response = { records: data, summary };
     return sendPaginated(res, response, meta, 'Operational cost breakdown fetched successfully.');
   } catch (err) {
@@ -178,7 +230,7 @@ async function getOperationalCostBreakdown(req, res, next) {
 async function getEmployeeUtilizationSummary(req, res, next) {
   try {
     const filters = { ...req.body, ...req.query };
-    const { data, meta, summary } = await reportService.getEmployeeUtilizationSummary(filters, req.companyId);
+    const { data, meta, summary } = await reportService.getEmployeeUtilizationSummary(filters, req.companyIds);
     const response = { records: data, summary };
     return sendPaginated(res, response, meta, 'Employee utilization summary fetched successfully.');
   } catch (err) {
@@ -202,7 +254,7 @@ async function getEmployeeUtilizationSummary(req, res, next) {
 async function getServicePOSummary(req, res, next) {
   try {
     const filters = { ...req.body, ...req.query };
-    const { data, meta, summary } = await reportService.getServicePOSummary(filters, req.companyId);
+    const { data, meta, summary } = await reportService.getServicePOSummary(filters, req.companyIds);
     const response = { records: data, summary };
     return sendPaginated(res, response, meta, 'Service PO summary report fetched successfully.');
   } catch (err) {
@@ -232,7 +284,7 @@ async function getServicePOSummary(req, res, next) {
 async function getInvoicePOSummary(req, res, next) {
   try {
     const filters = { ...req.body, ...req.query };
-    const { data, meta, summary } = await reportService.getInvoicePOSummary(filters, req.companyId);
+    const { data, meta, summary } = await reportService.getInvoicePOSummary(filters, req.companyIds);
     const response = { records: data, summary };
     return sendPaginated(res, response, meta, 'Invoice PO summary report fetched successfully.');
   } catch (err) {
@@ -254,7 +306,7 @@ async function getInvoicePOSummary(req, res, next) {
 async function getResourceUtilization(req, res, next) {
   try {
     const filters = { ...req.body, ...req.query };
-    const { columns, data, meta, summary } = await reportService.getResourceUtilization(filters, req.companyId);
+    const { columns, data, meta, summary } = await reportService.getResourceUtilization(filters, req.companyIds);
     return sendPaginated(res, { columns, records: data, summary }, meta, 'Resource utilization report fetched successfully.');
   } catch (err) {
     if (err.statusCode) {
@@ -278,7 +330,7 @@ async function getResourceUtilization(req, res, next) {
 async function getMonthlyResourceUtilization(req, res, next) {
   try {
     const filters = { ...req.body, ...req.query };
-    const { columns, data, meta, summary } = await reportService.getMonthlyResourceUtilization(filters, req.companyId);
+    const { columns, data, meta, summary } = await reportService.getMonthlyResourceUtilization(filters, req.companyIds);
     return sendPaginated(res, { columns, records: data, summary }, meta, 'Monthly resource utilization report fetched successfully.');
   } catch (err) {
     if (err.statusCode) {
@@ -292,7 +344,7 @@ async function getMonthlyResourceUtilization(req, res, next) {
 async function getResourseProjectUtilizationReport(req, res, next) {
   try {
     const filters = { ...req.body, ...req.query };
-    const { data, meta } = await reportService.getResourseProjectUtilizationReport(filters, req.companyId);
+    const { data, meta } = await reportService.getResourseProjectUtilizationReport(filters, req.companyIds);
     return sendPaginated(res, data, meta, 'Employee resource utilization report fetched successfully.');
   } catch (err) {
     if (err.statusCode) {
@@ -318,7 +370,7 @@ async function getResourseProjectUtilizationReport(req, res, next) {
 async function getClientServicePOHoursReport(req, res, next) {
   try {
     const filters = { ...req.body, ...req.query };
-    const data = await reportService.getClientServicePOHoursReport(filters, req.companyId);
+    const data = await reportService.getClientServicePOHoursReport(filters, req.companyIds);
     return sendSuccess(res, data, 'Client Service PO Hours Report fetched successfully.');
   } catch (err) {
     if (err.statusCode) {
@@ -342,7 +394,7 @@ async function getClientServicePOHoursReport(req, res, next) {
 async function getClientCostAnalytics(req, res, next) {
   try {
     const filters = { ...req.body, ...req.query };
-    const data = await reportService.getClientCostAnalytics(filters, req.companyId);
+    const data = await reportService.getClientCostAnalytics(filters, req.companyIds);
     return sendSuccess(res, data, 'Client cost analytics report fetched successfully.');
   } catch (err) {
     if (err.statusCode) {
@@ -365,7 +417,7 @@ async function getClientCostAnalytics(req, res, next) {
 async function getClientWiseAnalytics(req, res, next) {
   try {
     const filters = { ...req.body, ...req.query };
-    const { data, meta } = await reportService.getClientWiseAnalyticsReport(filters, req.companyId);
+    const { data, meta } = await reportService.getClientWiseAnalyticsReport(filters, req.companyIds);
     return sendPaginated(res, data, meta, 'Client wise analytics report fetched successfully.');
   } catch (err) {
     if (err.statusCode) {
@@ -391,7 +443,7 @@ async function getClientWiseAnalytics(req, res, next) {
 async function getMonthlyHoursTrend(req, res, next) {
   try {
     const filters = { ...req.body, ...req.query };
-    const data = await reportService.getMonthlyHoursTrend(filters, req.companyId);
+    const data = await reportService.getMonthlyHoursTrend(filters, req.companyIds);
     return sendSuccess(res, data, 'Monthly hours trend report fetched successfully.');
   } catch (err) {
     if (err.statusCode) {
@@ -413,7 +465,7 @@ async function getMonthlyHoursTrend(req, res, next) {
 async function getEmployeeBenchPercentage(req, res, next) {
   try {
     const filters = { ...req.body, ...req.query };
-    const { data, meta } = await reportService.getEmployeeBenchPercentage(filters, req.companyId);
+    const { data, meta } = await reportService.getEmployeeBenchPercentage(filters, req.companyIds);
     return sendPaginated(res, data, meta, 'Employee bench percentage report fetched successfully.');
   } catch (err) {
     if (err.statusCode) {
@@ -438,7 +490,7 @@ async function getEmployeeBenchPercentage(req, res, next) {
 async function getBudgetVsBilled(req, res, next) {
   try {
     const filters = { ...req.body, ...req.query };
-    const data = await reportService.getBudgetVsBilledReport(filters, req.companyId);
+    const data = await reportService.getBudgetVsBilledReport(filters, req.companyIds);
     return sendSuccess(res, data, 'Budget vs Billed report fetched successfully.');
   } catch (err) {
     if (err.statusCode) {
@@ -449,7 +501,58 @@ async function getBudgetVsBilled(req, res, next) {
   }
 }
 
+/**
+ * GET /api/v1/reports/resource-utilization-trend
+ *
+ * Query params: month + year, OR startDate + endDate (exactly one mode,
+ * required), employeeId, clientId, poId, serviceTypeId, hoursSource,
+ * roleId, page, limit, sortBy, sortOrder
+ *
+ * The existing Utilization Trend formula (Billable Hours / Total Hours ×
+ * 100), grouped by Month + Resource instead of Month only.
+ */
+async function getResourceUtilizationTrend(req, res, next) {
+  try {
+    const filters = { ...req.body, ...req.query };
+    const { data, meta } = await reportService.getResourceUtilizationTrendReport(filters, req.companyIds);
+    return sendPaginated(res, data, meta, 'Resource utilization trend report fetched successfully.');
+  } catch (err) {
+    if (err.statusCode) {
+      return sendError(res, err.message, err.statusCode);
+    }
+    logger.error('getResourceUtilizationTrend error', { error: err.message, stack: err.stack });
+    next(err);
+  }
+}
+
+/**
+ * GET /api/v1/reports/service-po-hours-budget
+ *
+ * Query params: month + year, OR startDate + endDate (exactly one mode,
+ * required), employeeId, clientId, poId, serviceTypeId, hoursSource,
+ * roleId, page, limit, sortBy, sortOrder
+ *
+ * Total PO Hours (existing timesheet-hours logic) and Cost Budget
+ * (cost_budget_master.invoice_amount for that PO + month), per Month +
+ * Service PO.
+ */
+async function getServicePOHoursBudget(req, res, next) {
+  try {
+    const filters = { ...req.body, ...req.query };
+    const { data, meta } = await reportService.getServicePOHoursBudgetReport(filters, req.companyIds);
+    return sendPaginated(res, data, meta, 'Service PO hours & cost budget report fetched successfully.');
+  } catch (err) {
+    if (err.statusCode) {
+      return sendError(res, err.message, err.statusCode);
+    }
+    logger.error('getServicePOHoursBudget error', { error: err.message, stack: err.stack });
+    next(err);
+  }
+}
+
 module.exports = {
+  getEmployeeWorkLogHoursSummary,
+  getEmployeeWorkLogHoursSummaryDetails,
   getEmployeeHourlyRate,
   getMonthlyCostSummary,
   getTimesheetSummary,
@@ -467,6 +570,8 @@ module.exports = {
   getClientCostAnalytics,
   getClientWiseAnalytics,
   getMonthlyHoursTrend,
+  getResourceUtilizationTrend,
+  getServicePOHoursBudget,
   getEmployeeBenchPercentage,
   getBudgetVsBilled,
 };

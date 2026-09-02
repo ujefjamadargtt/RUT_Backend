@@ -84,7 +84,7 @@ function aggregateRowsByServicePO(workLogs) {
  * @param {string} date - "YYYY-MM-DD"
  */
 const getDailyReport = async (employeeId, companyId, date) => {
-  const workLogs = await employeeWorkLogRepository.getReportRows({ employeeId, companyId, startDate: date, endDate: date });
+  const workLogs = await employeeWorkLogRepository.getReportRows({ employeeId, startDate: date, endDate: date });
 
   const aggregated = aggregateRowsByServicePO(workLogs);
   const totalHours = aggregated.reduce((sum, r) => sum + r.hours, 0);
@@ -156,7 +156,7 @@ function aggregateMonthlyRowsByServicePO(workLogs) {
  */
 const getMonthlyReport = async (employeeId, companyId, month, year) => {
   const { startDate, endDate } = dateHelper.getMonthBounds(month, year);
-  const workLogs = await employeeWorkLogRepository.getReportRows({ employeeId, companyId, startDate, endDate });
+  const workLogs = await employeeWorkLogRepository.getReportRows({ employeeId, startDate, endDate });
 
   const aggregated = aggregateMonthlyRowsByServicePO(workLogs);
   const totalHours = aggregated.reduce((sum, r) => sum + r.hours, 0);
@@ -227,7 +227,7 @@ function aggregateRangeRowsByServicePO(workLogs) {
  * @param {string} endDate
  */
 const getDateRangeReport = async (employeeId, companyId, startDate, endDate) => {
-  const workLogs = await employeeWorkLogRepository.getReportRows({ employeeId, companyId, startDate, endDate });
+  const workLogs = await employeeWorkLogRepository.getReportRows({ employeeId, startDate, endDate });
 
   const aggregated = aggregateRangeRowsByServicePO(workLogs);
   const totalHours = aggregated.reduce((sum, r) => sum + r.hours, 0);

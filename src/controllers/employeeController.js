@@ -52,7 +52,15 @@ function buildEmployeeAuthContext(req) {
  */
 const getAll = async (req, res, next) => {
   try {
-    const { data, meta } = await employeeService.getAll(req.query, buildEmployeeAuthContext(req));
+    const headerBusinessUnitId = parseInt(req.headers['x-company-id'], 10);
+    // The explicit query filter wins. Otherwise make X-Company-Id behave as
+    // the selected BU filter as well as the request-scope selector.
+    const queryBusinessUnitId = parseInt(req.query.business_unit_id, 10);
+    const hasQueryBusinessUnitId = Number.isInteger(queryBusinessUnitId) && queryBusinessUnitId > 0;
+    const query = hasQueryBusinessUnitId || !Number.isInteger(headerBusinessUnitId) || headerBusinessUnitId <= 0
+      ? req.query
+      : { ...req.query, business_unit_id: headerBusinessUnitId };
+    const { data, meta } = await employeeService.getAll(query, buildEmployeeAuthContext(req));
     return sendPaginated(res, data, meta, 'Employees fetched successfully.');
   } catch (err) {
     if (err.statusCode === 404) {
@@ -196,8 +204,10 @@ const getActiveEmployees = async (req, res, next) => {
   try {
     const parsedServicePOId = parseInt(req.query.service_po_id, 10);
     const servicePOId = Number.isInteger(parsedServicePOId) && parsedServicePOId > 0 ? parsedServicePOId : null;
+    const parsedBusinessUnitId = parseInt(req.headers['x-company-id'], 10);
+    const businessUnitId = Number.isInteger(parsedBusinessUnitId) && parsedBusinessUnitId > 0 ? parsedBusinessUnitId : null;
 
-    const employees = await employeeService.getActiveEmployees(buildEmployeeAuthContext(req), servicePOId);
+    const employees = await employeeService.getActiveEmployees(buildEmployeeAuthContext(req), servicePOId, businessUnitId);
     return sendSuccess(res, employees, 'Active employees fetched successfully.');
   } catch (err) {
     if (err.statusCode === 404) {

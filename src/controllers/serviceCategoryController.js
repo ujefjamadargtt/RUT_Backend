@@ -5,7 +5,7 @@ const { sendSuccess, sendCreated, sendNoContent, sendNotFound, sendError } = req
 const logger = require('../utils/logger');
 
 /**
- * The object-level scoping context Service Category reads/writes need for
+ * The object-level scoping context Service Category WRITES need for
  * company-less actors (Admin/Entity Admin) — see companyAccessControlService.js.
  * Built only from server-verified req fields, never from body/query.
  *
@@ -15,9 +15,25 @@ function buildAuthContext(req) {
   return { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId };
 }
 
+/**
+ * Same purpose, for the 2 READ endpoints below only. These run
+ * authenticateReadMultiBU (serviceCategory.routes.js), not the single-
+ * req.companyId `authenticate` chain writes above still use — req.companyIds
+ * is always a pre-resolved ARRAY, every BU the caller is mapped to when
+ * X-Company-Id is omitted (see resolveReportCompanyScope.js). Passed
+ * through as `companyId` since resolveActorCompanyScope()/
+ * serviceCategoryRepository's companyScope() both already accept an array
+ * as-is.
+ *
+ * @param {import('express').Request} req
+ */
+function buildReadAuthContext(req) {
+  return { companyId: req.companyIds, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId };
+}
+
 const getAllServiceCategories = async (req, res) => {
   try {
-    const categories = await serviceCategoryService.getAll(req.query, buildAuthContext(req));
+    const categories = await serviceCategoryService.getAll(req.query, buildReadAuthContext(req));
     return sendSuccess(res, categories, 'Service categories fetched successfully.');
   } catch (error) {
     logger.error('getAllServiceCategories error', { error: error.message });
@@ -30,7 +46,7 @@ const getServiceCategoryById = async (req, res) => {
     const id = parseInt(req.params.id, 10);
     if (isNaN(id) || id < 1) return sendError(res, 'Invalid service category ID.', 400);
 
-    const category = await serviceCategoryService.getById(id, buildAuthContext(req));
+    const category = await serviceCategoryService.getById(id, buildReadAuthContext(req));
     return sendSuccess(res, category, 'Service category fetched successfully.');
   } catch (error) {
     if (error.statusCode === 404) return sendNotFound(res, 'Service category');

@@ -4,6 +4,14 @@ const express = require('express');
 const router = express.Router();
 
 const authenticate = require('../middlewares/auth');
+// GET /monthly-costs only: lets a BU-scoped caller mapped to more than one
+// Business Unit omit X-Company-Id, aggregating across every BU they're
+// mapped to, instead of resolveCompany.js's 400 — see
+// resolveReportCompanyScope.js. Every other route below (GET /:id and all
+// writes) keeps the full `authenticate` (single req.companyId) chain
+// unchanged, now applied per-route instead of at router.use() level so
+// this one list endpoint can be singled out.
+const authenticateReadMultiBU = require('../middlewares/authenticateReadMultiBU');
 const { validate } = require('../middlewares/validateRequest');
 const monthlyCostController = require('../controllers/monthlyCostController');
 const { handleMonthlyCostUpload } = require('../middlewares/upload');
@@ -24,9 +32,6 @@ const FINANCE_MANAGEMENT = ['Finance', 'Management'];
  *   description: Employee monthly cost management and bulk calculation
  */
 
-// ─── All routes require authentication ────────────────────────────────────────
-router.use(authenticate);
-
 // ─── Bulk calculate (Finance, Management) — placed BEFORE /:id ─────────────────────
 /**
  * POST /api/v1/monthly-costs/calculate
@@ -35,6 +40,7 @@ router.use(authenticate);
  */
 router.post(
   '/calculate',
+  authenticate,
   ...monthlyCostController.calculateForMonth
 );
 
@@ -46,6 +52,7 @@ router.post(
  */
 router.post(
   '/import',
+  authenticate,
   importLimiter,
   handleMonthlyCostUpload,
   monthlyCostController.importFromExcel
@@ -57,13 +64,13 @@ router.post(
  * GET /api/v1/monthly-costs
  * Paginated list with optional filters: employee_id, month, year.
  */
-router.get('/', ...monthlyCostController.getAll);
+router.get('/', authenticateReadMultiBU, ...monthlyCostController.getAll);
 
 /**
  * GET /api/v1/monthly-costs/:id
  * Single monthly cost record by primary key.
  */
-router.get('/:id', validate(idParamSchema, 'params'), monthlyCostController.getById);
+router.get('/:id', authenticate, validate(idParamSchema, 'params'), monthlyCostController.getById);
 
 // ─── Write routes — Finance, Management only ──────────────────────────────────
 
@@ -73,6 +80,7 @@ router.get('/:id', validate(idParamSchema, 'params'), monthlyCostController.getB
  */
 router.post(
   '/',
+  authenticate,
   ...monthlyCostController.create
 );
 
@@ -82,6 +90,7 @@ router.post(
  */
 router.put(
   '/:id',
+  authenticate,
   validate(idParamSchema, 'params'),
   ...monthlyCostController.update
 );
@@ -95,6 +104,7 @@ router.put(
  */
 router.delete(
   '/',
+  authenticate,
   validate(bulkIdsSchema, 'body'),
   monthlyCostController.bulkDelete
 );
@@ -108,6 +118,7 @@ router.delete(
  */
 router.delete(
   '/sheet',
+  authenticate,
   validate(deleteBySheetSchema, 'body'),
   monthlyCostController.deleteByMonth
 );
@@ -118,6 +129,7 @@ router.delete(
  */
 router.delete(
   '/:id',
+  authenticate,
   validate(idParamSchema, 'params'),
   monthlyCostController.delete
 );

@@ -68,7 +68,7 @@ function parseCommonFilters(query) {
 // ---------------------------------------------------------------------------
 // 1. Service PO Profitability (Margin) Report
 // ---------------------------------------------------------------------------
-async function getServicePOProfitability(query, companyId) {
+async function getServicePOProfitability(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
   requireMonthYear(filters);
@@ -82,7 +82,7 @@ async function getServicePOProfitability(query, companyId) {
   logger.info('ManagementReport: getServicePOProfitability', { filters, page, limit });
 
   const { rows, count } = await managementReportRepo.getServicePOProfitability({
-    ...filters, isBillable, serviceCategoryId, serviceTypeId, limit, offset, companyId,
+    ...filters, isBillable, serviceCategoryId, serviceTypeId, limit, offset, companyIds,
   });
 
   const meta = getPaginationMeta(count, page, limit);
@@ -108,7 +108,7 @@ async function getServicePOProfitability(query, companyId) {
 // ---------------------------------------------------------------------------
 // 2. Budgeted Margin Forecast Report
 // ---------------------------------------------------------------------------
-async function getBudgetedMarginForecast(query, companyId) {
+async function getBudgetedMarginForecast(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
   requireMonthYear(filters);
@@ -116,7 +116,7 @@ async function getBudgetedMarginForecast(query, companyId) {
   logger.info('ManagementReport: getBudgetedMarginForecast', { filters, page, limit });
 
   const { rows, count } = await managementReportRepo.getBudgetedMarginForecast({
-    ...filters, limit, offset, companyId,
+    ...filters, limit, offset, companyIds,
   });
 
   const meta = getPaginationMeta(count, page, limit);
@@ -143,7 +143,7 @@ async function getBudgetedMarginForecast(query, companyId) {
 // ---------------------------------------------------------------------------
 // 3. Resource Staffing Plan Accuracy Report
 // ---------------------------------------------------------------------------
-async function getResourceStaffingPlanAccuracy(query, companyId) {
+async function getResourceStaffingPlanAccuracy(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
   requireMonthYear(filters);
@@ -165,7 +165,7 @@ async function getResourceStaffingPlanAccuracy(query, companyId) {
   logger.info('ManagementReport: getResourceStaffingPlanAccuracy', { filters, varianceThresholdPctFilter, page, limit });
 
   const { rows, count } = await managementReportRepo.getResourceStaffingPlanAccuracy({
-    ...filters, employeeId, varianceThresholdPct: varianceThresholdPctFilter, limit, offset, companyId,
+    ...filters, employeeId, varianceThresholdPct: varianceThresholdPctFilter, limit, offset, companyIds,
   });
 
   // Same "at risk" formula the filter itself now applies in SQL (absolute
@@ -199,7 +199,7 @@ async function getResourceStaffingPlanAccuracy(query, companyId) {
 // ---------------------------------------------------------------------------
 // 4. Client Profitability & Revenue Concentration Report
 // ---------------------------------------------------------------------------
-async function getClientProfitabilityConcentration(query, companyId) {
+async function getClientProfitabilityConcentration(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
   requireMonthYear(filters);
@@ -207,7 +207,7 @@ async function getClientProfitabilityConcentration(query, companyId) {
   logger.info('ManagementReport: getClientProfitabilityConcentration', { filters, page, limit });
 
   const { rows, count } = await managementReportRepo.getClientProfitabilityConcentration({
-    ...filters, limit, offset, companyId,
+    ...filters, limit, offset, companyIds,
   });
 
   const meta = getPaginationMeta(count, page, limit);
@@ -276,7 +276,7 @@ async function getBUPerformanceScorecard(query, req) {
 // ---------------------------------------------------------------------------
 // 6. Employee Capacity & Bench Forecast Report
 // ---------------------------------------------------------------------------
-async function getEmployeeCapacityForecast(query, companyId) {
+async function getEmployeeCapacityForecast(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
   requireMonthYear(filters);
@@ -294,7 +294,7 @@ async function getEmployeeCapacityForecast(query, companyId) {
   logger.info('ManagementReport: getEmployeeCapacityForecast', { filters, benchThresholdHours, page, limit });
 
   const { rows, count } = await managementReportRepo.getEmployeeCapacityForecast({
-    ...filters, employeeId, designation, benchThresholdHours, limit, offset, companyId,
+    ...filters, employeeId, designation, benchThresholdHours, limit, offset, companyIds,
   });
 
   const meta = getPaginationMeta(count, page, limit);
@@ -339,7 +339,7 @@ function computeTimelineRisk(row, asOfDate) {
   };
 }
 
-async function getServicePOTimelineRisk(query, companyId) {
+async function getServicePOTimelineRisk(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
 
@@ -369,7 +369,7 @@ async function getServicePOTimelineRisk(query, companyId) {
   logger.info('ManagementReport: getServicePOTimelineRisk', { clientId, poId, status, search, asOfDate, page, limit });
 
   const { rows, count } = await managementReportRepo.getServicePOTimelineRiskRaw({
-    ...filters, clientId, poId, status, search, limit, offset, companyId,
+    ...filters, clientId, poId, status, search, limit, offset, companyIds,
   });
 
   const enriched = rows.map((r) => computeTimelineRisk(r, asOfDate));
@@ -388,7 +388,7 @@ async function getServicePOTimelineRisk(query, companyId) {
 // ---------------------------------------------------------------------------
 // 8. Delivery Head / Account Owner Performance Report
 // ---------------------------------------------------------------------------
-async function getDeliveryHeadPerformance(query, companyId) {
+async function getDeliveryHeadPerformance(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
   requireMonthYear(filters);
@@ -398,7 +398,7 @@ async function getDeliveryHeadPerformance(query, companyId) {
   logger.info('ManagementReport: getDeliveryHeadPerformance', { filters, page, limit });
 
   const { rows, count } = await managementReportRepo.getDeliveryHeadPerformance({
-    ...filters, deliveryHeadEmployeeId, limit, offset, companyId,
+    ...filters, deliveryHeadEmployeeId, limit, offset, companyIds,
   });
 
   const meta = getPaginationMeta(count, page, limit);
@@ -423,7 +423,7 @@ async function getDeliveryHeadPerformance(query, companyId) {
 // ---------------------------------------------------------------------------
 // 9. Invoice Realization / Billing Efficiency Report
 // ---------------------------------------------------------------------------
-async function getInvoiceRealizationTrend(query, companyId) {
+async function getInvoiceRealizationTrend(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
 
@@ -449,7 +449,7 @@ async function getInvoiceRealizationTrend(query, companyId) {
     startYear: parseInt(startYear, 10),
     endMonth: parseInt(endMonth, 10),
     endYear: parseInt(endYear, 10),
-    clientId, poId, limit, offset, companyId,
+    clientId, poId, limit, offset, companyIds,
   });
 
   const meta = getPaginationMeta(count, page, limit);
@@ -475,7 +475,7 @@ async function getInvoiceRealizationTrend(query, companyId) {
 // ---------------------------------------------------------------------------
 // 10. Service Line (Category/Type) Business Mix Report
 // ---------------------------------------------------------------------------
-async function getServiceLineBusinessMix(query, companyId) {
+async function getServiceLineBusinessMix(query, companyIds) {
   const filters = parseCommonFilters(query);
   requireMonthYear(filters);
 
@@ -487,7 +487,7 @@ async function getServiceLineBusinessMix(query, companyId) {
   logger.info('ManagementReport: getServiceLineBusinessMix', { filters, compareMonth, compareYear });
 
   const { rows, priorRows } = await managementReportRepo.getServiceLineBusinessMix({
-    ...filters, serviceCategoryId, serviceTypeId, compareMonth, compareYear, companyId,
+    ...filters, serviceCategoryId, serviceTypeId, compareMonth, compareYear, companyIds,
   });
 
   const priorByType = new Map(priorRows.map((r) => [r.service_type_id, r]));

@@ -1,7 +1,7 @@
 'use strict';
 
-const { sequelize, Employee } = require('../models');
-const { QueryTypes } = require('sequelize');
+const { sequelize, Employee, Company } = require('../models');
+const { QueryTypes, Op } = require('sequelize');
 const dashboardService = require('../services/dashboardService');
 const reportService = require('../services/reportService');
 const promptBuilder = require('../utils/promptBuilder');
@@ -111,8 +111,13 @@ async function getMissingTimesheetData(companyId) {
 async function findMentionedEmployeeIds(question, companyId) {
   const q = question.toLowerCase();
   const employees = await Employee.findAll({
-    where: { is_deleted: false, status: 'active', company_id: companyId },
+    where: {
+      is_deleted: false,
+      status: 'active',
+      [Op.or]: [{ company_id: companyId }, { '$businessUnits.id$': companyId }],
+    },
     attributes: ['id', 'full_name'],
+    include: [{ model: Company, as: 'businessUnits', attributes: [], through: { attributes: [] } }],
   });
   return employees
     .filter((e) => q.includes(e.full_name.toLowerCase()))

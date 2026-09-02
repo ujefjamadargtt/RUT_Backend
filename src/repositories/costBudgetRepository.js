@@ -12,14 +12,18 @@ const { CostBudget, ServicePO, Client } = require('../models');
  * Builds a `company_id` WHERE fragment — Op.in-aware for an array (a
  * company-less Admin/Entity Admin's resolved owned-Company-id scope, see
  * companyAccessControlService.resolveActorCompanyScope), plain equality for
- * a number. Same pattern as resourceBudgetRepository.js.
+ * a number. Same pattern as resourceBudgetRepository.js, including the
+ * array branch's `OR company_id: null` fallback for a Centralised (BU-less)
+ * Service PO's own cost budget row — without it, a company-less Admin/Entity
+ * Admin's own Centralised-PO budget was invisible to their own
+ * find/update/deactivate calls.
  *
  * @param {number|number[]} companyId
  * @returns {object}
  */
 function companyScope(companyId) {
   if (Array.isArray(companyId)) {
-    return { company_id: { [Op.in]: companyId } };
+    return { [Op.or]: [{ company_id: { [Op.in]: companyId } }, { company_id: null }] };
   }
   return { company_id: companyId };
 }

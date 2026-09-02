@@ -60,7 +60,7 @@ function parseIdList(value) {
  * @param {object} query - req.query
  * @returns {Promise<{ data: object[], meta: object }>}
  */
-async function getEmployeeHourlyRate(query, companyId) {
+async function getEmployeeHourlyRate(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
 
@@ -83,7 +83,7 @@ async function getEmployeeHourlyRate(query, companyId) {
     sortOrder: filters.sortOrder,
     limit,
     offset,
-    companyId,
+    companyIds,
   });
 
   const meta = getPaginationMeta(count, page, limit);
@@ -97,7 +97,7 @@ async function getEmployeeHourlyRate(query, companyId) {
  * @param {object} query - req.query
  * @returns {Promise<{ data: object[], meta: object }>}
  */
-async function getMonthlyCostSummary(query, companyId) {
+async function getMonthlyCostSummary(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
 
@@ -110,7 +110,7 @@ async function getMonthlyCostSummary(query, companyId) {
     sortOrder: filters.sortOrder,
     limit,
     offset,
-    companyId,
+    companyIds,
   });
 
   const meta = getPaginationMeta(count, page, limit);
@@ -145,7 +145,7 @@ async function getMonthlyCostSummary(query, companyId) {
  * @param {object} query - req.query
  * @returns {Promise<{ data: object[], meta: object }>}
  */
-async function getTimesheetSummary(query, companyId) {
+async function getTimesheetSummary(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
 
@@ -157,7 +157,7 @@ async function getTimesheetSummary(query, companyId) {
     sortOrder: filters.sortOrder,
     limit,
     offset,
-    companyId,
+    companyIds,
   });
 
   const meta = getPaginationMeta(count, page, limit);
@@ -186,7 +186,7 @@ async function getTimesheetSummary(query, companyId) {
  * @param {object} query - req.query
  * @returns {Promise<{ data: object[], meta: object }>}
  */
-async function getServicePOUtilisation(query, companyId) {
+async function getServicePOUtilisation(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
 
@@ -198,7 +198,7 @@ async function getServicePOUtilisation(query, companyId) {
     sortOrder: filters.sortOrder,
     limit,
     offset,
-    companyId,
+    companyIds,
   });
 
   const meta = getPaginationMeta(count, page, limit);
@@ -212,7 +212,7 @@ async function getServicePOUtilisation(query, companyId) {
  * @param {object} query - req.query
  * @returns {Promise<{ data: object[], meta: object }>}
  */
-async function getSubProjectHours(query, companyId) {
+async function getSubProjectHours(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
 
@@ -230,7 +230,7 @@ async function getSubProjectHours(query, companyId) {
     offset,
     hoursSource: filters.hoursSource,
     roleId: filters.roleId,
-    companyId,
+    companyIds,
   });
 
   const meta = getPaginationMeta(count, page, limit);
@@ -376,7 +376,7 @@ function buildPivotResponse(rawColumns, rawRows, count, page, limit) {
  * @param {object} query - req.query
  * @returns {Promise<{ data: object[], meta: object }>}
  */
-async function getResourceAllocation(query, companyId) {
+async function getResourceAllocation(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
 
@@ -406,7 +406,7 @@ async function getResourceAllocation(query, companyId) {
     offset,
     hoursSource: filters.hoursSource,
     roleId: filters.roleId,
-    companyId,
+    companyIds,
   });
 
   const meta = getPaginationMeta(count, page, limit);
@@ -420,7 +420,7 @@ async function getResourceAllocation(query, companyId) {
  * @param {object} query - req.query
  * @returns {Promise<{ data: object[], meta: object }>}
  */
-async function getOperationalCostBreakdown(query, companyId) {
+async function getOperationalCostBreakdown(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
 
@@ -435,7 +435,7 @@ async function getOperationalCostBreakdown(query, companyId) {
     sortOrder: filters.sortOrder,
     limit,
     offset,
-    companyId,
+    companyIds,
   });
 
   const meta = getPaginationMeta(count, page, limit);
@@ -470,7 +470,7 @@ async function getOperationalCostBreakdown(query, companyId) {
  * @param {object} query - req.query
  * @returns {Promise<{ data: object[], meta: object, summary: object }>}
  */
-async function getEmployeeUtilizationSummary(query, companyId) {
+async function getEmployeeUtilizationSummary(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
 
@@ -494,7 +494,7 @@ async function getEmployeeUtilizationSummary(query, companyId) {
     sortOrder: filters.sortOrder,
     limit,
     offset,
-    companyId,
+    companyIds,
   });
 
   const meta = getPaginationMeta(count, page, limit);
@@ -541,7 +541,7 @@ async function getEmployeeUtilizationSummary(query, companyId) {
  * @param {object} query - req.query
  * @returns {Promise<{ data: object[], meta: object, summary: object }>}
  */
-async function getServicePOSummary(query, companyId) {
+async function getServicePOSummary(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
 
@@ -585,7 +585,7 @@ async function getServicePOSummary(query, companyId) {
     offset,
     hoursSource: filters.hoursSource,
     roleId: filters.roleId,
-    companyId,
+    companyIds,
   });
 
   const meta = getPaginationMeta(count, page, limit);
@@ -596,12 +596,14 @@ async function getServicePOSummary(query, companyId) {
     (acc, row) => {
       acc.total_po_value                += round2(row.po_value);
       acc.total_hours_delivered         += round2(row.hours_delivered_before_month);
+      acc.total_exp_hours               += round2(row.exp_hours);
       acc.total_monthly_billable_amount += round2(row.monthly_billable_amount);
       return acc;
     },
     {
       total_po_value: 0,
       total_hours_delivered: 0,
+      total_exp_hours: 0,
       total_monthly_billable_amount: 0,
     }
   );
@@ -612,6 +614,7 @@ async function getServicePOSummary(query, companyId) {
     summary: {
       total_po_value:                     round2(pageTotals.total_po_value),
       total_hours_delivered_before_month: round2(pageTotals.total_hours_delivered),
+      total_exp_hours:                    round2(pageTotals.total_exp_hours),
       total_monthly_billable_amount:      round2(pageTotals.total_monthly_billable_amount),
     },
   };
@@ -629,7 +632,7 @@ async function getServicePOSummary(query, companyId) {
  * @param {object} query - req.query
  * @returns {Promise<{ data: object[], meta: object, summary: object }>}
  */
-async function getInvoicePOSummary(query, companyId) {
+async function getInvoicePOSummary(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
 
@@ -673,7 +676,7 @@ async function getInvoicePOSummary(query, companyId) {
     offset,
     hoursSource: filters.hoursSource,
     roleId: filters.roleId,
-    companyId,
+    companyIds,
   });
 
   const meta = getPaginationMeta(count, page, limit);
@@ -684,6 +687,7 @@ async function getInvoicePOSummary(query, companyId) {
     (acc, row) => {
       acc.total_po_value                += round2(row.po_value);
       acc.total_hours_delivered         += round2(row.hours_delivered_before_month);
+      acc.total_exp_hours               += round2(row.exp_hours);
       acc.total_monthly_billable_amount += round2(row.monthly_billable_amount);
       acc.total_invoiced_amount         += round2(row.invoiced_amount);
       acc.total_billed_amount           += round2(row.billed_amount);
@@ -693,6 +697,7 @@ async function getInvoicePOSummary(query, companyId) {
     {
       total_po_value: 0,
       total_hours_delivered: 0,
+      total_exp_hours: 0,
       total_monthly_billable_amount: 0,
       total_invoiced_amount: 0,
       total_billed_amount: 0,
@@ -706,6 +711,7 @@ async function getInvoicePOSummary(query, companyId) {
     summary: {
       total_po_value:                     round2(pageTotals.total_po_value),
       total_hours_delivered_before_month: round2(pageTotals.total_hours_delivered),
+      total_exp_hours:                    round2(pageTotals.total_exp_hours),
       total_monthly_billable_amount:      round2(pageTotals.total_monthly_billable_amount),
       total_invoiced_amount:              round2(pageTotals.total_invoiced_amount),
       total_billed_amount:                round2(pageTotals.total_billed_amount),
@@ -721,7 +727,7 @@ async function getInvoicePOSummary(query, companyId) {
  * @param {object} query - req.query (month, year required)
  * @returns {Promise<{ columns, data, meta, summary }>}
  */
-async function getResourceUtilization(query, companyId) {
+async function getResourceUtilization(query, companyIds) {
   const filters = parseCommonFilters(query);
 
   if (!filters.month || !filters.year) {
@@ -748,7 +754,7 @@ async function getResourceUtilization(query, companyId) {
     offset,
     hoursSource: filters.hoursSource,
     roleId: filters.roleId,
-    companyId,
+    companyIds,
   });
 
   return buildPivotResponse(rawColumns, rawRows, count, page, limit);
@@ -765,7 +771,7 @@ async function getResourceUtilization(query, companyId) {
  * @param {object} query - req.query (month, year required)
  * @returns {Promise<{ columns, data, meta, summary }>}
  */
-async function getMonthlyResourceUtilization(query, companyId) {
+async function getMonthlyResourceUtilization(query, companyIds) {
   const filters = parseCommonFilters(query);
 
   if (!filters.month || !filters.year) {
@@ -792,13 +798,13 @@ async function getMonthlyResourceUtilization(query, companyId) {
     offset,
     hoursSource: filters.hoursSource,
     roleId: filters.roleId,
-    companyId,
+    companyIds,
   });
 
   return buildPivotResponse(rawColumns, rawRows, count, page, limit);
 }
 
-async function getResourseProjectUtilizationReport(query, companyId) {
+async function getResourseProjectUtilizationReport(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
 
   const now = new Date();
@@ -848,7 +854,7 @@ async function getResourseProjectUtilizationReport(query, companyId) {
     offset,
     hoursSource: query.hoursSource,
     roleId: query.roleId,
-    companyId,
+    companyIds,
   };
 
   logger.info('Report: getResourseProjectUtilizationReport', {
@@ -970,14 +976,14 @@ function resolveClientServicePODateRange(query) {
  * chart (dashboardService.js) — does not call or alter it.
  *
  * @param {object} query - req.query (month+year XOR startDate+endDate required)
- * @param {number} companyId - req.companyId
+ * @param {number[]} companyIds - req.companyIds
  * @returns {Promise<Array<{ client_id, client_name, total_hrs_of_client, service_pos: Array }>>}
  */
-async function getClientServicePOHoursReport(query, companyId) {
+async function getClientServicePOHoursReport(query, companyIds) {
   const { startDate, endDate } = resolveClientServicePODateRange(query);
 
   const filters = {
-    companyId,
+    companyIds,
     startDate,
     endDate,
     clientId: query.clientId ? parseInt(query.clientId, 10) : undefined,
@@ -1076,21 +1082,21 @@ function isBenchServiceTypeReport(servicePOName) {
  * logic (Invoice Master / service_po_monthly_budgets.billed_amount basis).
  *
  * @param {object} query - req.query: { hoursSource?, page?, limit? } (page/limit apply to top_clients only, default limit 15)
- * @param {number} companyId
+ * @param {number[]} companyIds
  * @returns {Promise<{
  *   clients: { client_id: number, client_name: string, total_hours: number, total_cost: number }[],
  *   top_clients: { data: object[], pagination: { page: number, limit: number, total_records: number, total_pages: number } },
  *   category_matrix: { client_id: number, client_name: string, categories: object, total_cost: number }[],
  * }>}
  */
-async function getClientCostAnalytics(query, companyId) {
+async function getClientCostAnalytics(query, companyIds) {
   const hoursSource = query.hoursSource;
 
   const [hoursRows, costRows, categories, matrixRows] = await Promise.all([
-    reportRepo.getClientCostAnalyticsHours({ companyId, hoursSource }),
-    reportRepo.getClientCostAnalyticsCost({ companyId }),
-    serviceCategoryRepo.findAll({ companyId }),
-    reportRepo.getClientCategoryCostMatrixReport({ companyId }),
+    reportRepo.getClientCostAnalyticsHours({ companyIds, hoursSource }),
+    reportRepo.getClientCostAnalyticsCost({ companyIds }),
+    serviceCategoryRepo.findAll({ companyId: companyIds }),
+    reportRepo.getClientCategoryCostMatrixReport({ companyIds }),
   ]);
   const categoryNames = categories.map((c) => c.name);
 
@@ -1168,11 +1174,11 @@ async function getClientCostAnalytics(query, companyId) {
  * @param {number} companyId
  * @returns {Promise<{ data: object[], meta: object }>}
  */
-async function getClientWiseAnalyticsReport(query, companyId) {
+async function getClientWiseAnalyticsReport(query, companyIds) {
   const { startDate, endDate } = resolveClientServicePODateRange(query);
 
   const filters = {
-    companyId,
+    companyIds,
     startDate,
     endDate,
     employeeId: query.employeeId ? parseInt(query.employeeId, 10) : undefined,
@@ -1260,11 +1266,11 @@ async function getClientWiseAnalyticsReport(query, companyId) {
  *   no_work_trend: { month: string, no_work_hours: number }[],
  * }>}
  */
-async function getMonthlyHoursTrend(query, companyId) {
+async function getMonthlyHoursTrend(query, companyIds) {
   const { startDate, endDate } = resolveClientServicePODateRange(query);
 
   const filters = {
-    companyId,
+    companyIds,
     startDate,
     endDate,
     employeeId: query.employeeId ? parseInt(query.employeeId, 10) : undefined,
@@ -1279,7 +1285,7 @@ async function getMonthlyHoursTrend(query, companyId) {
   const [categoryRows, costRows, categories, utilizationRows, leaveRows, noWorkRows] = await Promise.all([
     reportRepo.getMonthlyHoursByCategory(filters),
     reportRepo.getMonthlyCostByCategory(filters),
-    serviceCategoryRepo.findAll({ companyId }),
+    serviceCategoryRepo.findAll({ companyId: companyIds }),
     reportRepo.getMonthlyUtilizationTrend(filters),
     reportRepo.getLeaveHoursTrendReport(filters),
     reportRepo.getNoWorkTrendReport(filters),
@@ -1367,11 +1373,11 @@ async function getMonthlyHoursTrend(query, companyId) {
  * @param {number} companyId
  * @returns {Promise<{ data: object[], meta: object }>}
  */
-async function getEmployeeBenchPercentage(query, companyId) {
+async function getEmployeeBenchPercentage(query, companyIds) {
   const { startDate, endDate } = resolveClientServicePODateRange(query);
 
   const filters = {
-    companyId,
+    companyIds,
     startDate,
     endDate,
     employeeId: query.employeeId ? parseInt(query.employeeId, 10) : undefined,
@@ -1440,11 +1446,11 @@ async function getEmployeeBenchPercentage(query, companyId) {
  *   over_budget_service_pos: object[], under_budget_service_pos: object[],
  * }>}
  */
-async function getBudgetVsBilledReport(query, companyId) {
+async function getBudgetVsBilledReport(query, companyIds) {
   const { startDate, endDate } = resolveClientServicePODateRange(query);
 
   const filters = {
-    companyId,
+    companyIds,
     startDate,
     endDate,
     clientId: query.clientId ? parseInt(query.clientId, 10) : undefined,
@@ -1532,6 +1538,173 @@ async function getBudgetVsBilledReport(query, companyId) {
   };
 }
 
+/**
+ * Resource Utilization Trend Report — the existing Utilization Trend
+ * formula (Utilization % = Billable Hours / Total Hours × 100, rounded to
+ * 2 decimals, 0 when Total Hours = 0 — see getMonthlyHoursTrend's
+ * monthly_utilization series) grouped by Month + Resource instead of Month
+ * only. Same hoursSource/Role-5-publish-guard/report_bucket_key business
+ * rules, reused as-is via getResourceUtilizationTrend() — does not alter
+ * getMonthlyUtilizationTrend()/getMonthlyHoursTrend() in any way.
+ *
+ * @param {object} query - req.query: month+year XOR startDate+endDate (required),
+ *   employeeId?, clientId?, poId?, serviceTypeId?, hoursSource?, roleId?, page?, limit?, sortBy?, sortOrder?
+ * @param {number[]} companyIds
+ * @returns {Promise<{ data: object[], meta: object }>}
+ */
+async function getResourceUtilizationTrendReport(query, companyIds) {
+  const { startDate, endDate } = resolveClientServicePODateRange(query);
+
+  const filters = {
+    companyIds,
+    startDate,
+    endDate,
+    employeeId: query.employeeId ? parseInt(query.employeeId, 10) : undefined,
+    clientId: query.clientId ? parseInt(query.clientId, 10) : undefined,
+    poId: query.poId ? parseInt(query.poId, 10) : undefined,
+    serviceTypeId: query.serviceTypeId ? parseInt(query.serviceTypeId, 10) : undefined,
+    hoursSource: query.hoursSource,
+    roleId: query.roleId,
+  };
+
+  const rows = await reportRepo.getResourceUtilizationTrend(filters);
+
+  const shaped = rows.map((row) => {
+    const totalHours = parseFloat(row.total_hours) || 0;
+    const billableHours = parseFloat(row.billable_hours) || 0;
+    return {
+      month: reportMonthLabel(row.year, row.month),
+      year: row.year,
+      month_number: row.month,
+      employee_id: row.employee_id,
+      employee_code: row.employee_code,
+      full_name: row.full_name,
+      total_hours: round2(totalHours),
+      billable_hours: round2(billableHours),
+      utilization_percentage: totalHours > 0 ? round2((billableHours / totalHours) * 100) : 0,
+    };
+  });
+
+  const allowedSort = ['utilization_percentage', 'total_hours', 'billable_hours', 'full_name'];
+  const sortBy = allowedSort.includes(query.sortBy) ? query.sortBy : null;
+  if (sortBy) {
+    const sortOrder = (query.sortOrder || 'DESC').toUpperCase() === 'ASC' ? 1 : -1;
+    shaped.sort((a, b) => (
+      typeof a[sortBy] === 'string'
+        ? a[sortBy].localeCompare(b[sortBy]) * sortOrder
+        : (a[sortBy] - b[sortBy]) * sortOrder
+    ));
+  } else {
+    shaped.sort((a, b) => (a.year - b.year) || (a.month_number - b.month_number) || a.full_name.localeCompare(b.full_name));
+  }
+
+  const { page, limit, offset } = getPaginationParams(query);
+  const data = shaped.slice(offset, offset + limit);
+  const meta = getPaginationMeta(shaped.length, page, limit);
+
+  return { data, meta };
+}
+
+/**
+ * Service PO Hours & Cost Budget Report — for each Month + Service PO in
+ * the resolved period: Total PO Hours (same timesheet-hours logic as every
+ * other trend report — hoursSource/Role-5-publish-guard included) and Cost
+ * Budget (cost_budget_master.invoice_amount for that PO + month — the
+ * monthly budget table, never an overall/lifetime figure). Two-query-then-
+ * merge, same pattern as getClientCostAnalytics/getMonthlyHoursTrend: a PO
+ * with hours but no budget configured still appears (cost_budget: 0), and a
+ * PO with a budget but no hours logged this month still appears
+ * (total_hours: 0).
+ *
+ * @param {object} query - req.query: month+year XOR startDate+endDate (required),
+ *   employeeId?, clientId?, poId?, serviceTypeId?, hoursSource?, roleId?, page?, limit?, sortBy?, sortOrder?
+ * @param {number[]} companyIds
+ * @returns {Promise<{ data: object[], meta: object }>}
+ */
+async function getServicePOHoursBudgetReport(query, companyIds) {
+  const { startDate, endDate } = resolveClientServicePODateRange(query);
+
+  const filters = {
+    companyIds,
+    startDate,
+    endDate,
+    employeeId: query.employeeId ? parseInt(query.employeeId, 10) : undefined,
+    clientId: query.clientId ? parseInt(query.clientId, 10) : undefined,
+    poId: query.poId ? parseInt(query.poId, 10) : undefined,
+    serviceTypeId: query.serviceTypeId ? parseInt(query.serviceTypeId, 10) : undefined,
+    hoursSource: query.hoursSource,
+    roleId: query.roleId,
+  };
+
+  const [hoursRows, budgetRows] = await Promise.all([
+    reportRepo.getServicePOHoursTrend(filters),
+    reportRepo.getServicePOCostBudgetByMonth(filters),
+  ]);
+
+  const rowMap = new Map();
+  const keyOf = (poId, year, month) => `${poId}-${year}-${month}`;
+
+  for (const row of hoursRows) {
+    rowMap.set(keyOf(row.service_po_id, row.year, row.month), {
+      year: row.year,
+      month: row.month,
+      service_po_id: row.service_po_id,
+      service_po_code: row.service_po_code,
+      service_po_name: row.service_po_name,
+      client_id: row.client_id,
+      client_name: row.client_name,
+      total_hours: round2(row.total_hours),
+      cost_budget: 0,
+    });
+  }
+  for (const row of budgetRows) {
+    const key = keyOf(row.service_po_id, row.year, row.month);
+    if (!rowMap.has(key)) {
+      rowMap.set(key, {
+        year: row.year,
+        month: row.month,
+        service_po_id: row.service_po_id,
+        service_po_code: row.service_po_code,
+        service_po_name: row.service_po_name,
+        client_id: row.client_id,
+        client_name: row.client_name,
+        total_hours: 0,
+        cost_budget: round2(row.cost_budget),
+      });
+    } else {
+      rowMap.get(key).cost_budget = round2(row.cost_budget);
+    }
+  }
+
+  const shaped = Array.from(rowMap.values()).map((r) => ({
+    month: reportMonthLabel(r.year, r.month),
+    year: r.year,
+    month_number: r.month,
+    service_po_id: r.service_po_id,
+    service_po_code: r.service_po_code,
+    service_po_name: r.service_po_name,
+    client_id: r.client_id,
+    client_name: r.client_name,
+    total_hours: r.total_hours,
+    cost_budget: r.cost_budget,
+  }));
+
+  const allowedSort = ['total_hours', 'cost_budget'];
+  const sortBy = allowedSort.includes(query.sortBy) ? query.sortBy : null;
+  if (sortBy) {
+    const sortOrder = (query.sortOrder || 'DESC').toUpperCase() === 'ASC' ? 1 : -1;
+    shaped.sort((a, b) => (a[sortBy] - b[sortBy]) * sortOrder);
+  } else {
+    shaped.sort((a, b) => (a.year - b.year) || (a.month_number - b.month_number) || a.service_po_code.localeCompare(b.service_po_code));
+  }
+
+  const { page, limit, offset } = getPaginationParams(query);
+  const data = shaped.slice(offset, offset + limit);
+  const meta = getPaginationMeta(shaped.length, page, limit);
+
+  return { data, meta };
+}
+
 module.exports = {
   getEmployeeHourlyRate,
   getMonthlyCostSummary,
@@ -1550,6 +1723,8 @@ module.exports = {
   getClientCostAnalytics,
   getClientWiseAnalyticsReport,
   getMonthlyHoursTrend,
+  getResourceUtilizationTrendReport,
+  getServicePOHoursBudgetReport,
   getEmployeeBenchPercentage,
   getBudgetVsBilledReport,
 };

@@ -4,14 +4,23 @@ const express = require('express');
 const router = express.Router();
 
 const authenticateBase = require('../middlewares/auth');
-const resolveCompanyContextForCompanyLessActors = require('../middlewares/resolveCompanyContextForCompanyLessActors');
-// Admin/Entity Admin (ranks 2-3) have no single req.companyId from
-// authenticateBase alone — every report here reads req.companyId directly,
-// so every route resolves ONE Business Unit context for them too (see
-// resolveCompanyContextForCompanyLessActors.js for the contract).
-const authenticate = [authenticateBase, resolveCompanyContextForCompanyLessActors];
+const resolveReportCompanyScope = require('../middlewares/resolveReportCompanyScope');
+// Every report in this file reads req.companyIds (an array), never a single
+// req.companyId — resolveCompany.js (the default authenticateBase's tail)
+// is deliberately skipped in favor of authenticateIdentity + this
+// middleware's own "no X-Company-Id -> role reach across every BU the
+// caller is mapped to" resolution, so a BU-scoped caller mapped to more
+// than one Business Unit is never 400'd for omitting the header — see
+// resolveReportCompanyScope.js's doc comment.
+const authenticateMultiBU = [authenticateBase.authenticateIdentity, resolveReportCompanyScope];
 const reportController = require('../controllers/reportController');
 const { heavyReportLimiter } = require('../middlewares/rateLimiters');
+const { validate, validateAll } = require('../middlewares/validateRequest');
+const {
+  employeeWorkLogHoursSummaryQuerySchema,
+  employeeWorkLogHoursSummaryDetailQuerySchema,
+  employeeWorkLogHoursSummaryDetailParamsSchema,
+} = require('../validations/employeeWorkLogHoursSummaryValidation');
 
 /**
  * @swagger
@@ -23,6 +32,26 @@ const { heavyReportLimiter } = require('../middlewares/rateLimiters');
 // Reports run multi-join aggregate queries across the whole timesheet
 // dataset — rate-limited as a class, independent of the general API limit.
 router.use(heavyReportLimiter);
+
+// Employee Work Log Hours Summary is intentionally a new report data source:
+// it reads employee_work_logs, never the official timesheets table used by
+// the pre-existing Reports endpoints below.
+router.get(
+  '/employee-work-log-hours-summary',
+  authenticateMultiBU,
+  validate(employeeWorkLogHoursSummaryQuerySchema, 'query'),
+  reportController.getEmployeeWorkLogHoursSummary
+);
+
+router.get(
+  '/employee-work-log-hours-summary/:employeeId/details',
+  authenticateMultiBU,
+  validateAll({
+    params: employeeWorkLogHoursSummaryDetailParamsSchema,
+    query: employeeWorkLogHoursSummaryDetailQuerySchema,
+  }),
+  reportController.getEmployeeWorkLogHoursSummaryDetails
+);
 
 /**
  * @swagger
@@ -74,7 +103,7 @@ router.use(heavyReportLimiter);
  */
 router.get(
   '/employee-hourly-rate',
-  authenticate,
+  authenticateMultiBU,
   reportController.getEmployeeHourlyRate
 );
 
@@ -115,7 +144,7 @@ router.get(
  */
 router.get(
   '/monthly-cost-summary',
-  authenticate,
+  authenticateMultiBU,
   reportController.getMonthlyCostSummary
 );
 
@@ -166,7 +195,7 @@ router.get(
  */
 router.get(
   '/timesheet-summary',
-  authenticate,
+  authenticateMultiBU,
   reportController.getTimesheetSummary
 );
 
@@ -216,7 +245,7 @@ router.get(
  */
 router.get(
   '/service-po-utilisation',
-  authenticate,
+  authenticateMultiBU,
   reportController.getServicePOUtilisation
 );
 
@@ -266,7 +295,7 @@ router.get(
  */
 router.get(
   '/sub-project-hours',
-  authenticate,
+  authenticateMultiBU,
   reportController.getSubProjectHours
 );
 
@@ -341,7 +370,7 @@ router.get(
  */
 router.get(
   '/resource-allocation',
-  authenticate,
+  authenticateMultiBU,
   reportController.getResourceAllocation
 );
 
@@ -388,7 +417,7 @@ router.get(
  */
 router.get(
   '/operational-cost-breakdown',
-  authenticate,
+  authenticateMultiBU,
   reportController.getOperationalCostBreakdown
 );
 
@@ -469,7 +498,7 @@ router.get(
  */
 router.get(
   '/employee-utilization-summary',
-  authenticate,
+  authenticateMultiBU,
   reportController.getEmployeeUtilizationSummary
 );
 
@@ -577,7 +606,7 @@ router.get(
  */
 router.get(
   '/service-po-summary',
-  authenticate,
+  authenticateMultiBU,
   reportController.getServicePOSummary
 );
 
@@ -696,7 +725,7 @@ router.get(
  */
 router.get(
   '/invoice-po-summary',
-  authenticate,
+  authenticateMultiBU,
   reportController.getInvoicePOSummary
 );
 
@@ -754,7 +783,7 @@ router.get(
  */
 router.get(
   '/resource-utilization',
-  authenticate,
+  authenticateMultiBU,
   reportController.getResourceUtilization
 );
 
@@ -818,7 +847,7 @@ router.get(
  */
 router.get(
   '/monthly-resource-utilization',
-  authenticate,
+  authenticateMultiBU,
   reportController.getMonthlyResourceUtilization
 );
 
@@ -933,7 +962,7 @@ router.get(
  */
 router.get(
   '/resource-project-utilization-report',
-  authenticate,
+  authenticateMultiBU,
   reportController.getResourseProjectUtilizationReport
 );
 
@@ -994,7 +1023,7 @@ router.get(
  */
 router.get(
   '/client-service-po-hours',
-  authenticate,
+  authenticateMultiBU,
   reportController.getClientServicePOHoursReport
 );
 
@@ -1033,7 +1062,7 @@ router.get(
  */
 router.get(
   '/client-cost-analytics',
-  authenticate,
+  authenticateMultiBU,
   reportController.getClientCostAnalytics
 );
 
@@ -1099,7 +1128,7 @@ router.get(
  */
 router.get(
   '/client-wise-analytics',
-  authenticate,
+  authenticateMultiBU,
   reportController.getClientWiseAnalytics
 );
 
@@ -1157,7 +1186,7 @@ router.get(
  */
 router.get(
   '/monthly-hours-trend',
-  authenticate,
+  authenticateMultiBU,
   reportController.getMonthlyHoursTrend
 );
 
@@ -1218,7 +1247,7 @@ router.get(
  */
 router.get(
   '/employee-bench-percentage',
-  authenticate,
+  authenticateMultiBU,
   reportController.getEmployeeBenchPercentage
 );
 
@@ -1282,8 +1311,145 @@ router.get(
  */
 router.get(
   '/budget-vs-billed',
-  authenticate,
+  authenticateMultiBU,
   reportController.getBudgetVsBilled
+);
+
+/**
+ * @swagger
+ * /reports/resource-utilization-trend:
+ *   get:
+ *     summary: Utilization Trend grouped by Month + Resource — same formula as monthly-hours-trend's monthly_utilization series
+ *     description: >
+ *       Utilization % = (Billable Hours / Total Hours) × 100, rounded to 2
+ *       decimals, 0 when Total Hours = 0 — the existing Utilization Trend
+ *       formula, unchanged, additionally broken down per employee/resource.
+ *       Paginated.
+ *     tags: [Reports]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         schema: { type: integer, minimum: 1, maximum: 12 }
+ *       - in: query
+ *         name: year
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: startDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: endDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: employeeId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: clientId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: poId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: serviceTypeId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: hoursSource
+ *         schema: { type: string, enum: [O, M] }
+ *       - in: query
+ *         name: sortBy
+ *         schema: { type: string, enum: [utilization_percentage, total_hours, billable_hours, full_name] }
+ *       - in: query
+ *         name: sortOrder
+ *         schema: { type: string, enum: [ASC, DESC] }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, minimum: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *     responses:
+ *       200:
+ *         description: Paginated resource utilization trend (Month + Resource rows)
+ *       401:
+ *         description: Unauthorized
+ *       422:
+ *         description: Missing/ambiguous date filter (must provide exactly one of month+year or startDate+endDate)
+ */
+router.get(
+  '/resource-utilization-trend',
+  authenticateMultiBU,
+  reportController.getResourceUtilizationTrend
+);
+
+/**
+ * @swagger
+ * /reports/service-po-hours-budget:
+ *   get:
+ *     summary: Total PO Hours and Cost Budget per Month + Service PO
+ *     description: >
+ *       Total PO Hours uses the existing timesheet-hours logic (hoursSource,
+ *       Role ID 5 published-import-batch restriction). Cost Budget is
+ *       cost_budget_master.invoice_amount ('active' rows only) for that
+ *       Service PO and month — the monthly budget table, never an
+ *       overall/lifetime PO figure. A PO with hours but no budget configured
+ *       still appears (cost_budget: 0); a PO with a budget but no hours
+ *       logged that month still appears (total_hours: 0). Paginated.
+ *     tags: [Reports]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         schema: { type: integer, minimum: 1, maximum: 12 }
+ *       - in: query
+ *         name: year
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: startDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: endDate
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: employeeId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: clientId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: poId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: serviceTypeId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: hoursSource
+ *         schema: { type: string, enum: [O, M] }
+ *       - in: query
+ *         name: sortBy
+ *         schema: { type: string, enum: [total_hours, cost_budget] }
+ *       - in: query
+ *         name: sortOrder
+ *         schema: { type: string, enum: [ASC, DESC] }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, minimum: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *     responses:
+ *       200:
+ *         description: Paginated Service PO hours & cost budget (Month + Service PO rows)
+ *       401:
+ *         description: Unauthorized
+ *       422:
+ *         description: Missing/ambiguous date filter (must provide exactly one of month+year or startDate+endDate)
+ */
+router.get(
+  '/service-po-hours-budget',
+  authenticateMultiBU,
+  reportController.getServicePOHoursBudget
 );
 
 module.exports = router;

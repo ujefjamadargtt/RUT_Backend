@@ -9,6 +9,22 @@ const logger = require('../utils/logger');
  * All direct Sequelize interactions for the sub_projects table.
  */
 
+/**
+ * `company_id` WHERE fragment — array-aware for the 3 READ endpoints
+ * (findAll/findById/findByPO) that now accept req.companyIds (every BU a
+ * BU-scoped caller is mapped to when X-Company-Id is omitted — see
+ * resolveReportCompanyScope.js). Write paths (create/update/delete/
+ * findByCode) keep passing a plain scalar companyId, unaffected.
+ * @param {number|number[]} companyId
+ * @returns {object}
+ */
+function companyScope(companyId) {
+  if (Array.isArray(companyId)) {
+    return { company_id: { [Op.in]: companyId } };
+  }
+  return { company_id: companyId };
+}
+
 // ─── Standard include for ServicePO (with nested Client + ServiceType) ────────
 const servicePOInclude = {
   model: ServicePO,
@@ -47,7 +63,7 @@ const servicePOInclude = {
  */
 const findAll = async (filters = {}, pagination = {}, sort = {}) => {
   try {
-    const where = { is_deleted: false, company_id: filters.companyId };
+    const where = { is_deleted: false, ...companyScope(filters.companyId) };
 
     if (filters.service_po_id) {
       where.service_po_id = parseInt(filters.service_po_id, 10);
@@ -108,7 +124,7 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
 const findById = async (id, companyId) => {
   try {
     return await SubProject.findOne({
-      where: { id: parseInt(id, 10), is_deleted: false, company_id: companyId },
+      where: { id: parseInt(id, 10), is_deleted: false, ...companyScope(companyId) },
       include: [servicePOInclude],
     });
   } catch (error) {
@@ -127,7 +143,7 @@ const findById = async (id, companyId) => {
 const findByPO = async (poId, companyId) => {
   try {
     return await SubProject.findAll({
-      where: { service_po_id: parseInt(poId, 10), is_deleted: false, company_id: companyId },
+      where: { service_po_id: parseInt(poId, 10), is_deleted: false, ...companyScope(companyId) },
       include: [servicePOInclude],
       order: [['created_at', 'DESC']],
     });

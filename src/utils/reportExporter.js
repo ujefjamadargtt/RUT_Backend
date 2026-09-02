@@ -27,6 +27,42 @@ async function toExcelBuffer(rows, columns, title) {
 }
 
 /**
+ * Multi-sheet variant of toExcelBuffer() — one workbook, several
+ * independent sheets (Tenant Data Export). Each sheet gets its own bold
+ * header row, frozen header row, an autofilter over the header, and an
+ * optional per-column `numFmt` (e.g. 'yyyy-mm-dd', '#,##0.00') applied to
+ * every data cell in that column. An empty `rows` array still produces the
+ * sheet with just its header, never omits it.
+ *
+ * @param {Array<{ name: string, columns: Array<{ key: string, label: string, width?: number, numFmt?: string }>, rows: object[] }>} sheets
+ * @returns {Promise<Buffer>}
+ */
+async function toMultiSheetExcelBuffer(sheets) {
+  const workbook = new ExcelJS.Workbook();
+
+  sheets.forEach(({ name, columns, rows }) => {
+    const sheet = workbook.addWorksheet(name.substring(0, 31) || 'Sheet');
+    sheet.columns = columns.map((c) => ({ header: c.label, key: c.key, width: c.width || 20 }));
+    sheet.getRow(1).font = { bold: true };
+    sheet.views = [{ state: 'frozen', ySplit: 1 }];
+    sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: columns.length } };
+
+    const numFmtByColumn = columns
+      .map((c, idx) => ({ idx: idx + 1, numFmt: c.numFmt }))
+      .filter((c) => c.numFmt);
+
+    rows.forEach((row) => {
+      const excelRow = sheet.addRow(row);
+      numFmtByColumn.forEach(({ idx, numFmt }) => {
+        excelRow.getCell(idx).numFmt = numFmt;
+      });
+    });
+  });
+
+  return workbook.xlsx.writeBuffer();
+}
+
+/**
  * @param {Array<object>} rows
  * @param {Array<{ key: string, label: string }>} columns
  * @returns {Buffer}
@@ -77,4 +113,4 @@ function toPdfBuffer(rows, columns, title) {
   });
 }
 
-module.exports = { toExcelBuffer, toCsvExportBuffer, toPdfBuffer };
+module.exports = { toExcelBuffer, toMultiSheetExcelBuffer, toCsvExportBuffer, toPdfBuffer };

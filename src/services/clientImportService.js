@@ -3,7 +3,7 @@
 const xlsx = require('xlsx');
 const { Client } = require('../models');
 const { generateClientCode } = require('../helpers/codeGenerator');
-const { resolveCreateCompanyId } = require('./companyAccessControlService');
+const { resolveCreateCompanyIdForActor } = require('./companyAccessControlService');
 const logger = require('../utils/logger');
 
 // ── Header map (case-insensitive, trimmed) ────────────────────────────────────
@@ -110,12 +110,8 @@ function validateRow(data) {
  * @returns {Promise<{ total, imported, skipped, error_rows }>}
  */
 async function importClients(filePath, userId, req) {
-  const bodyCompanyId = req.body && req.body.company_id ? parseInt(req.body.company_id, 10) : undefined;
-  const companyId = await resolveCreateCompanyId(
-    { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId },
-    bodyCompanyId,
-    'a Client import'
-  );
+  const bodyCompanyId = req.body && req.body.company_id ? parseInt(req.body.company_id, 10) : null;
+  const companyId = await resolveCreateCompanyIdForActor(req, bodyCompanyId, { required: true, resourceLabel: 'a Client import' });
   logger.info('Client import started', { userId, companyId, filePath });
 
   // ── Parse workbook ──────────────────────────────────────────────────────────

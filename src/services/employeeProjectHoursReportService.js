@@ -98,8 +98,10 @@ const getReport = async (employeeId, companyId, query) => {
   const { startDate, endDate } = resolvePeriod(query);
 
   // Only ever the caller's OWN mapped Service POs — never an arbitrary
-  // company-wide list. This is the sole access-control gate for this report.
-  const mappings = await employeeServicePOMappingRepository.findByEmployeeWithProject(employeeId, companyId, 'active');
+  // company-wide list, and never narrowed further by Business Unit (matches
+  // /employee-timesheets/daily's rule: the mapping alone decides visibility).
+  // This is the sole access-control gate for this report.
+  const mappings = await employeeServicePOMappingRepository.findAllByEmployeeWithProject(employeeId, 'active');
   let mappedPOs = mappings.map((m) => m.servicePO).filter(Boolean);
 
   if (query.service_po_id) {
@@ -126,7 +128,7 @@ const getReport = async (employeeId, companyId, query) => {
   // scope — no per-node/per-PO query loop.
   const [hierarchyRows, hoursRows] = await Promise.all([
     servicePOHierarchyRepository.findByServicePOIds(mappedPOs.map((po) => po.id)),
-    employeeWorkLogRepository.getHierarchyBreakdownForRange({ employeeId, startDate, endDate, companyId }),
+    employeeWorkLogRepository.getHierarchyBreakdownForRange({ employeeId, startDate, endDate }),
   ]);
 
   const hierarchyRowsByPOId = new Map();
@@ -194,15 +196,14 @@ const getReport = async (employeeId, companyId, query) => {
  * toHierarchyTreeWithHours() (which needs a period to compute hours for).
  *
  * @param {number} employeeId
- * @param {number} companyId
  * @returns {Promise<object[]>}
  */
-const getFilterTree = async (employeeId, companyId) => {
+const getFilterTree = async (employeeId) => {
   if (!employeeId) {
     throw forbiddenError('This report requires a linked Employee account.');
   }
 
-  const mappings = await employeeServicePOMappingRepository.findByEmployeeWithProject(employeeId, companyId, 'active');
+  const mappings = await employeeServicePOMappingRepository.findAllByEmployeeWithProject(employeeId, 'active');
   const mappedPOs = mappings.map((m) => m.servicePO).filter(Boolean);
 
   if (mappedPOs.length === 0) return [];

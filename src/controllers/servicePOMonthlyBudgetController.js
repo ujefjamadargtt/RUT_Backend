@@ -19,12 +19,17 @@ const logger = require('../utils/logger');
  */
 const getOne = async (req, res) => {
   try {
+    // req.companyIds (array): every BU this BU-scoped caller is mapped to
+    // when X-Company-Id is omitted, or their role reach for a company-less
+    // Admin/Entity Admin/Platform Admin — see resolveReportCompanyScope.js.
+    // This route runs authenticateReadMultiBU, not the single-req.companyId
+    // chain GET /current and POST / still use.
     if (req.query.service_po_id !== undefined) {
-      const record = await servicePOMonthlyBudgetService.getOne(req.query, req.companyId, req.userId, req.userRoleName, req.employeeId);
+      const record = await servicePOMonthlyBudgetService.getOne(req.query, req.companyIds, req.userId, req.userRoleName, req.employeeId);
       return sendSuccess(res, record, 'Service PO monthly budget fetched successfully.');
     }
 
-    const data = await servicePOMonthlyBudgetService.listMonthlyBudgets(req.query, req.companyId, req.userId, req.userRoleName, req.employeeId);
+    const data = await servicePOMonthlyBudgetService.listMonthlyBudgets(req.query, req.companyIds, req.userId, req.userRoleName, req.employeeId);
     return sendSuccess(res, data, 'Service PO monthly budgets fetched successfully.');
   } catch (error) {
     if (error.statusCode === 404) {
@@ -42,7 +47,7 @@ const getOne = async (req, res) => {
  */
 const listServicePOs = async (req, res) => {
   try {
-    const data = await servicePOMonthlyBudgetService.listServicePOsForDropdown(req.companyId, req.userId, req.userRoleName, req.employeeId);
+    const data = await servicePOMonthlyBudgetService.listServicePOsForDropdown(req.companyIds, req.userId, req.userRoleName, req.employeeId);
     return sendSuccess(res, data, 'Service PO list fetched successfully.');
   } catch (error) {
     logger.error('listServicePOs (ServicePOMonthlyBudget) error', { error: error.message });

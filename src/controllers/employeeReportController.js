@@ -107,7 +107,7 @@ const getProjectHours = async (req, res, next) => {
  */
 const getProjectHoursFilterTree = async (req, res, next) => {
   try {
-    const data = await employeeProjectHoursReportService.getFilterTree(req.employeeId, req.companyId);
+    const data = await employeeProjectHoursReportService.getFilterTree(req.employeeId);
     return sendSuccess(res, data, 'Project/Service PO filter tree fetched successfully.');
   } catch (err) {
     if (err.statusCode) return sendError(res, err.message, err.statusCode);

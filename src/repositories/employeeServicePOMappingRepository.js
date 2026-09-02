@@ -194,35 +194,31 @@ const findAllByEmployee = async (employeeId, status) => {
 };
 
 /**
- * Same as findByEmployee(), plus the Service PO's Project (id + name) — for
- * the Employee Project Hours report (employeeProjectHoursReportService.js),
+ * Same as findAllByEmployee(), plus the Service PO's Project (id + name) —
+ * for the Employee Project Hours report (employeeProjectHoursReportService.js),
  * which groups a mapped PO under its Project. Kept as a separate function
- * rather than adding the extra include to findByEmployee() itself, so every
- * other existing caller of findByEmployee() is completely unaffected.
- * Same BU-less-mapping widening as findByEmployee() above — see its doc
- * comment for why this is safe (always additionally scoped by a fixed
- * employee_id). Unlike findByEmployee(), companyId is optional here: this
- * function's only caller (employeeProjectHoursReportService.js) always
- * passes the AUTHENTICATED employee's own employeeId, never an arbitrary
- * one, so there is no cross-tenant IDOR risk in omitting the company filter
- * entirely for a company-less actor (Platform Admin/Admin/Entity Admin —
- * hierarchyRank 1-3 never gets a req.companyId resolved, see
- * resolveCompany.js). Passing `company_id: undefined` into companyScope()
- * would otherwise throw ("WHERE parameter \"company_id\" has invalid
- * \"undefined\" value" — reported live on GET /employee-reports/
- * project-hours); when companyId is null/undefined this instead shows all
- * of the caller's own mappings across every company, same as
- * findAllByEmployee() above.
+ * rather than adding the extra include to findAllByEmployee() itself, so
+ * every other existing caller of findAllByEmployee() is completely
+ * unaffected.
+ *
+ * Deliberately NEVER company/BU-scoped (same reasoning as
+ * findAllByEmployee()'s doc comment): the employee↔Service PO mapping is the
+ * sole source of truth for "which Service POs can this employee see," not
+ * their own Business Unit or the mapped PO's project's Business Unit. A
+ * mapping made under a different BU than the employee's own home one
+ * (cross-BU resourcing — see employeeServicePOMappingService.assign()) must
+ * stay visible here exactly as it does in
+ * employeeTimesheetService.getMappedProjects()/buildServicePOsForDate — this
+ * function previously filtered by companyId and silently dropped such
+ * mappings from the Project Hours report while `/employee-timesheets/daily`
+ * kept showing them, producing two disagreeing lists of "my Service POs" for
+ * the same employee.
  * @param {number} employeeId
- * @param {number} [companyId]
  * @param {string} [status]
  * @returns {Promise<EmployeeServicePOMapping[]>}
  */
-const findByEmployeeWithProject = async (employeeId, companyId, status) => {
+const findAllByEmployeeWithProject = async (employeeId, status) => {
   const where = { employee_id: employeeId };
-  if (companyId != null) {
-    where[Op.or] = [companyScope(companyId), { company_id: null }];
-  }
   if (status) where.status = status;
 
   return EmployeeServicePOMapping.findAll({
@@ -325,7 +321,7 @@ module.exports = {
   remove,
   findByEmployee,
   findAllByEmployee,
-  findByEmployeeWithProject,
+  findAllByEmployeeWithProject,
   findByServicePO,
   findByEmployeeAndPOIds,
   bulkUpdateStatus,

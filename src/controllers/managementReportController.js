@@ -17,7 +17,7 @@ function buildHandler(name, serviceFn, { useReq = false } = {}) {
       const filters = { ...req.body, ...req.query };
       const result = useReq
         ? await serviceFn(filters, req)
-        : await serviceFn(filters, req.companyId);
+        : await serviceFn(filters, req.companyIds);
       const { data, meta, ...rest } = result;
       return sendPaginated(res, { records: data, ...rest }, meta, `${name} fetched successfully.`);
     } catch (err) {
@@ -48,7 +48,7 @@ const getInvoiceRealizationTrend = buildHandler('Invoice Realization / Billing E
 async function getServiceLineBusinessMix(req, res, next) {
   try {
     const filters = { ...req.body, ...req.query };
-    const result = await managementReportService.getServiceLineBusinessMix(filters, req.companyId);
+    const result = await managementReportService.getServiceLineBusinessMix(filters, req.companyIds);
     return sendSuccess(res, result, 'Service Line Business Mix report fetched successfully.');
   } catch (err) {
     if (err.statusCode) {

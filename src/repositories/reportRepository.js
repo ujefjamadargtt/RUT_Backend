@@ -36,6 +36,22 @@ const EMPLOYEE_COMPANY_SCOPE_SQL = `(
   )
 )`;
 
+// Same shape as EMPLOYEE_COMPANY_SCOPE_SQL above, but IN(:companyIds)-aware
+// for the reports converted to the "no X-Company-Id -> role reach" array
+// scope (see resolveReportCompanyScope.js) — kept as a SEPARATE constant
+// (not a shared rewrite of EMPLOYEE_COMPANY_SCOPE_SQL) because
+// getEmployeeHourlyRate/getEmployeeUtilizationSummary still bind a single
+// scalar :companyId and are NOT part of that conversion.
+const EMPLOYEE_COMPANY_SCOPE_SQL_MULTI = `(
+  e.company_id IN (:companyIds)
+  OR EXISTS (
+    SELECT 1 FROM employee_business_units ebu
+    WHERE ebu.employee_id = e.id
+      AND ebu.business_unit_id IN (:companyIds)
+      AND ebu.status = 'active'
+  )
+)`;
+
 /**
  * Get employee hourly rate by joining employees with monthly_costs.
  * per_hour_rate = total_cost / (standard working hours in the month)
@@ -77,9 +93,9 @@ async function getEmployeeHourlyRate(filters) {
     limit,
     offset,
     stdHours: STANDARD_HOURS,
-    companyId: filters.companyId,
+    companyIds: filters.companyIds,
   };
-  const conditions = ["e.status = 'active'", EMPLOYEE_COMPANY_SCOPE_SQL];
+  const conditions = ["e.status = 'active'", EMPLOYEE_COMPANY_SCOPE_SQL_MULTI];
 
   if (employeeId) {
     conditions.push('e.id = :employeeId');
@@ -92,6 +108,11 @@ async function getEmployeeHourlyRate(filters) {
 
   const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
+  // per_hour_rate is a per-employee, per-month figure (mc.total_cost /
+  // STANDARD_HOURS) — never an average/rate across employees, so scoping
+  // to multiple Business Units only changes WHICH employees are included,
+  // never how any individual row's rate is computed. No recomputation
+  // needed for multi-BU aggregation here.
   const dataQuery = `
     SELECT
       e.id                                          AS employee_id,
@@ -166,8 +187,8 @@ async function getMonthlyCostSummary(filters) {
     : 'year';
   const safeOrder = sortOrder.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
 
-  const replacements = { limit, offset, companyId: filters.companyId };
-  const conditions = ['mc.company_id = :companyId'];
+  const replacements = { limit, offset, companyIds: filters.companyIds };
+  const conditions = ['mc.company_id IN (:companyIds)'];
 
   if (year) {
     conditions.push('mc.month_year LIKE :yearPattern');
@@ -265,8 +286,8 @@ async function getTimesheetSummary(filters) {
   const safeSort = allowedSortColumns.includes(sortBy) ? sortBy : 't.timesheet_date';
   const safeOrder = sortOrder.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
 
-  const replacements = { limit, offset, companyId: filters.companyId };
-  const conditions = ['t.company_id = :companyId'];
+  const replacements = { limit, offset, companyIds: filters.companyIds };
+  const conditions = ['t.company_id IN (:companyIds)'];
 
   if (startDate) {
     conditions.push('t.timesheet_date >= :startDate');
@@ -394,8 +415,8 @@ async function getServicePOUtilisation(filters) {
   const safeSort = allowedSortColumns.includes(sortBy) ? sortBy : 'actual_hours';
   const safeOrder = sortOrder.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
 
-  const replacements = { limit, offset, companyId: filters.companyId };
-  const conditions = ['sp.company_id = :companyId'];
+  const replacements = { limit, offset, companyIds: filters.companyIds };
+  const conditions = ['(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)'];
 
   if (poId) {
     conditions.push('sp.id = :poId');
@@ -520,8 +541,8 @@ async function getSubProjectHours(filters) {
   const safeSort = allowedSortColumns.includes(sortBy) ? sortBy : 'total_hours';
   const safeOrder = sortOrder.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
 
-  const replacements = { limit, offset, companyId: filters.companyId };
-  const conditions = ['subp.company_id = :companyId'];
+  const replacements = { limit, offset, companyIds: filters.companyIds };
+  const conditions = ['(subp.company_id IN (:companyIds) OR subp.company_id IS NULL)'];
 
   if (poId) {
     conditions.push('subp.service_po_id = :poId');
@@ -656,8 +677,8 @@ async function getResourceAllocation(filters) {
   const safeSort = allowedSortColumns.includes(sortBy) ? sortBy : 'e.full_name';
   const safeOrder = sortOrder.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
 
-  const replacements = { limit, offset, companyId: filters.companyId };
-  const conditions = ["e.status = 'active'", EMPLOYEE_COMPANY_SCOPE_SQL];
+  const replacements = { limit, offset, companyIds: filters.companyIds };
+  const conditions = ["e.status = 'active'", EMPLOYEE_COMPANY_SCOPE_SQL_MULTI];
 
   if (employeeId) {
     conditions.push('e.id = :employeeId');
@@ -816,8 +837,8 @@ async function getOperationalCostBreakdown(filters) {
     : 'mc.month_year';
   const safeOrder = sortOrder.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
 
-  const replacements = { limit, offset, companyId: filters.companyId };
-  const conditions = ['mc.company_id = :companyId'];
+  const replacements = { limit, offset, companyIds: filters.companyIds };
+  const conditions = ['mc.company_id IN (:companyIds)'];
 
   if (year) {
     conditions.push('mc.month_year LIKE :yearPattern');
@@ -845,6 +866,10 @@ async function getOperationalCostBreakdown(filters) {
 
   const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
+  // salary_pct_of_total/ops_pct_of_total/billable_pct_of_total are each
+  // computed from THAT row's own mc.total_cost (one row per employee per
+  // month) — never averaged/aggregated across rows or Business Units, so
+  // no recomputation is needed for multi-BU scoping here.
   const dataQuery = `
     SELECT
       mc.id                                  AS cost_id,
@@ -953,10 +978,10 @@ async function getEmployeeUtilizationSummary(filters) {
     limit,
     offset,
     monthlyCapacity: MONTHLY_CAPACITY,
-    companyId: filters.companyId,
+    companyIds: filters.companyIds,
   };
 
-  const empConditions = ["e.status = 'active'", EMPLOYEE_COMPANY_SCOPE_SQL];
+  const empConditions = ["e.status = 'active'", EMPLOYEE_COMPANY_SCOPE_SQL_MULTI];
   if (employeeId) {
     empConditions.push('e.id = :employeeId');
     replacements.employeeId = employeeId;
@@ -1120,8 +1145,8 @@ async function getServicePOSummary(filters) {
   const yearNum = parseInt(year, 10);
   const monthYear = formatMonthYear(month, year);
 
-  const replacements = { monthNum, yearNum, monthYear, stdHours: STANDARD_HOURS, limit, offset, companyId: filters.companyId };
-  const conditions = ['sp.company_id = :companyId'];
+  const replacements = { monthNum, yearNum, monthYear, stdHours: STANDARD_HOURS, limit, offset, companyIds: filters.companyIds };
+  const conditions = ['(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)'];
 
   if (status && status !== 'all') {
     conditions.push('sp.status = :status');
@@ -1191,6 +1216,7 @@ async function getServicePOSummary(filters) {
       st.id                                                              AS service_type_id,
       st.service_type_name                                               AS service_type,
       COALESCE(prev.hours_delivered, 0)                                  AS hours_delivered_before_month,
+      COALESCE(rb.budgeted_hours, 0)                                     AS exp_hours,
       CASE
         WHEN sp.is_billable = true
           THEN ROUND(COALESCE(curr.billable_amount, 0)::numeric, 2)
@@ -1220,6 +1246,18 @@ async function getServicePOSummary(filters) {
         ${publishGuard}
       GROUP BY t.service_po_id
     ) curr ON curr.service_po_id = sp.id
+    -- Expected/Budgeted Hours: total planned hours across every Employee
+    -- staffed on this Service PO for the report's selected month/year, from
+    -- the Resource Budget Master (resource_budget_master — see
+    -- database/migrations/20260859_create_resource_budget_master.sql).
+    -- Only ACTIVE budget rows count; a PO with no budget rows for this
+    -- month/year defaults to 0, same convention as hours_delivered_before_month.
+    LEFT JOIN (
+      SELECT service_po_id, SUM(hours) AS budgeted_hours
+      FROM resource_budget_master
+      WHERE month = :monthNum AND year = :yearNum AND status = 'active'
+      GROUP BY service_po_id
+    ) rb ON rb.service_po_id = sp.id
     ${whereClause}
     ORDER BY ${safeSort} ${safeOrder}, sp.service_po_name ASC
     LIMIT :limit OFFSET :offset
@@ -1314,8 +1352,8 @@ async function getInvoicePOSummary(filters) {
   const yearNum = parseInt(year, 10);
   const monthYear = formatMonthYear(month, year);
 
-  const replacements = { monthNum, yearNum, monthYear, limit, offset, companyId: filters.companyId };
-  const conditions = ['sp.company_id = :companyId'];
+  const replacements = { monthNum, yearNum, monthYear, limit, offset, companyIds: filters.companyIds };
+  const conditions = ['(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)'];
 
   if (status && status !== 'all') {
     conditions.push('sp.status = :status');
@@ -1385,6 +1423,7 @@ async function getInvoicePOSummary(filters) {
       st.id                                                              AS service_type_id,
       st.service_type_name                                               AS service_type,
       COALESCE(prev.hours_delivered, 0)                                  AS hours_delivered_before_month,
+      COALESCE(rb.budgeted_hours, 0)                                     AS exp_hours,
       CASE
         WHEN sp.is_billable = true
           THEN ROUND(COALESCE(curr.billable_amount, 0)::numeric, 2)
@@ -1438,6 +1477,14 @@ async function getInvoicePOSummary(filters) {
         ${publishGuard}
       GROUP BY t.service_po_id
     ) curr ON curr.service_po_id = sp.id
+    -- Expected/Budgeted Hours: same Resource Budget Master source as
+    -- getServicePOSummary() above — see that query's comment.
+    LEFT JOIN (
+      SELECT service_po_id, SUM(hours) AS budgeted_hours
+      FROM resource_budget_master
+      WHERE month = :monthNum AND year = :yearNum AND status = 'active'
+      GROUP BY service_po_id
+    ) rb ON rb.service_po_id = sp.id
     ${whereClause}
     ORDER BY ${safeSort} ${safeOrder}, sp.service_po_name ASC
     LIMIT :limit OFFSET :offset
@@ -1491,7 +1538,7 @@ async function getResourceUtilization(filters) {
     year: parseInt(year, 10),
     limit,
     offset,
-    companyId: filters.companyId,
+    companyIds: filters.companyIds,
   };
 
   const empConditions = [];
@@ -1525,7 +1572,7 @@ async function getResourceUtilization(filters) {
     JOIN service_categories sc ON sc.id  = st.service_category_id AND sc.is_deleted = false
     WHERE EXTRACT(MONTH FROM t.timesheet_date) = :month
       AND EXTRACT(YEAR  FROM t.timesheet_date) = :year
-      AND t.company_id = :companyId
+      AND t.company_id IN (:companyIds)
       ${publishGuard}
     ORDER BY sc.name, st.service_type_name
   `;
@@ -1540,7 +1587,7 @@ async function getResourceUtilization(filters) {
     JOIN service_categories sc ON sc.id = st.service_category_id AND sc.is_deleted = false
     WHERE EXTRACT(MONTH FROM t.timesheet_date) = :month
       AND EXTRACT(YEAR  FROM t.timesheet_date) = :year
-      AND t.company_id = :companyId
+      AND t.company_id IN (:companyIds)
       ${empFilter}
       ${publishGuard}
   `;
@@ -1556,7 +1603,7 @@ async function getResourceUtilization(filters) {
       JOIN service_categories sc ON sc.id = st.service_category_id AND sc.is_deleted = false
       WHERE EXTRACT(MONTH FROM t.timesheet_date) = :month
         AND EXTRACT(YEAR  FROM t.timesheet_date) = :year
-        AND t.company_id = :companyId
+        AND t.company_id IN (:companyIds)
         ${empFilter}
         ${publishGuard}
       ORDER BY e.full_name
@@ -1580,7 +1627,7 @@ async function getResourceUtilization(filters) {
     JOIN emp_page ep           ON ep.employee_id = e.id
     WHERE EXTRACT(MONTH FROM t.timesheet_date) = :month
       AND EXTRACT(YEAR  FROM t.timesheet_date) = :year
-      AND t.company_id = :companyId
+      AND t.company_id IN (:companyIds)
       ${publishGuard}
     GROUP BY e.id, e.employee_code, e.full_name, e.designation, st.id, st.service_type_name, sc.id, sc.name
     ORDER BY e.full_name, sc.name, st.service_type_name
@@ -1628,13 +1675,13 @@ async function getMonthlyResourceUtilization(filters) {
     year: parseInt(year, 10),
     limit,
     offset,
-    companyId: filters.companyId,
+    companyIds: filters.companyIds,
   };
 
   const conditions = [
     "EXTRACT(MONTH FROM t.timesheet_date) = :month",
     "EXTRACT(YEAR  FROM t.timesheet_date) = :year",
-    "t.company_id = :companyId",
+    "t.company_id IN (:companyIds)",
     "e.is_deleted = false",
     "e.status = 'active'",
     "sp.is_deleted = false",
@@ -1797,7 +1844,7 @@ async function getResourseProjectUtilizationReport(filters) {
     projectSubType: projectSubType || null,
     limit,
     offset,
-    companyId: filters.companyId,
+    companyIds: filters.companyIds,
   };
 
   // employeeIds / clientIds / projectIds / serviceTypeIds are multi-select —
@@ -1861,7 +1908,7 @@ async function getResourseProjectUtilizationReport(filters) {
   const monthYearBlock = `
     AND EXTRACT(MONTH FROM t.timesheet_date) = :month
     AND EXTRACT(YEAR FROM t.timesheet_date) = :year
-    AND t.company_id = :companyId
+    AND t.company_id IN (:companyIds)
     ${publishGuard}
   `;
 
@@ -2007,7 +2054,7 @@ async function getResourseProjectUtilizationReport(filters) {
  * row to exclude or roll up.
  *
  * @param {object} filters
- * @param {number} filters.companyId
+ * @param {number[]} filters.companyIds
  * @param {string} filters.startDate - "YYYY-MM-DD"
  * @param {string} filters.endDate - "YYYY-MM-DD"
  * @param {number} [filters.clientId]
@@ -2021,7 +2068,7 @@ async function getResourseProjectUtilizationReport(filters) {
  */
 async function getClientServicePOHours(filters) {
   const {
-    companyId,
+    companyIds,
     startDate,
     endDate,
     clientId,
@@ -2040,9 +2087,9 @@ async function getClientServicePOHours(filters) {
     ? 't.hours_logged'
     : 'COALESCE(t.modified_hours, t.hours_logged)';
 
-  const replacements = { companyId, startDate, endDate };
+  const replacements = { companyIds, startDate, endDate };
   const conditions = [
-    't.company_id = :companyId',
+    't.company_id IN (:companyIds)',
     't.timesheet_date >= :startDate',
     't.timesheet_date <= :endDate',
   ];
@@ -2120,18 +2167,18 @@ function periodKey(dateStr) {
  * buildAnalyticsFilters() so these Reports reproduce the exact same
  * business meaning as the Dashboard analytics they're based on.
  *
- * @param {object} filters - { companyId, startDate, endDate, employeeId, clientId, poId, serviceTypeId, hoursSource, roleId }
+ * @param {object} filters - { companyIds, startDate, endDate, employeeId, clientId, poId, serviceTypeId, hoursSource, roleId }
  * @param {object} replacements - mutated in place with the bind values this clause needs
  * @returns {string} SQL WHERE clause (without the WHERE keyword)
  */
 function buildTrendFilters(filters, replacements) {
-  const { companyId, startDate, endDate, employeeId, clientId, poId, serviceTypeId, roleId } = filters;
+  const { companyIds, startDate, endDate, employeeId, clientId, poId, serviceTypeId, roleId } = filters;
   const conditions = [
-    't.company_id = :companyId',
+    't.company_id IN (:companyIds)',
     't.timesheet_date >= :startDate',
     't.timesheet_date <= :endDate',
   ];
-  replacements.companyId = companyId;
+  replacements.companyIds = companyIds;
   replacements.startDate = startDate;
   replacements.endDate = endDate;
 
@@ -2171,11 +2218,11 @@ function buildTrendFilters(filters, replacements) {
  * dashboardRepository.js's getClientWiseCostAnalytics() uses (a client with
  * hours but no cost, or vice versa, must still appear).
  *
- * @param {object} filters - { companyId, hoursSource }
+ * @param {object} filters - { companyIds, hoursSource }
  * @returns {Promise<object[]>} rows: { client_id, client_name, total_hours }
  */
 async function getClientCostAnalyticsHours(filters) {
-  const { companyId, hoursSource } = filters;
+  const { companyIds, hoursSource } = filters;
   const hoursCol = (hoursSource === 'O') ? 't.hours_logged' : 'COALESCE(t.modified_hours, t.hours_logged)';
 
   return sequelize.query(
@@ -2186,9 +2233,9 @@ async function getClientCostAnalyticsHours(filters) {
      FROM timesheets t
      INNER JOIN service_pos sp ON sp.id = t.service_po_id
      INNER JOIN clients c      ON c.id  = sp.client_id
-     WHERE t.company_id = :companyId
+     WHERE t.company_id IN (:companyIds)
      GROUP BY c.id, c.client_name`,
-    { replacements: { companyId }, type: QueryTypes.SELECT }
+    { replacements: { companyIds }, type: QueryTypes.SELECT }
   );
 }
 
@@ -2197,11 +2244,11 @@ async function getClientCostAnalyticsHours(filters) {
  * service_po_monthly_budgets.billed_amount) per client, entire dataset,
  * unfiltered. See getClientCostAnalyticsHours() above.
  *
- * @param {object} filters - { companyId }
+ * @param {object} filters - { companyIds }
  * @returns {Promise<object[]>} rows: { client_id, client_name, total_cost }
  */
 async function getClientCostAnalyticsCost(filters) {
-  const { companyId } = filters;
+  const { companyIds } = filters;
 
   return sequelize.query(
     `SELECT
@@ -2211,9 +2258,9 @@ async function getClientCostAnalyticsCost(filters) {
      FROM service_po_monthly_budgets spmb
      INNER JOIN service_pos sp ON sp.id = spmb.service_po_id
      INNER JOIN clients c      ON c.id  = sp.client_id
-     WHERE sp.company_id = :companyId
+     WHERE (sp.company_id IN (:companyIds) OR sp.company_id IS NULL)
      GROUP BY c.id, c.client_name`,
-    { replacements: { companyId }, type: QueryTypes.SELECT }
+    { replacements: { companyIds }, type: QueryTypes.SELECT }
   );
 }
 
@@ -2223,11 +2270,11 @@ async function getClientCostAnalyticsCost(filters) {
  * unfiltered — same shape/scope as dashboardRepository.js's
  * getClientCategoryCostMatrix().
  *
- * @param {object} filters - { companyId }
+ * @param {object} filters - { companyIds }
  * @returns {Promise<object[]>} rows: { client_id, client_name, category_name, cost }
  */
 async function getClientCategoryCostMatrixReport(filters) {
-  const { companyId } = filters;
+  const { companyIds } = filters;
 
   return sequelize.query(
     `SELECT
@@ -2240,10 +2287,10 @@ async function getClientCategoryCostMatrixReport(filters) {
      INNER JOIN clients c             ON c.id  = sp.client_id
      INNER JOIN service_types st      ON st.id = sp.service_type_id
      LEFT  JOIN service_categories sc ON sc.id = st.service_category_id
-     WHERE sp.company_id = :companyId
+     WHERE (sp.company_id IN (:companyIds) OR sp.company_id IS NULL)
      GROUP BY c.id, c.client_name, category_name
      ORDER BY c.client_name, category_name`,
-    { replacements: { companyId }, type: QueryTypes.SELECT }
+    { replacements: { companyIds }, type: QueryTypes.SELECT }
   );
 }
 
@@ -2253,7 +2300,7 @@ async function getClientCategoryCostMatrixReport(filters) {
  * getClientWiseAnalyticsCost() by the service layer — mirrors
  * dashboardRepository.js's getClientWiseAnalytics().
  *
- * @param {object} filters - { companyId, startDate, endDate, employeeId, clientId, poId, serviceTypeId, hoursSource, roleId }
+ * @param {object} filters - { companyIds, startDate, endDate, employeeId, clientId, poId, serviceTypeId, hoursSource, roleId }
  * @returns {Promise<object[]>} rows: { client_id, client_name, total_hours, total_projects }
  */
 async function getClientWiseAnalyticsHours(filters) {
@@ -2285,14 +2332,14 @@ async function getClientWiseAnalyticsHours(filters) {
  * while still summing that PO's full billed_amount — same documented
  * interpretation as dashboardRepository.js's buildInvoiceMasterFilters().
  *
- * @param {object} filters - { companyId, startDate, endDate, employeeId, clientId, poId, serviceTypeId }
+ * @param {object} filters - { companyIds, startDate, endDate, employeeId, clientId, poId, serviceTypeId }
  * @returns {Promise<object[]>} rows: { client_id, client_name, total_cost }
  */
 async function getClientWiseAnalyticsCost(filters) {
-  const { companyId, startDate, endDate, employeeId, clientId, poId, serviceTypeId } = filters;
-  const replacements = { companyId, startPeriodKey: periodKey(startDate), endPeriodKey: periodKey(endDate) };
+  const { companyIds, startDate, endDate, employeeId, clientId, poId, serviceTypeId } = filters;
+  const replacements = { companyIds, startPeriodKey: periodKey(startDate), endPeriodKey: periodKey(endDate) };
   const conditions = [
-    'sp.company_id = :companyId',
+    '(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)',
     '(spmb.year * 12 + spmb.month) BETWEEN :startPeriodKey AND :endPeriodKey',
   ];
 
@@ -2341,14 +2388,14 @@ async function getClientWiseAnalyticsCost(filters) {
  * Invoice Master rows are already at the (Service PO, month, year)
  * granularity, so no aggregation-inflation risk.
  *
- * @param {object} filters - { companyId, startDate, endDate, clientId, poId, serviceTypeId }
+ * @param {object} filters - { companyIds, startDate, endDate, clientId, poId, serviceTypeId }
  * @returns {Promise<object[]>} rows: { year, month, category_name, cost }
  */
 async function getMonthlyCostByCategory(filters) {
-  const { companyId, startDate, endDate, clientId, poId, serviceTypeId } = filters;
-  const replacements = { companyId, startPeriodKey: periodKey(startDate), endPeriodKey: periodKey(endDate) };
+  const { companyIds, startDate, endDate, clientId, poId, serviceTypeId } = filters;
+  const replacements = { companyIds, startPeriodKey: periodKey(startDate), endPeriodKey: periodKey(endDate) };
   const conditions = [
-    'sp.company_id = :companyId',
+    '(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)',
     '(spmb.year * 12 + spmb.month) BETWEEN :startPeriodKey AND :endPeriodKey',
   ];
 
@@ -2388,7 +2435,7 @@ async function getMonthlyCostByCategory(filters) {
  * data-driven classification as dashboardRepository.js's
  * getAnalyticsMonthlyTrend() — never a hardcoded category-name comparison).
  *
- * @param {object} filters - { companyId, startDate, endDate, employeeId, clientId, poId, serviceTypeId, hoursSource, roleId }
+ * @param {object} filters - { companyIds, startDate, endDate, employeeId, clientId, poId, serviceTypeId, hoursSource, roleId }
  * @returns {Promise<object[]>} rows: { year, month, category_name, report_bucket_key, hours }
  */
 async function getMonthlyHoursByCategory(filters) {
@@ -2420,7 +2467,7 @@ async function getMonthlyHoursByCategory(filters) {
  * (service_categories.report_bucket_key = 'billable'), same business rule
  * as dashboardRepository.js's getMonthlyBillableUtilization().
  *
- * @param {object} filters - { companyId, startDate, endDate, employeeId, clientId, poId, serviceTypeId, hoursSource, roleId }
+ * @param {object} filters - { companyIds, startDate, endDate, employeeId, clientId, poId, serviceTypeId, hoursSource, roleId }
  * @returns {Promise<object[]>} rows: { year, month, total_hours, billable_hours }
  */
 async function getMonthlyUtilizationTrend(filters) {
@@ -2450,7 +2497,7 @@ async function getMonthlyUtilizationTrend(filters) {
  * logged against the "Leaves" service type only — same rule as
  * dashboardRepository.js's getLeaveHoursTrend().
  *
- * @param {object} filters - { companyId, startDate, endDate, employeeId, clientId, poId, serviceTypeId, hoursSource, roleId }
+ * @param {object} filters - { companyIds, startDate, endDate, employeeId, clientId, poId, serviceTypeId, hoursSource, roleId }
  * @returns {Promise<object[]>} rows: { year, month, leave_hours }
  */
 async function getLeaveHoursTrendReport(filters) {
@@ -2479,7 +2526,7 @@ async function getLeaveHoursTrendReport(filters) {
  * logged against Service POs named exactly "Idle" or "On Bench"
  * (case-insensitive) — same rule as dashboardRepository.js's getNoWorkTrend().
  *
- * @param {object} filters - { companyId, startDate, endDate, employeeId, clientId, poId, serviceTypeId, hoursSource, roleId }
+ * @param {object} filters - { companyIds, startDate, endDate, employeeId, clientId, poId, serviceTypeId, hoursSource, roleId }
  * @returns {Promise<object[]>} rows: { year, month, no_work_hours }
  */
 async function getNoWorkTrendReport(filters) {
@@ -2503,13 +2550,143 @@ async function getNoWorkTrendReport(filters) {
 }
 
 /**
+ * Resource Utilization Trend Report — same business rule as
+ * getMonthlyUtilizationTrend() above (total hours logged per month and the
+ * subset logged against a Billable-category Service PO), additionally
+ * broken down per employee/resource. Reuses buildTrendFilters() and the
+ * identical hoursCol/billable-hours expressions — does not alter or
+ * duplicate the Utilization Trend business rule, only adds a resource
+ * dimension to the same query.
+ *
+ * @param {object} filters - { companyIds, startDate, endDate, employeeId, clientId, poId, serviceTypeId, hoursSource, roleId }
+ * @returns {Promise<object[]>} rows: { year, month, employee_id, employee_code, full_name, total_hours, billable_hours }
+ */
+async function getResourceUtilizationTrend(filters) {
+  const replacements = {};
+  const whereClause = buildTrendFilters(filters, replacements);
+  const hoursCol = (filters.hoursSource === 'O') ? 't.hours_logged' : 'COALESCE(t.modified_hours, t.hours_logged)';
+
+  return sequelize.query(
+    `SELECT
+       EXTRACT(YEAR  FROM t.timesheet_date)::int AS year,
+       EXTRACT(MONTH FROM t.timesheet_date)::int AS month,
+       e.id AS employee_id,
+       e.employee_code,
+       e.full_name,
+       ROUND(SUM(${hoursCol})::NUMERIC, 2) AS total_hours,
+       ROUND(COALESCE(SUM(CASE WHEN sc.report_bucket_key = 'billable' THEN ${hoursCol} END), 0)::NUMERIC, 2) AS billable_hours
+     FROM timesheets t
+     INNER JOIN employees e      ON e.id  = t.employee_id
+     INNER JOIN service_pos sp   ON sp.id = t.service_po_id
+     INNER JOIN service_types st ON st.id = sp.service_type_id
+     LEFT JOIN service_categories sc ON sc.id = st.service_category_id
+     WHERE ${whereClause}
+     GROUP BY year, month, e.id, e.employee_code, e.full_name
+     ORDER BY year, month, e.full_name`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+}
+
+/**
+ * Service PO Hours & Cost Budget Report — Part A: total timesheet hours per
+ * (Service PO, month, year), using the same hoursCol/Role-5-publish-guard
+ * business rules as the other trend reports (via buildTrendFilters()).
+ * Merged with getServicePOCostBudgetByMonth() below by the service layer,
+ * same two-query-then-merge approach used elsewhere in this file (e.g.
+ * getClientCostAnalyticsHours/Cost).
+ *
+ * @param {object} filters - { companyIds, startDate, endDate, employeeId, clientId, poId, serviceTypeId, hoursSource, roleId }
+ * @returns {Promise<object[]>} rows: { year, month, service_po_id, service_po_code, service_po_name, client_id, client_name, total_hours }
+ */
+async function getServicePOHoursTrend(filters) {
+  const replacements = {};
+  const whereClause = buildTrendFilters(filters, replacements);
+  const hoursCol = (filters.hoursSource === 'O') ? 't.hours_logged' : 'COALESCE(t.modified_hours, t.hours_logged)';
+
+  return sequelize.query(
+    `SELECT
+       EXTRACT(YEAR  FROM t.timesheet_date)::int AS year,
+       EXTRACT(MONTH FROM t.timesheet_date)::int AS month,
+       sp.id AS service_po_id,
+       sp.service_po_code,
+       sp.service_po_name,
+       sp.client_id,
+       c.client_name,
+       ROUND(SUM(${hoursCol})::NUMERIC, 2) AS total_hours
+     FROM timesheets t
+     INNER JOIN service_pos sp   ON sp.id = t.service_po_id
+     INNER JOIN service_types st ON st.id = sp.service_type_id
+     INNER JOIN clients c        ON c.id  = sp.client_id
+     WHERE ${whereClause}
+     GROUP BY year, month, sp.id, sp.service_po_code, sp.service_po_name, sp.client_id, c.client_name
+     ORDER BY year, month, sp.service_po_code`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+}
+
+/**
+ * Service PO Hours & Cost Budget Report — Part B: the monthly Cost Budget
+ * (cost_budget_master.invoice_amount, 'active' rows only — same convention
+ * as getBudgetVsBilled()'s Budget Cost) for each (Service PO, month, year)
+ * that has a budget configured in the period. Deliberately the MONTHLY
+ * budget table, never an overall/lifetime PO figure (ServicePO carries no
+ * such field). employeeId has no meaning here (cost_budget_master is
+ * Service-PO-level, never per-employee) and is intentionally not a
+ * supported filter — same documented limitation as getBudgetVsBilled().
+ *
+ * @param {object} filters - { companyIds, startDate, endDate, clientId, poId, serviceTypeId }
+ * @returns {Promise<object[]>} rows: { year, month, service_po_id, service_po_code, service_po_name, client_id, client_name, cost_budget }
+ */
+async function getServicePOCostBudgetByMonth(filters) {
+  const { companyIds, startDate, endDate, clientId, poId, serviceTypeId } = filters;
+  const replacements = { companyIds, startPeriodKey: periodKey(startDate), endPeriodKey: periodKey(endDate) };
+  const conditions = [
+    '(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)',
+    "cbm.status = 'active'",
+    '(cbm.year * 12 + cbm.month) BETWEEN :startPeriodKey AND :endPeriodKey',
+  ];
+
+  if (clientId) {
+    conditions.push('sp.client_id = :clientId');
+    replacements.clientId = clientId;
+  }
+  if (poId) {
+    conditions.push('sp.id = :poId');
+    replacements.poId = poId;
+  }
+  if (serviceTypeId) {
+    conditions.push('st.id = :serviceTypeId');
+    replacements.serviceTypeId = serviceTypeId;
+  }
+
+  return sequelize.query(
+    `SELECT
+       cbm.year,
+       cbm.month,
+       cbm.service_po_id,
+       sp.service_po_code,
+       sp.service_po_name,
+       sp.client_id,
+       c.client_name,
+       ROUND(COALESCE(cbm.invoice_amount, 0)::NUMERIC, 2) AS cost_budget
+     FROM cost_budget_master cbm
+     INNER JOIN service_pos sp   ON sp.id = cbm.service_po_id
+     INNER JOIN service_types st ON st.id = sp.service_type_id
+     INNER JOIN clients c        ON c.id  = sp.client_id
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY cbm.year, cbm.month, sp.service_po_code`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+}
+
+/**
  * Employee Bench Percentage Report — hours per (employee, Service PO) pair
  * for the given period/filters, the same raw shape
  * dashboardRepository.js's getAnalyticsBenchDetail() returns; the service
  * layer applies the same "Idle"/"Bench" keyword match (on the Service PO
  * name) to split each employee's hours into bench vs total.
  *
- * @param {object} filters - { companyId, startDate, endDate, employeeId, clientId, poId, hoursSource, roleId }
+ * @param {object} filters - { companyIds, startDate, endDate, employeeId, clientId, poId, hoursSource, roleId }
  * @returns {Promise<object[]>} rows: { employee_id, employee_code, full_name, service_po_name, hours }
  */
 async function getEmployeeBenchDetailReport(filters) {
@@ -2545,14 +2722,14 @@ async function getEmployeeBenchDetailReport(filters) {
  * (both source tables are Service-PO-level, never per-employee) and is
  * intentionally not a supported filter.
  *
- * @param {object} filters - { companyId, startDate, endDate, clientId, poId, serviceTypeId }
+ * @param {object} filters - { companyIds, startDate, endDate, clientId, poId, serviceTypeId }
  * @returns {Promise<object[]>} rows: { service_po_id, service_po_code, service_po_name, client_id, client_name, year, month, budget_cost, billed_amount }
  */
 async function getBudgetVsBilled(filters) {
-  const { companyId, startDate, endDate, clientId, poId, serviceTypeId } = filters;
-  const replacements = { companyId, startPeriodKey: periodKey(startDate), endPeriodKey: periodKey(endDate) };
+  const { companyIds, startDate, endDate, clientId, poId, serviceTypeId } = filters;
+  const replacements = { companyIds, startPeriodKey: periodKey(startDate), endPeriodKey: periodKey(endDate) };
   const conditions = [
-    'sp.company_id = :companyId',
+    '(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)',
     "(cbm.id IS NULL OR cbm.status = 'active')",
     '(COALESCE(cbm.year, spmb.year) * 12 + COALESCE(cbm.month, spmb.month)) BETWEEN :startPeriodKey AND :endPeriodKey',
   ];
@@ -2616,6 +2793,9 @@ module.exports = {
   getMonthlyHoursByCategory,
   getMonthlyCostByCategory,
   getMonthlyUtilizationTrend,
+  getResourceUtilizationTrend,
+  getServicePOHoursTrend,
+  getServicePOCostBudgetByMonth,
   getLeaveHoursTrendReport,
   getNoWorkTrendReport,
   getEmployeeBenchDetailReport,

@@ -115,6 +115,10 @@ const listClientsQuerySchema = Joi.object({
   industry: Joi.string().trim().max(100).optional().allow(''),
   sort_by: Joi.string().valid('client_name', 'client_code', 'industry', 'created_at').default('client_name'),
   sort_order: Joi.string().valid('ASC', 'DESC', 'asc', 'desc').default('ASC'),
+  // Optional BU filter — Admin/Entity Admin: narrows to that BU only (BU-less
+  // records are excluded). BU-scoped actors: validated against their own BUs
+  // by resolveReportCompanyScope before this ever reaches the service.
+  company_id: Joi.number().integer().positive().optional(),
 });
 
 module.exports = {

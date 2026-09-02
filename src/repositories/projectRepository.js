@@ -259,11 +259,16 @@ const getActiveProjects = async (companyId, createdBy = null) => {
  * @returns {Promise<number>}
  */
 const countServicePOsByProject = async (projectId, companyId) => {
+  // OR in company_id: null alongside companyScope() — this counts ServicePO
+  // rows (their own company_id, independently nullable for a Centralised
+  // PO), not Project rows, so companyScope()'s createdBy-aware NULL handling
+  // doesn't apply here; a Centralised PO linked to this project must still
+  // count regardless of which BU/scope is asking.
   return ServicePO.count({
     where: {
       project_id: projectId,
       is_deleted: false,
-      ...companyScope(companyId),
+      [Op.or]: [companyScope(companyId), { company_id: null }],
     },
   });
 };
@@ -285,7 +290,7 @@ const countServicePOsByProjectIds = async (projectIds, companyId) => {
     where: {
       project_id: { [Op.in]: projectIds },
       is_deleted: false,
-      ...companyScope(companyId),
+      [Op.or]: [companyScope(companyId), { company_id: null }],
     },
     group: ['project_id'],
     raw: true,

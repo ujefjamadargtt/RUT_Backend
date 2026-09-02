@@ -269,7 +269,7 @@ const getReport = async (userId, ownEmployeeId, companyId, query) => {
   const employeeIds = await resolveEmployeeScope(userId, ownEmployeeId, requestedEmployeeId, companyId);
 
   const rows = await employeeWorkLogRepository.findForApprovalSummaryByEmployees({
-    employeeIds, companyId, startDate, endDate,
+    employeeIds, startDate, endDate,
   });
 
   if (rows.length === 0) {

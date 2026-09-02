@@ -14,6 +14,13 @@ const mapEmployeeSchema = Joi.object({
   }),
 });
 
+// `business_unit_id` narrows the My Team list to Employees that have an
+// active membership in that BU. Omitting it intentionally means every BU
+// the Manager can access (the same as selecting "All Business Units").
+const listMyEmployeesQuerySchema = Joi.object({
+  business_unit_id: Joi.number().integer().positive().optional(),
+});
+
 /**
  * GET /my-team/timesheets — query params schema. Mirrors the generic
  * GET /timesheets's listTimesheetsQuerySchema (timesheetValidation.js) —
@@ -94,6 +101,7 @@ const rejectWorkLogSchema = Joi.object({
 module.exports = {
   assignServicePOSchema,
   mapEmployeeSchema,
+  listMyEmployeesQuerySchema,
   listMyTeamTimesheetsQuerySchema,
   approvalSummaryQuerySchema,
   bulkApproveTimesheetsSchema,

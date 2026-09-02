@@ -13,29 +13,21 @@ const logger = require('../utils/logger');
  * Repositories are the only layer that touches the database.
  *
  * A BU-scoped actor (BU Admin, Manager, HR, Employee, ...) always has a
- * `req.companyId` and every read/write here stays scoped to it exactly as
- * before. Platform Admin/Admin/Entity Admin have no single company by
- * design (`req.companyId` is `undefined` — see resolveCompany.js) — they
- * are scoped instead to the Companies under their OWN owned Entities via
- * companyAccessControlService.resolveOwnedCompanyIds(), the SAME resolution
- * Employee Master uses (see employeeAccessControlService.js) — an
- * unrelated second Admin/Entity Admin must never see this Admin's Clients,
- * any more than they see this Admin's Employees.
+ * `req.companyId` set by resolveCompany.js and every read/write here stays
+ * scoped to it exactly as before.
  *
- * A Business Unit is OPTIONAL at create time for a company-less actor
- * (Admin/Entity Admin), same treatment employeeService.create() already
- * gives business_unit_ids — `clients.company_id` stays NULL until mapped
- * later via update(). A BU-scoped actor's own `req.companyId` still always
- * wins (see resolveOptionalCreateCompanyId()'s doc comment).
+ * Platform Admin/Admin/Entity Admin have no single company by design
+ * (`req.companyId` is `undefined` — see resolveCompany.js). On CREATE,
+ * BU assignment is OPTIONAL — if the body carries a `company_id` it is
+ * validated to be one of the actor's own owned Companies; if omitted the
+ * client is created with company_id = NULL (BU-less). The X-Company-Id
+ * header is deliberately NOT used as a fallback on create (it reflects
+ * the Global BU selector state, not an explicit assignment intent).
  *
- * Because of that, every READ/WRITE below uses resolveActorRecordAccessScope()
- * — not the plain resolveActorCompanyScope() — so a company-less actor's
- * scope also covers their OWN Clients left with no Business Unit
- * (`company_id IS NULL AND created_by = them`), not just their owned
- * Companies' Clients. Without this, an Admin who creates a Client without
- * picking a company could never see, edit, or deactivate it again — SQL
- * `IN (...)` never matches NULL, so it would silently vanish from their
- * own Client Master view the moment it was created.
+ * Every READ uses resolveActorRecordAccessScope() — not plain
+ * resolveActorCompanyScope() — so a company-less actor's scope also covers
+ * their OWN Clients left with no Business Unit (`company_id IS NULL AND
+ * created_by = them`).
  */
 
 const { resolveActorRecordAccessScope, resolveOptionalCreateCompanyId } = companyAccessControlService;
@@ -95,6 +87,19 @@ const getById = async (id, authContext) => {
  * Auto-generates a client_code using the CLT prefix if one is not supplied.
  * Checks uniqueness of client_name before inserting.
  *
+ * Business Unit resolution:
+ *   - BU-scoped actor (BU Admin and below, req.companyId set):
+ *     If the body carries a `company_id` that belongs to this actor's mapped
+ *     BUs, that BU is used — a multi-BU BU Admin picking a specific BU from
+ *     the form gets the client created there, not in the header's active BU.
+ *     If the body `company_id` is absent or matches the active BU, req.companyId
+ *     wins. A body BU the actor is not mapped to → 403.
+ *   - Company-less actor (Admin/Entity Admin, req.companyId undefined):
+ *     BU assignment is OPTIONAL. If the body carries a `company_id` it is
+ *     validated to be one of the actor's own owned Companies; if omitted
+ *     the client is created with company_id = NULL (BU-less). The
+ *     X-Company-Id header is deliberately NOT used as a fallback here.
+ *
  * @param {object} data        - Validated body (client_name, industry, status, [client_code], [company_id])
  * @param {number} userId      - ID of the authenticated user creating the record
  * @param {object} req         - Express request (for IP extraction in audit log; also carries companyId/hierarchyRank/employeeId)
@@ -102,10 +107,37 @@ const getById = async (id, authContext) => {
  */
 const create = async (data, userId, req) => {
   const { company_id: bodyCompanyId, ...clientFields } = data;
-  const companyId = await resolveOptionalCreateCompanyId(
-    { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId },
-    bodyCompanyId
-  );
+
+  let companyId;
+
+  if (req.companyId != null) {
+    // BU-scoped actor (BU Admin and below) — req.companyId is set by
+    // resolveCompany.js from the X-Company-Id header (the "active" BU).
+    // If the body carries an explicit company_id that belongs to this actor's
+    // mapped BUs, honour it — a multi-BU BU Admin selecting a specific BU
+    // from a dropdown should create the client there, not in whichever BU
+    // happens to be in the header.
+    if (bodyCompanyId != null && bodyCompanyId !== req.companyId) {
+      const mappedBuIds = (req.employeeBusinessUnits || []).map((bu) => bu.id);
+      if (mappedBuIds.includes(bodyCompanyId)) {
+        companyId = bodyCompanyId;
+      } else {
+        const err = new Error(`Business Unit #${bodyCompanyId} is not one of your mapped Business Units.`);
+        err.statusCode = 403;
+        throw err;
+      }
+    } else {
+      companyId = req.companyId;
+    }
+  } else {
+    // Company-less actor (Admin/Entity Admin) — BU assignment is optional.
+    // Use explicit body company_id if given (validated against owned companies),
+    // otherwise create BU-less (company_id = NULL).
+    companyId = await resolveOptionalCreateCompanyId(
+      { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId },
+      bodyCompanyId != null ? bodyCompanyId : null
+    );
+  }
 
   // Reject a duplicate client_name up front (case-insensitive, scoped to
   // this company) — client_code uniqueness alone doesn't stop the same

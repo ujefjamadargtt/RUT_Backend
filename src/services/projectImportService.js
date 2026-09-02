@@ -5,7 +5,7 @@ const { Op } = require('sequelize');
 const { Project, Client } = require('../models');
 const { generateProjectCode } = require('../helpers/codeGenerator');
 const {
-  resolveOptionalCreateCompanyId,
+  resolveCreateCompanyIdForActor,
   resolveOwnedCompanyIds,
 } = require('./companyAccessControlService');
 const logger = require('../utils/logger');
@@ -131,9 +131,9 @@ function validateRow(data) {
  * @returns {Promise<{ total, imported, skipped, error_rows }>}
  */
 async function importProjects(filePath, userId, req) {
+  const bodyCompanyId = req.body && req.body.company_id ? parseInt(req.body.company_id, 10) : null;
+  const companyId = await resolveCreateCompanyIdForActor(req, bodyCompanyId, { required: false });
   const authContext = { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId };
-  const bodyCompanyId = req.body && req.body.company_id ? parseInt(req.body.company_id, 10) : undefined;
-  const companyId = await resolveOptionalCreateCompanyId(authContext, bodyCompanyId);
 
   // Only needed for a company-less actor deferring BU assignment (companyId
   // null) — each row's Client may belong to any of this actor's own owned

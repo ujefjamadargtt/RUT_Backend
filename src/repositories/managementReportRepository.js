@@ -9,12 +9,15 @@ const { QueryTypes } = require('sequelize');
 // lives exclusively in `employee_business_units`. Matching on `e.company_id`
 // alone silently drops such employees from these reports. Same OR-with-
 // legacy-column pattern as employeeRepository.js's employeeScope().
+// IN(:companyIds)-aware — this constant's sole consumer,
+// getEmployeeCapacityForecast(), was converted to the "no X-Company-Id ->
+// role reach" array scope (see resolveReportCompanyScope.js).
 const EMPLOYEE_COMPANY_SCOPE_SQL = `(
-  e.company_id = :companyId
+  e.company_id IN (:companyIds)
   OR EXISTS (
     SELECT 1 FROM employee_business_units ebu
     WHERE ebu.employee_id = e.id
-      AND ebu.business_unit_id = :companyId
+      AND ebu.business_unit_id IN (:companyIds)
       AND ebu.status = 'active'
   )
 )`;
@@ -46,8 +49,12 @@ const formatMonthYear = (month, year) => (
 // ---------------------------------------------------------------------------
 /**
  * One row per billable Service PO for the given month/year:
- * invoiced_amount (service_po_monthly_budgets, actual) minus delivery_cost
- * (hours logged this month x employee's monthly_costs.total_cost) = margin.
+ * invoiced_amount minus delivery_cost = margin. Both invoiced_amount and
+ * delivery_cost are read from service_po_monthly_budgets (invoice_amount /
+ * billed_amount respectively) for the report's month/year — delivery_cost
+ * is NOT computed from timesheets x monthly_costs (that data is too sparse
+ * per-employee to be a reliable cost basis; billed_amount is the
+ * finance-entered actual instead).
  *
  * @param {object} filters
  * @param {number} filters.month
@@ -63,14 +70,14 @@ const formatMonthYear = (month, year) => (
  * @param {string} [filters.sortOrder]
  * @param {number} filters.limit
  * @param {number} filters.offset
- * @param {number} filters.companyId
+ * @param {number[]} filters.companyIds
  * @returns {{ rows: object[], count: number }}
  */
 async function getServicePOProfitability(filters) {
   const {
     month, year, clientId, poId, status, isBillable,
     serviceCategoryId, serviceTypeId, search,
-    sortBy = 'margin', sortOrder = 'DESC', limit, offset, hoursSource, roleId, companyId,
+    sortBy = 'margin', sortOrder = 'DESC', limit, offset, hoursSource, roleId, companyIds,
   } = filters;
 
   const hoursCol = (hoursSource === 'O') ? 't.hours_logged' : 'COALESCE(t.modified_hours, t.hours_logged)';
@@ -80,10 +87,9 @@ async function getServicePOProfitability(filters) {
 
   const monthNum = parseInt(month, 10);
   const yearNum = parseInt(year, 10);
-  const monthYear = formatMonthYear(month, year);
 
-  const replacements = { monthNum, yearNum, monthYear, limit, offset, companyId };
-  const conditions = ['sp.company_id = :companyId', 'sp.is_billable = true'];
+  const replacements = { monthNum, yearNum, limit, offset, companyIds };
+  const conditions = ['(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)', 'sp.is_billable = true'];
 
   if (clientId) { conditions.push('sp.client_id = :clientId'); replacements.clientId = clientId; }
   if (poId) { conditions.push('sp.id = :poId'); replacements.poId = poId; }
@@ -113,11 +119,11 @@ async function getServicePOProfitability(filters) {
       sc.name                                         AS service_category_name,
       COALESCE(cur.hours_delivered, 0)                AS hours_delivered,
       ROUND(COALESCE(spmb.invoice_amount, 0)::numeric, 2)  AS invoiced_amount,
-      ROUND(COALESCE(cur.delivery_cost, 0)::numeric, 2)    AS delivery_cost,
-      ROUND((COALESCE(spmb.invoice_amount, 0) - COALESCE(cur.delivery_cost, 0))::numeric, 2) AS margin,
+      ROUND(COALESCE(spmb.billed_amount, 0)::numeric, 2)   AS delivery_cost,
+      ROUND((COALESCE(spmb.invoice_amount, 0) - COALESCE(spmb.billed_amount, 0))::numeric, 2) AS margin,
       CASE
         WHEN COALESCE(spmb.invoice_amount, 0) > 0
-          THEN ROUND(((COALESCE(spmb.invoice_amount, 0) - COALESCE(cur.delivery_cost, 0)) / spmb.invoice_amount * 100)::numeric, 2)
+          THEN ROUND(((COALESCE(spmb.invoice_amount, 0) - COALESCE(spmb.billed_amount, 0)) / spmb.invoice_amount * 100)::numeric, 2)
         ELSE NULL
       END                                              AS margin_pct
     FROM service_pos sp
@@ -129,14 +135,10 @@ async function getServicePOProfitability(filters) {
     LEFT JOIN (
       SELECT
         t.service_po_id,
-        SUM(${hoursCol})                                AS hours_delivered,
-        SUM(${hoursCol} * COALESCE(mc.total_cost, 0))    AS delivery_cost
+        SUM(${hoursCol})                                AS hours_delivered
       FROM timesheets t
-      LEFT JOIN monthly_costs mc
-             ON mc.employee_id = t.employee_id AND mc.month_year = :monthYear
       WHERE EXTRACT(MONTH FROM t.timesheet_date) = :monthNum
         AND EXTRACT(YEAR  FROM t.timesheet_date) = :yearNum
-        AND t.company_id = :companyId
         ${publishGuard}
       GROUP BY t.service_po_id
     ) cur ON cur.service_po_id = sp.id
@@ -177,7 +179,7 @@ async function getServicePOProfitability(filters) {
 async function getBudgetedMarginForecast(filters) {
   const {
     month, year, clientId, poId, status, search,
-    sortBy = 'forecasted_margin', sortOrder = 'DESC', limit, offset, companyId,
+    sortBy = 'forecasted_margin', sortOrder = 'DESC', limit, offset, companyIds,
   } = filters;
 
   const allowedSort = ['c.client_name', 'sp.service_po_name', 'budgeted_revenue', 'budgeted_cost', 'forecasted_margin', 'forecasted_margin_pct', 'budgeted_hours'];
@@ -188,8 +190,8 @@ async function getBudgetedMarginForecast(filters) {
   const yearNum = parseInt(year, 10);
   const monthYear = formatMonthYear(month, year);
 
-  const replacements = { monthNum, yearNum, monthYear, limit, offset, companyId };
-  const conditions = ["cbm.company_id = :companyId", "cbm.status = 'active'", 'cbm.month = :monthNum', 'cbm.year = :yearNum'];
+  const replacements = { monthNum, yearNum, monthYear, limit, offset, companyIds };
+  const conditions = ["(cbm.company_id IN (:companyIds) OR cbm.company_id IS NULL)", "cbm.status = 'active'", 'cbm.month = :monthNum', 'cbm.year = :yearNum'];
 
   if (clientId) { conditions.push('sp.client_id = :clientId'); replacements.clientId = clientId; }
   if (poId) { conditions.push('sp.id = :poId'); replacements.poId = poId; }
@@ -231,7 +233,6 @@ async function getBudgetedMarginForecast(filters) {
       LEFT JOIN monthly_costs mc
              ON mc.employee_id = rbm.emp_id AND mc.month_year = :monthYear
       WHERE rbm.status = 'active' AND rbm.month = :monthNum AND rbm.year = :yearNum
-        AND rbm.company_id = :companyId
       GROUP BY rbm.service_po_id
     ) rb ON rb.service_po_id = sp.id
     ${whereClause}
@@ -270,7 +271,7 @@ async function getBudgetedMarginForecast(filters) {
 async function getResourceStaffingPlanAccuracy(filters) {
   const {
     month, year, employeeId, poId, search, varianceThresholdPct,
-    sortBy = 'variance', sortOrder = 'DESC', limit, offset, hoursSource, roleId, companyId,
+    sortBy = 'variance', sortOrder = 'DESC', limit, offset, hoursSource, roleId, companyIds,
   } = filters;
 
   const hoursCol = (hoursSource === 'O') ? 't.hours_logged' : 'COALESCE(t.modified_hours, t.hours_logged)';
@@ -292,7 +293,7 @@ async function getResourceStaffingPlanAccuracy(filters) {
   const varianceThresholdPctValue = varianceThresholdPct !== undefined && varianceThresholdPct !== null
     ? parseFloat(varianceThresholdPct)
     : null;
-  const replacements = { monthNum, yearNum, limit, offset, companyId, varianceThresholdPct: varianceThresholdPctValue };
+  const replacements = { monthNum, yearNum, limit, offset, companyIds, varianceThresholdPct: varianceThresholdPctValue };
 
   const publishGuard = Number(roleId) === 5
     ? `AND EXISTS (SELECT 1 FROM timesheet_import_history h WHERE h.id = t.timesheet_import_id AND h.is_publish = true)`
@@ -308,11 +309,25 @@ async function getResourceStaffingPlanAccuracy(filters) {
     : '';
   if (search) replacements.search = `%${search}%`;
 
+  // planned (resource_budget_master.company_id) and actual (timesheets.company_id)
+  // are stamped with two DIFFERENT semantics — the PO's own owning company vs.
+  // the acting/logging session's company (cross-BU staffing is allowed; see
+  // resourceBudgetService.js/timesheetService.js's doc comments) — and were
+  // previously each filtered independently by :companyId with no join
+  // condition tying them to the same Service PO's ownership. Anchoring both
+  // CTEs on a single in_scope_pos set (this BU's own POs, plus Centralised
+  // BU-less POs) instead fixes both the Centralised-PO omission and the
+  // cross-BU-mapped-employee actual-hours undercount, and guarantees planned
+  // vs actual are compared for the SAME set of POs.
   const cteBlock = `
-    WITH planned AS (
+    WITH in_scope_pos AS (
+      SELECT id FROM service_pos WHERE (company_id IN (:companyIds) OR company_id IS NULL)
+    ),
+    planned AS (
       SELECT emp_id, service_po_id AS po_id, SUM(hours) AS planned_hours
       FROM resource_budget_master
-      WHERE status = 'active' AND month = :monthNum AND year = :yearNum AND company_id = :companyId
+      WHERE status = 'active' AND month = :monthNum AND year = :yearNum
+        AND service_po_id IN (SELECT id FROM in_scope_pos)
       GROUP BY emp_id, service_po_id
     ),
     actual AS (
@@ -320,7 +335,7 @@ async function getResourceStaffingPlanAccuracy(filters) {
       FROM timesheets t
       WHERE EXTRACT(MONTH FROM t.timesheet_date) = :monthNum
         AND EXTRACT(YEAR  FROM t.timesheet_date) = :yearNum
-        AND t.company_id = :companyId
+        AND t.service_po_id IN (SELECT id FROM in_scope_pos)
         ${publishGuard}
       GROUP BY t.employee_id, t.service_po_id
     ),
@@ -409,6 +424,9 @@ async function getResourceStaffingPlanAccuracy(filters) {
 /**
  * Per-client rollup of Priority-1's margin calc, plus each client's share
  * of total company revenue for the same period (concentration risk).
+ * total_delivery_cost is service_po_monthly_budgets.billed_amount summed
+ * across the client's POs for the period — not a timesheet/monthly_costs
+ * calculation, same basis as getServicePOProfitability.
  *
  * @param {object} filters
  * @returns {{ rows: object[], count: number }}
@@ -416,22 +434,16 @@ async function getResourceStaffingPlanAccuracy(filters) {
 async function getClientProfitabilityConcentration(filters) {
   const {
     month, year, search, sortBy = 'total_margin', sortOrder = 'DESC',
-    limit, offset, hoursSource, roleId, companyId,
+    limit, offset, companyIds,
   } = filters;
 
-  const hoursCol = (hoursSource === 'O') ? 't.hours_logged' : 'COALESCE(t.modified_hours, t.hours_logged)';
   const allowedSort = ['client_name', 'total_invoiced', 'total_delivery_cost', 'total_margin', 'margin_pct', 'revenue_concentration_pct'];
   const safeSort = allowedSort.includes(sortBy) ? sortBy : 'total_margin';
   const safeOrder = sortOrder && sortOrder.toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
   const monthNum = parseInt(month, 10);
   const yearNum = parseInt(year, 10);
-  const monthYear = formatMonthYear(month, year);
-  const replacements = { monthNum, yearNum, monthYear, limit, offset, companyId };
-
-  const publishGuard = Number(roleId) === 5
-    ? `AND EXISTS (SELECT 1 FROM timesheet_import_history h WHERE h.id = t.timesheet_import_id AND h.is_publish = true)`
-    : '';
+  const replacements = { monthNum, yearNum, limit, offset, companyIds };
 
   const searchFilter = search ? 'AND c.client_name ILIKE :search' : '';
   if (search) replacements.search = `%${search}%`;
@@ -442,24 +454,14 @@ async function getClientProfitabilityConcentration(filters) {
         c.id   AS client_id,
         c.client_name,
         COALESCE(SUM(spmb.invoice_amount), 0)                     AS total_invoiced,
-        COALESCE(SUM(cur.delivery_cost), 0)                       AS total_delivery_cost
+        COALESCE(SUM(spmb.billed_amount), 0)                      AS total_delivery_cost
       FROM clients c
       INNER JOIN service_pos sp ON sp.client_id = c.id AND sp.is_billable = true
       LEFT JOIN service_po_monthly_budgets spmb
              ON spmb.service_po_id = sp.id AND spmb.month = :monthNum AND spmb.year = :yearNum
-      LEFT JOIN (
-        SELECT t.service_po_id, SUM(${hoursCol} * COALESCE(mc.total_cost, 0)) AS delivery_cost
-        FROM timesheets t
-        LEFT JOIN monthly_costs mc ON mc.employee_id = t.employee_id AND mc.month_year = :monthYear
-        WHERE EXTRACT(MONTH FROM t.timesheet_date) = :monthNum
-          AND EXTRACT(YEAR  FROM t.timesheet_date) = :yearNum
-          AND t.company_id = :companyId
-          ${publishGuard}
-        GROUP BY t.service_po_id
-      ) cur ON cur.service_po_id = sp.id
-      WHERE c.company_id = :companyId
+      WHERE c.company_id IN (:companyIds)
       GROUP BY c.id, c.client_name
-      HAVING COALESCE(SUM(spmb.invoice_amount), 0) > 0 OR COALESCE(SUM(cur.delivery_cost), 0) > 0
+      HAVING COALESCE(SUM(spmb.invoice_amount), 0) > 0 OR COALESCE(SUM(spmb.billed_amount), 0) > 0
     ),
     company_total AS (
       SELECT SUM(total_invoiced) AS grand_total FROM per_client
@@ -530,8 +532,7 @@ async function getBUPerformanceScorecard(filters) {
 
   const monthNum = parseInt(month, 10);
   const yearNum = parseInt(year, 10);
-  const monthYear = formatMonthYear(month, year);
-  const replacements = { monthNum, yearNum, monthYear, limit, offset, companyIds };
+  const replacements = { monthNum, yearNum, limit, offset, companyIds };
 
   const publishGuard = Number(roleId) === 5
     ? `AND EXISTS (SELECT 1 FROM timesheet_import_history h WHERE h.id = t.timesheet_import_id AND h.is_publish = true)`
@@ -558,19 +559,21 @@ async function getBUPerformanceScorecard(filters) {
           INNER JOIN service_pos sp ON sp.id = spmb.service_po_id
           WHERE sp.company_id = co.id AND spmb.month = :monthNum AND spmb.year = :yearNum
         ), 0) AS total_invoiced,
+        -- Anchored on sp.company_id (the PO's own owner), matching
+        -- total_invoiced above — same basis as getServicePOProfitability:
+        -- service_po_monthly_budgets.billed_amount, not a timesheet/
+        -- monthly_costs calculation.
         COALESCE((
-          SELECT SUM(${hoursCol} * COALESCE(mc.total_cost, 0))
-          FROM timesheets t
-          LEFT JOIN monthly_costs mc ON mc.employee_id = t.employee_id AND mc.month_year = :monthYear
-          WHERE t.company_id = co.id
-            AND EXTRACT(MONTH FROM t.timesheet_date) = :monthNum
-            AND EXTRACT(YEAR  FROM t.timesheet_date) = :yearNum
-            ${publishGuard}
+          SELECT SUM(spmb.billed_amount)
+          FROM service_po_monthly_budgets spmb
+          INNER JOIN service_pos sp ON sp.id = spmb.service_po_id
+          WHERE sp.company_id = co.id AND spmb.month = :monthNum AND spmb.year = :yearNum
         ), 0) AS total_delivery_cost,
         COALESCE((
           SELECT SUM(${hoursCol})
           FROM timesheets t
-          WHERE t.company_id = co.id
+          INNER JOIN service_pos sp ON sp.id = t.service_po_id
+          WHERE sp.company_id = co.id
             AND EXTRACT(MONTH FROM t.timesheet_date) = :monthNum
             AND EXTRACT(YEAR  FROM t.timesheet_date) = :yearNum
             ${publishGuard}
@@ -624,7 +627,7 @@ async function getBUPerformanceScorecard(filters) {
 async function getEmployeeCapacityForecast(filters) {
   const {
     month, year, employeeId, designation, search, benchThresholdHours,
-    sortBy = 'capacity_used_pct', sortOrder = 'DESC', limit, offset, companyId,
+    sortBy = 'capacity_used_pct', sortOrder = 'DESC', limit, offset, companyIds,
   } = filters;
 
   const MONTHLY_CAP = 176;
@@ -644,7 +647,7 @@ async function getEmployeeCapacityForecast(filters) {
   const monthNum = parseInt(month, 10);
   const yearNum = parseInt(year, 10);
   const replacements = {
-    monthNum, yearNum, limit, offset, companyId,
+    monthNum, yearNum, limit, offset, companyIds,
     monthlyCap: MONTHLY_CAP, benchThreshold, benchThresholdFilterRequested,
   };
 
@@ -684,13 +687,13 @@ async function getEmployeeCapacityForecast(filters) {
       LEFT JOIN (
         SELECT emp_id, SUM(hours) AS total_planned_hours
         FROM resource_budget_master
-        WHERE status = 'active' AND month = :monthNum AND year = :yearNum AND company_id = :companyId
+        WHERE status = 'active' AND month = :monthNum AND year = :yearNum AND company_id IN (:companyIds)
         GROUP BY emp_id
       ) rb ON rb.emp_id = e.id
       LEFT JOIN (
         SELECT employee_id, COUNT(*) AS active_po_mappings_count
         FROM employee_servicepo_mapping
-        WHERE status = 'active' AND company_id = :companyId
+        WHERE status = 'active' AND company_id IN (:companyIds)
         GROUP BY employee_id
       ) map ON map.employee_id = e.id
       ${whereClause}
@@ -708,13 +711,13 @@ async function getEmployeeCapacityForecast(filters) {
       LEFT JOIN (
         SELECT emp_id, SUM(hours) AS total_planned_hours
         FROM resource_budget_master
-        WHERE status = 'active' AND month = :monthNum AND year = :yearNum AND company_id = :companyId
+        WHERE status = 'active' AND month = :monthNum AND year = :yearNum AND company_id IN (:companyIds)
         GROUP BY emp_id
       ) rb ON rb.emp_id = e.id
       LEFT JOIN (
         SELECT employee_id, COUNT(*) AS active_po_mappings_count
         FROM employee_servicepo_mapping
-        WHERE status = 'active' AND company_id = :companyId
+        WHERE status = 'active' AND company_id IN (:companyIds)
         GROUP BY employee_id
       ) map ON map.employee_id = e.id
       ${whereClause}
@@ -744,7 +747,7 @@ async function getEmployeeCapacityForecast(filters) {
 async function getServicePOTimelineRiskRaw(filters) {
   const {
     status, clientId, poId, search,
-    sortBy = 'sp.end_date', sortOrder = 'ASC', limit, offset, hoursSource, roleId, companyId,
+    sortBy = 'sp.end_date', sortOrder = 'ASC', limit, offset, hoursSource, roleId, companyIds,
   } = filters;
 
   const hoursCol = (hoursSource === 'O') ? 't.hours_logged' : 'COALESCE(t.modified_hours, t.hours_logged)';
@@ -752,9 +755,9 @@ async function getServicePOTimelineRiskRaw(filters) {
   const safeSort = allowedSort.includes(sortBy) ? sortBy : 'sp.end_date';
   const safeOrder = sortOrder && sortOrder.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
 
-  const replacements = { limit, offset, companyId };
+  const replacements = { limit, offset, companyIds };
   const conditions = [
-    'sp.company_id = :companyId',
+    '(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)',
     'sp.start_date IS NOT NULL',
     'sp.end_date IS NOT NULL',
   ];
@@ -790,7 +793,7 @@ async function getServicePOTimelineRiskRaw(filters) {
     LEFT JOIN (
       SELECT t.service_po_id, SUM(${hoursCol}) AS hours_delivered_to_date
       FROM timesheets t
-      WHERE t.company_id = :companyId
+      WHERE 1=1
         ${publishGuard}
       GROUP BY t.service_po_id
     ) hrs ON hrs.service_po_id = sp.id
@@ -826,7 +829,7 @@ async function getServicePOTimelineRiskRaw(filters) {
 async function getDeliveryHeadPerformance(filters) {
   const {
     month, year, deliveryHeadEmployeeId, search,
-    sortBy = 'total_margin', sortOrder = 'DESC', limit, offset, hoursSource, roleId, companyId,
+    sortBy = 'total_margin', sortOrder = 'DESC', limit, offset, hoursSource, roleId, companyIds,
   } = filters;
 
   const hoursCol = (hoursSource === 'O') ? 't.hours_logged' : 'COALESCE(t.modified_hours, t.hours_logged)';
@@ -837,13 +840,13 @@ async function getDeliveryHeadPerformance(filters) {
   const monthNum = parseInt(month, 10);
   const yearNum = parseInt(year, 10);
   const monthYear = formatMonthYear(month, year);
-  const replacements = { monthNum, yearNum, monthYear, limit, offset, companyId };
+  const replacements = { monthNum, yearNum, monthYear, limit, offset, companyIds };
 
   const publishGuard = Number(roleId) === 5
     ? `AND EXISTS (SELECT 1 FROM timesheet_import_history h WHERE h.id = t.timesheet_import_id AND h.is_publish = true)`
     : '';
 
-  const conditions = ['sp.company_id = :companyId', 'sp.delivery_head_employee_id IS NOT NULL'];
+  const conditions = ['(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)', 'sp.delivery_head_employee_id IS NOT NULL'];
   if (deliveryHeadEmployeeId) {
     conditions.push('sp.delivery_head_employee_id = :deliveryHeadEmployeeId');
     replacements.deliveryHeadEmployeeId = deliveryHeadEmployeeId;
@@ -873,7 +876,6 @@ async function getDeliveryHeadPerformance(filters) {
         LEFT JOIN monthly_costs mc ON mc.employee_id = t.employee_id AND mc.month_year = :monthYear
         WHERE EXTRACT(MONTH FROM t.timesheet_date) = :monthNum
           AND EXTRACT(YEAR  FROM t.timesheet_date) = :yearNum
-          AND t.company_id = :companyId
           ${publishGuard}
         GROUP BY t.service_po_id
       ) cur ON cur.service_po_id = sp.id
@@ -881,11 +883,10 @@ async function getDeliveryHeadPerformance(filters) {
         SELECT service_po_id, SUM(${hoursCol}) AS hours_delivered_before
         FROM timesheets t
         WHERE timesheet_date < MAKE_DATE(:yearNum, :monthNum, 1)
-          AND t.company_id = :companyId
           ${publishGuard}
         GROUP BY service_po_id
       ) prev ON prev.service_po_id = sp.id
-      WHERE sp.company_id = :companyId AND sp.delivery_head_employee_id IS NOT NULL
+      WHERE (sp.company_id IN (:companyIds) OR sp.company_id IS NULL) AND sp.delivery_head_employee_id IS NOT NULL
     )
   `;
 
@@ -942,7 +943,7 @@ async function getDeliveryHeadPerformance(filters) {
 async function getInvoiceRealizationTrend(filters) {
   const {
     startYear, startMonth, endYear, endMonth, clientId, poId, search,
-    sortBy = 'total_unbilled', sortOrder = 'DESC', limit, offset, companyId,
+    sortBy = 'total_unbilled', sortOrder = 'DESC', limit, offset, companyIds,
   } = filters;
 
   const allowedSort = ['service_po_name', 'total_invoiced', 'total_billed', 'total_unbilled', 'months_outstanding'];
@@ -952,10 +953,10 @@ async function getInvoiceRealizationTrend(filters) {
   const replacements = {
     startPeriod: startYear * 100 + startMonth,
     endPeriod: endYear * 100 + endMonth,
-    limit, offset, companyId,
+    limit, offset, companyIds,
   };
 
-  const conditions = ['sp.company_id = :companyId', '(spmb.year * 100 + spmb.month) BETWEEN :startPeriod AND :endPeriod'];
+  const conditions = ['(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)', '(spmb.year * 100 + spmb.month) BETWEEN :startPeriod AND :endPeriod'];
   if (clientId) { conditions.push('sp.client_id = :clientId'); replacements.clientId = clientId; }
   if (poId) { conditions.push('sp.id = :poId'); replacements.poId = poId; }
   if (search) {
@@ -1025,7 +1026,7 @@ async function getInvoiceRealizationTrend(filters) {
 async function getServiceLineBusinessMix(filters) {
   const {
     month, year, compareMonth, compareYear,
-    serviceCategoryId, serviceTypeId, hoursSource, roleId, companyId,
+    serviceCategoryId, serviceTypeId, hoursSource, roleId, companyIds,
   } = filters;
 
   const hoursCol = (hoursSource === 'O') ? 't.hours_logged' : 'COALESCE(t.modified_hours, t.hours_logged)';
@@ -1033,8 +1034,15 @@ async function getServiceLineBusinessMix(filters) {
   const yearNum = parseInt(year, 10);
   const monthYear = formatMonthYear(month, year);
 
-  const replacements = { monthNum, yearNum, monthYear, companyId };
-  const conditions = ['t.company_id = :companyId', 'EXTRACT(MONTH FROM t.timesheet_date) = :monthNum', 'EXTRACT(YEAR FROM t.timesheet_date) = :yearNum'];
+  const replacements = { monthNum, yearNum, monthYear, companyIds };
+  // Anchored on sp.company_id (the PO's own owner), matching invoiceQuery
+  // below — NOT t.company_id (the acting/logging session's company). The two
+  // result sets are merged purely by service_type_id (see fetchPeriod()), so
+  // using a different anchor per side previously let a cross-BU-mapped
+  // employee's hours/cost land under one BU's row while the matching PO's
+  // invoice landed under a different BU's row for the same service type,
+  // producing a numerically wrong (not just missing) margin.
+  const conditions = ['(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)', 'EXTRACT(MONTH FROM t.timesheet_date) = :monthNum', 'EXTRACT(YEAR FROM t.timesheet_date) = :yearNum'];
 
   if (serviceCategoryId) { conditions.push('sc.id = :serviceCategoryId'); replacements.serviceCategoryId = serviceCategoryId; }
   if (serviceTypeId) { conditions.push('st.id = :serviceTypeId'); replacements.serviceTypeId = serviceTypeId; }
@@ -1077,7 +1085,7 @@ async function getServiceLineBusinessMix(filters) {
     INNER JOIN service_categories sc ON sc.id = st.service_category_id
     LEFT JOIN service_po_monthly_budgets spmb
            ON spmb.service_po_id = sp.id AND spmb.month = :monthNum AND spmb.year = :yearNum
-    WHERE sp.company_id = :companyId
+    WHERE (sp.company_id IN (:companyIds) OR sp.company_id IS NULL)
       ${serviceCategoryId ? 'AND sc.id = :serviceCategoryId' : ''}
       ${serviceTypeId ? 'AND st.id = :serviceTypeId' : ''}
     GROUP BY sc.id, st.id

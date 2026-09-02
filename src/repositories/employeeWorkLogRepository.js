@@ -9,33 +9,24 @@ const { EmployeeWorkLog, Employee, ServicePO, SubProject, Project, ServicePOHier
  * Raw database access for `employee_work_logs` — the Employee Self
  * Timesheet "draft" table. This is a COMPLETELY SEPARATE table from
  * `timesheets` (see timesheetRepository.js, which this file never touches
- * or delegates to). Every method is company_id-scoped.
+ * or delegates to).
+ *
+ * Write/mutation methods (create/update/delete/approve) stay company_id-
+ * scoped. The read-only self-service report/summary queries below
+ * (getHierarchyBreakdownForRange, getReportRows, getWorkLogTimeReportRows,
+ * findForApprovalSummaryByEmployees) are deliberately NOT — each is already
+ * scoped by a fixed employee_id (the caller's own) or a pre-authorized
+ * employeeIds set (a Manager's resolved team, see
+ * timesheetApprovalReportService.resolveEmployeeScope), never an arbitrary
+ * company-wide scan, so a Business Unit filter there could only ever drop an
+ * already-authorized employee's own entries logged against a cross-BU
+ * Service PO (cross-BU resourcing is intentionally allowed — see
+ * employeeServicePOMappingService.assign()). Confirmed live on GET
+ * /employee-reports/project-hours, where such a filter silently dropped a
+ * mapped Service PO from a different Business Unit than the employee's own.
  */
 
 const ALLOWED_SORT_COLUMNS = new Set(['work_date', 'hours', 'created_at']);
-
-/**
- * A company-less actor (Platform Admin/Admin/Entity Admin — hierarchyRank
- * 1-3, see resolveCompany.js) never gets a req.companyId resolved, unlike a
- * real BU-scoped Employee — yet since every login is now an Employee, such
- * an actor can still reach these read-only self-service report/summary
- * queries if their role grants the report capability. Every one of the
- * functions using this helper is already scoped by a fixed employee_id (the
- * caller's own) or a pre-authorized employeeIds set (a Manager's resolved
- * team) — never an arbitrary company-wide scan — so company_id here is a
- * "narrow to my current BU" refinement, not an authorization boundary.
- * Passing `company_id: undefined` straight into a Sequelize `where` throws
- * ("WHERE parameter \"company_id\" has invalid \"undefined\" value" —
- * reported live on GET /employee-reports/project-hours); this omits the key
- * entirely instead, so a company-less caller sees their own rows across
- * every company rather than crashing.
- * @param {number|number[]|null|undefined} companyId
- * @returns {object}
- */
-function companyIdScope(companyId) {
-  if (companyId == null) return {};
-  return Array.isArray(companyId) ? { company_id: { [Op.in]: companyId } } : { company_id: companyId };
-}
 
 function buildIncludes() {
   return [
@@ -97,12 +88,23 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
 
 /**
  * Fetch a single work log entry by primary key.
+ *
+ * Deliberately NOT company/BU-scoped. A row's own `company_id` reflects
+ * whichever Business Unit was active in the CREATOR's session when the
+ * entry was logged (e.g. an Employee working a cross-BU Service PO), not
+ * necessarily the caller's own currently-selected BU. Every caller already
+ * re-authorizes against the returned row's employee_id right after this
+ * call (managerSelfServiceService.approveTimesheet/rejectWorkLogEntry via
+ * assertOwnEmployee) or already reached this id through its own
+ * employee_id-scoped lookup (employeeTimesheetService.addTimeEntries via
+ * checkDuplicate) — company_id here was pure over-restriction, previously
+ * 404ing a Manager's own approve/reject action on a legitimately pending
+ * entry logged under a different BU than the Manager's current selection.
  * @param {number} id
- * @param {number} companyId
  * @returns {Promise<EmployeeWorkLog|null>}
  */
-const findById = async (id, companyId) => {
-  return EmployeeWorkLog.findOne({ where: { id, company_id: companyId }, include: buildIncludes() });
+const findById = async (id) => {
+  return EmployeeWorkLog.findOne({ where: { id }, include: buildIncludes() });
 };
 
 /**
@@ -243,6 +245,11 @@ const getDailyHours = async (date, employeeId, excludeId = null, companyId) => {
 
 /**
  * Calendar Summary — one row per date with entries, for one employee/month.
+ * Deliberately NOT company/BU-scoped (companyId accepted but unused) — same
+ * reasoning as getHierarchyBreakdownForRange() below: employeeId is always
+ * the caller's own req.employeeId, so a company filter here could only ever
+ * drop that employee's own entries logged under a different BU-selector
+ * session or against a cross-BU Service PO.
  * @param {object} params - { employeeId, month, year, companyId }
  * @returns {Promise<Array<{ date, totalHours, entryCount }>>}
  */
@@ -265,7 +272,6 @@ const getCalendarSummary = async ({ employeeId, month, year, companyId }) => {
         literal(`EXTRACT(YEAR  FROM work_date) = ${yearNum}`),
       ],
       employee_id: parseInt(employeeId, 10),
-      company_id: companyId,
     },
     group: ['work_date'],
     raw: true,
@@ -285,6 +291,8 @@ const getCalendarSummary = async ({ employeeId, month, year, companyId }) => {
  * This is the sole data source employeeTimesheetService.getDailyEntries uses
  * to build the same Service PO -> Parent -> Child hours tree the Monthly
  * Summary returns, scoped to a single date.
+ * Deliberately NOT company/BU-scoped (companyId accepted but unused) — same
+ * reasoning as getCalendarSummary() above.
  * @param {object} params - { employeeId, date, companyId }
  * @returns {Promise<Array<{ service_po_id, hierarchy_node_id, total_hours }>>}
  */
@@ -298,7 +306,6 @@ const getDailyHierarchyBreakdown = async ({ employeeId, date, companyId }) => {
     where: {
       work_date: date,
       employee_id: parseInt(employeeId, 10),
-      company_id: companyId,
     },
     group: ['service_po_id', 'hierarchy_node_id'],
     raw: true,
@@ -311,6 +318,8 @@ const getDailyHierarchyBreakdown = async ({ employeeId, date, companyId }) => {
  * hours logged directly against the Service PO itself (no Parent/Child tag).
  * This is the sole data source employeeTimesheetService.getMonthlySummary
  * uses to build the per-date Service PO -> Parent -> Child hours tree.
+ * Deliberately NOT company/BU-scoped (companyId accepted but unused) — same
+ * reasoning as getCalendarSummary() above.
  * @param {object} params - { employeeId, month, year, companyId }
  * @returns {Promise<Array<{ work_date, service_po_id, hierarchy_node_id, total_hours }>>}
  */
@@ -334,7 +343,6 @@ const getMonthlyHierarchyBreakdown = async ({ employeeId, month, year, companyId
         literal(`EXTRACT(YEAR  FROM work_date) = ${yearNum}`),
       ],
       employee_id: parseInt(employeeId, 10),
-      company_id: companyId,
     },
     group: ['work_date', 'service_po_id', 'hierarchy_node_id'],
     raw: true,
@@ -353,10 +361,16 @@ const getMonthlyHierarchyBreakdown = async ({ employeeId, month, year, companyId
  * status, matching every other Employee-facing aggregate in this file
  * (getDailyHierarchyBreakdown, getMonthlyHierarchyBreakdown): an employee
  * sees their own logged hours regardless of approval/sync state.
- * @param {object} params - { employeeId, startDate, endDate, companyId }
+ *
+ * Deliberately NOT company/BU-scoped — employee_id already fully secures
+ * this to the caller's own rows, and a Service PO logged against under a
+ * different Business Unit than the caller's current one (cross-BU
+ * resourcing) must still count. See employeeProjectHoursReportService.js's
+ * grand_total_hours, which previously under-counted for exactly this reason.
+ * @param {object} params - { employeeId, startDate, endDate }
  * @returns {Promise<Array<{ service_po_id, hierarchy_node_id, total_hours }>>}
  */
-const getHierarchyBreakdownForRange = async ({ employeeId, startDate, endDate, companyId }) => {
+const getHierarchyBreakdownForRange = async ({ employeeId, startDate, endDate }) => {
   return EmployeeWorkLog.findAll({
     attributes: [
       'service_po_id',
@@ -365,7 +379,6 @@ const getHierarchyBreakdownForRange = async ({ employeeId, startDate, endDate, c
     ],
     where: {
       employee_id: parseInt(employeeId, 10),
-      ...companyIdScope(companyId),
       work_date: { [Op.gte]: startDate, [Op.lte]: endDate },
     },
     group: ['service_po_id', 'hierarchy_node_id'],
@@ -494,11 +507,16 @@ const revertSyncStatusByImportIds = async (importIds, transaction = null) => {
  * Report rows for the Employee Reports module (Phase 4) — reads ONLY from
  * employee_work_logs, never from `timesheets` (Admin Reports keep reading
  * timesheets via reportRepository.js; the two data sources are never mixed).
- * @param {object} params - { employeeId, companyId, startDate, endDate }
+ *
+ * Deliberately NOT company/BU-scoped — employee_id already fully secures
+ * this to the caller's own rows; a Business Unit filter here would drop the
+ * caller's own entries logged against a cross-BU Service PO (same class of
+ * bug fixed on employeeProjectHoursReportService.js's mapped-PO lookup).
+ * @param {object} params - { employeeId, startDate, endDate }
  * @returns {Promise<Array>}
  */
-const getReportRows = async ({ employeeId, companyId, startDate, endDate }) => {
-  const where = { employee_id: employeeId, ...companyIdScope(companyId) };
+const getReportRows = async ({ employeeId, startDate, endDate }) => {
+  const where = { employee_id: employeeId };
   if (startDate) where.work_date = { ...where.work_date, [Op.gte]: startDate };
   if (endDate) where.work_date = { ...where.work_date, [Op.lte]: endDate };
 
@@ -523,11 +541,18 @@ const getReportRows = async ({ employeeId, companyId, startDate, endDate }) => {
  * work_date DESC, then start_time ASC (nulls last) for deterministic
  * same-day ordering.
  *
- * @param {object} filters - { employeeIds: number[], companyId, startDate, endDate, servicePOId?, projectId? }
+ * Deliberately NOT company/BU-scoped — employeeIds is always a data-driven,
+ * pre-authorized set (the caller's own id, plus their managed team when
+ * they're a Manager — see timesheetApprovalReportService.resolveEmployeeScope),
+ * never an arbitrary company-wide scan, so a Business Unit filter here could
+ * only ever drop entries that genuinely belong to an already-authorized
+ * employee (e.g. logged against a cross-BU Service PO).
+ *
+ * @param {object} filters - { employeeIds: number[], startDate, endDate, servicePOId?, projectId? }
  * @returns {Promise<EmployeeWorkLog[]>}
  */
-const getWorkLogTimeReportRows = async ({ employeeIds, companyId, startDate, endDate, servicePOId, projectId }) => {
-  const where = { ...companyIdScope(companyId), employee_id: { [Op.in]: employeeIds } };
+const getWorkLogTimeReportRows = async ({ employeeIds, startDate, endDate, servicePOId, projectId }) => {
+  const where = { employee_id: { [Op.in]: employeeIds } };
   if (startDate) where.work_date = { ...where.work_date, [Op.gte]: startDate };
   if (endDate) where.work_date = { ...where.work_date, [Op.lte]: endDate };
   if (servicePOId) where.service_po_id = servicePOId;
@@ -584,11 +609,17 @@ const getWorkLogTimeReportRows = async ({ employeeIds, companyId, startDate, end
  * approved day still displays its full detail), and bucket-level
  * approval_status is derived by the caller from whether ANY row in that
  * bucket is still 'pending'.
- * @param {object} params - { employeeId, companyId, startDate, endDate }
+ * Deliberately NOT company/BU-scoped — same reasoning as
+ * findForApprovalSummaryByEmployees() below: employeeId is always the
+ * caller's own pre-authorized target (self, or a Manager's own mapped team
+ * member via assertOwnEmployee()), so a company filter here could only ever
+ * drop that employee's own entries logged against a cross-BU Service PO or
+ * under a different BU-selector session than the one currently active.
+ * @param {object} params - { employeeId, startDate, endDate }
  * @returns {Promise<EmployeeWorkLog[]>}
  */
-const findForApprovalSummary = async ({ employeeId, companyId, startDate, endDate }) => {
-  const where = { employee_id: employeeId, company_id: companyId };
+const findForApprovalSummary = async ({ employeeId, startDate, endDate }) => {
+  const where = { employee_id: employeeId };
   if (startDate) where.work_date = { ...where.work_date, [Op.gte]: startDate };
   if (endDate) where.work_date = { ...where.work_date, [Op.lte]: endDate };
 
@@ -605,13 +636,19 @@ const findForApprovalSummary = async ({ employeeId, companyId, startDate, endDat
  * (timesheetApprovalReportService.js), which can show a Manager's whole
  * mapped team in one call rather than one employee at a time. Not filtered
  * by status, for the same reason findForApprovalSummary() isn't.
- * @param {object} params - { employeeIds, companyId, startDate, endDate }
+ *
+ * Deliberately NOT company/BU-scoped — employeeIds is always the data-driven,
+ * pre-authorized scope resolveEmployeeScope() computed (never an arbitrary
+ * company-wide scan), so a Business Unit filter here could only ever drop an
+ * already-authorized employee's own entries logged against a cross-BU
+ * Service PO.
+ * @param {object} params - { employeeIds, startDate, endDate }
  * @returns {Promise<EmployeeWorkLog[]>}
  */
-const findForApprovalSummaryByEmployees = async ({ employeeIds, companyId, startDate, endDate }) => {
+const findForApprovalSummaryByEmployees = async ({ employeeIds, startDate, endDate }) => {
   if (!employeeIds || employeeIds.length === 0) return [];
 
-  const where = { employee_id: { [Op.in]: employeeIds }, ...companyIdScope(companyId) };
+  const where = { employee_id: { [Op.in]: employeeIds } };
   if (startDate) where.work_date = { ...where.work_date, [Op.gte]: startDate };
   if (endDate) where.work_date = { ...where.work_date, [Op.lte]: endDate };
 
@@ -627,17 +664,26 @@ const findForApprovalSummaryByEmployees = async ({ employeeIds, companyId, start
  * for one employee on one of the given dates to 'approved'. A date with
  * nothing pending is a harmless no-op (0 rows), not an error — mirrors the
  * bulk-approve convention already used elsewhere in this codebase.
+ *
+ * Deliberately NOT company/BU-scoped — the caller
+ * (managerSelfServiceService.bulkApproveTimesheets) already verified this
+ * Manager owns `employeeId` via assertOwnEmployee before calling this, so
+ * employee_id + status='pending' is the real, sufficient authorization
+ * boundary. A company_id filter here previously matched against the
+ * Manager's currently-selected Business Unit rather than the work log
+ * row's own (creation-time) company_id, silently approving 0 rows — not
+ * erroring — whenever they differed, even though the entries were
+ * genuinely this employee's own pending work.
  * @param {number} employeeId
  * @param {string[]} dates - "YYYY-MM-DD"
- * @param {number} companyId
  * @param {object} [transaction]
  * @returns {Promise<number>} rows updated
  */
-const approveByEmployeeAndDates = async (employeeId, dates, companyId, transaction = null) => {
+const approveByEmployeeAndDates = async (employeeId, dates, transaction = null) => {
   const [count] = await EmployeeWorkLog.update(
     { status: 'approved' },
     {
-      where: { employee_id: employeeId, company_id: companyId, work_date: { [Op.in]: dates }, status: 'pending' },
+      where: { employee_id: employeeId, work_date: { [Op.in]: dates }, status: 'pending' },
       ...(transaction ? { transaction } : {}),
     }
   );
@@ -647,13 +693,15 @@ const approveByEmployeeAndDates = async (employeeId, dates, companyId, transacti
 /**
  * Manager bulk-approve, monthly grain — flips every currently-'pending' row
  * for one employee within the given month/year pairs to 'approved'.
+ *
+ * Deliberately NOT company/BU-scoped — same reasoning as
+ * approveByEmployeeAndDates() above.
  * @param {number} employeeId
  * @param {Array<{ month: number, year: number }>} months
- * @param {number} companyId
  * @param {object} [transaction]
  * @returns {Promise<number>} rows updated
  */
-const approveByEmployeeAndMonths = async (employeeId, months, companyId, transaction = null) => {
+const approveByEmployeeAndMonths = async (employeeId, months, transaction = null) => {
   const monthYearConditions = months.map(({ month, year }) => {
     const monthNum = parseInt(month, 10);
     const yearNum = parseInt(year, 10);
@@ -666,7 +714,7 @@ const approveByEmployeeAndMonths = async (employeeId, months, companyId, transac
   const [count] = await EmployeeWorkLog.update(
     { status: 'approved' },
     {
-      where: { employee_id: employeeId, company_id: companyId, status: 'pending', [Op.or]: monthYearConditions },
+      where: { employee_id: employeeId, status: 'pending', [Op.or]: monthYearConditions },
       ...(transaction ? { transaction } : {}),
     }
   );
@@ -706,17 +754,22 @@ const markApprovedByIds = async (ids, companyId, transaction = null) => {
  * shows up as a no-op (0 rows) rather than silently overwriting it. The
  * caller (managerSelfServiceService.approveTimesheet) treats null as "not
  * pending anymore" and 409s.
+ *
+ * Deliberately NOT company/BU-scoped — the caller already re-authorizes via
+ * assertOwnEmployee(managerUserId, entry.employee_id, companyId) using the
+ * row's employee_id (fetched via findById(), also company-agnostic — see
+ * its own doc comment) before this runs, so id + status='pending' is the
+ * real, sufficient boundary.
  * @param {number} id
- * @param {number} companyId
  * @returns {Promise<EmployeeWorkLog|null>} the updated row, or null if it wasn't pending
  */
-const approveById = async (id, companyId) => {
+const approveById = async (id) => {
   const [count] = await EmployeeWorkLog.update(
     { status: 'approved' },
-    { where: { id, company_id: companyId, status: 'pending' } }
+    { where: { id, status: 'pending' } }
   );
   if (count === 0) return null;
-  return findById(id, companyId);
+  return findById(id);
 };
 
 /**
@@ -726,18 +779,20 @@ const approveById = async (id, companyId) => {
  * row was approved/rejected by someone else a moment earlier — the caller
  * (managerSelfServiceService.rejectWorkLogEntry) treats 0 as "not pending
  * anymore" and 409s.
+ *
+ * Deliberately NOT company/BU-scoped — same reasoning as approveById()
+ * above.
  * @param {number} id
- * @param {number} companyId
  * @param {{ remark: string, rejectedBy: number }} params
  * @returns {Promise<EmployeeWorkLog|null>} the updated row, or null if it wasn't pending
  */
-const rejectById = async (id, companyId, { remark, rejectedBy }) => {
+const rejectById = async (id, { remark, rejectedBy }) => {
   const [count] = await EmployeeWorkLog.update(
     { status: 'rejected', rejection_remark: remark, rejected_by: rejectedBy, rejected_at: new Date() },
-    { where: { id, company_id: companyId, status: 'pending' } }
+    { where: { id, status: 'pending' } }
   );
   if (count === 0) return null;
-  return findById(id, companyId);
+  return findById(id);
 };
 
 /**
@@ -757,7 +812,7 @@ const resubmitById = async (id, companyId) => {
     { where: { id, company_id: companyId, status: 'rejected' } }
   );
   if (count === 0) return null;
-  return findById(id, companyId);
+  return findById(id);
 };
 
 /**
@@ -844,6 +899,8 @@ const deleteByEmployeeAndDateRange = async (employeeId, startDate, endDate, comp
  * — same shape as getDailyHierarchyBreakdown, but filtered to
  * log_type: 'monthly' so a Daily row that happens to land on the month's
  * last day never leaks into the Monthly Work Log view.
+ * Deliberately NOT company/BU-scoped (companyId accepted but unused) — same
+ * reasoning as getCalendarSummary() above.
  * @param {object} params - { employeeId, date, companyId }
  * @returns {Promise<Array<{ service_po_id, hierarchy_node_id, total_hours }>>}
  */
@@ -857,7 +914,6 @@ const getMonthlyLogHierarchyBreakdown = async ({ employeeId, date, companyId }) 
     where: {
       work_date: date,
       employee_id: parseInt(employeeId, 10),
-      company_id: companyId,
       log_type: 'monthly',
     },
     group: ['service_po_id', 'hierarchy_node_id'],
@@ -926,6 +982,13 @@ const hasMonthlyEntry = async (employeeId, startDate, endDate, companyId) => {
  * POs/Projects/Tasks/dates/slots) freely coexist with each other, same for
  * multiple HOURLY entries.
  *
+ * Deliberately NOT company/BU-scoped (companyId accepted but unused) — the
+ * mode-exclusivity rule is a per-employee, per-month invariant, not
+ * per-company: an existing row created under a different BU-selector
+ * session (or against a cross-BU Service PO) still counts as that month
+ * already having a mode, or the rule could be silently bypassed by mixing
+ * modes across BUs. Same reasoning as resourceBudgetRepository's
+ * sumActiveHoursForEmployeeMonth() 176-hour cap fix.
  * @param {number} employeeId
  * @param {string} startDate - "YYYY-MM-DD"
  * @param {string} endDate - "YYYY-MM-DD"
@@ -942,7 +1005,6 @@ const getMonthEntryModeSummary = async (employeeId, startDate, endDate, companyI
   const where = {
     employee_id: employeeId,
     work_date: { [Op.gte]: startDate, [Op.lte]: endDate },
-    company_id: companyId,
   };
   if (excludeDate) where.work_date = { ...where.work_date, [Op.ne]: excludeDate };
   if (excludeId) where.id = { [Op.ne]: excludeId };

@@ -12,6 +12,12 @@ const router = express.Router();
 
 const servicePOController = require('../controllers/servicePOController');
 const authenticate = require('../middlewares/auth');
+// GET-only: same "BU-scoped caller mapped to >1 BU may omit X-Company-Id,
+// aggregating across every BU they're mapped to" contract as client.routes.js
+// — see resolveReportCompanyScope.js. Writes below keep the full
+// `authenticate` (single req.companyId) chain unchanged.
+const resolveReportCompanyScope = require('../middlewares/resolveReportCompanyScope');
+const authenticateReadMultiBU = [authenticate.authenticateIdentity, resolveReportCompanyScope];
 const { validate } = require('../middlewares/validateRequest');
 const { importLimiter } = require('../middlewares/rateLimiters');
 const {
@@ -112,7 +118,7 @@ router.post(
  */
 router.get(
   '/active/list',
-  authenticate,
+  authenticateReadMultiBU,
   servicePOController.getActivePOs
 );
 
@@ -174,7 +180,7 @@ router.get(
  */
 router.get(
   '/',
-  authenticate,
+  authenticateReadMultiBU,
   validate(listServicePOsQuerySchema, 'query'),
   servicePOController.getAllServicePOs
 );
@@ -201,7 +207,7 @@ router.get(
  */
 router.get(
   '/:id',
-  authenticate,
+  authenticateReadMultiBU,
   servicePOController.getServicePOById
 );
 
@@ -458,7 +464,7 @@ router.delete(
  */
 router.get(
   '/:id/utilisation',
-  authenticate,
+  authenticateReadMultiBU,
   servicePOController.getUtilisation
 );
 

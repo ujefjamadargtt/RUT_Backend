@@ -3,7 +3,8 @@
 const { Op } = require('sequelize');
 const { sequelize } = require('../models');
 const monthlyCostRepository = require('../repositories/monthlyCostRepository');
-const { Employee } = require('../models');
+const { Employee, Company } = require('../models');
+const companyAccessControlService = require('./companyAccessControlService');
 const { createAuditLog } = require('../middlewares/auditLog');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
 const logger = require('../utils/logger');
@@ -615,13 +616,30 @@ const normaliseHeader = (h) => String(h).replace(/[\s_\-]/g, '').toLowerCase();
  *  - If no record exists                                         → INSERT
  *  - Validation errors are collected and returned (row is skipped)
  *
+ * The Business Unit every row is stamped with is the explicit
+ * `business_unit_id` multipart field, not `req.companyId`/`X-Company-Id` —
+ * required whenever the caller has any reachable Business Unit, and
+ * validated against that reach (see
+ * companyAccessControlService.resolveImportBusinessUnitId()). The caller is
+ * expected to also send `X-Company-Id` set to the same value (that's what
+ * populates `req.companyId` for a BU-scoped actor), but `business_unit_id`
+ * is the one actually used to scope employee lookups and stamp rows here.
+ *
  * @param {string} filePath     Absolute path to the uploaded Excel file
  * @param {number} userId
  * @param {string} [ip]
- * @param {number} companyId
+ * @param {object} req - the request object; used for { body.business_unit_id, companyId, hierarchyRank, employeeId }
  * @returns {Promise<{ imported: number, updated: number, failed: number, errors: object[], summary: object[] }>}
  */
-const importFromExcel = async (filePath, userId, ip = null, companyId) => {
+const importFromExcel = async (filePath, userId, ip = null, req) => {
+  const bodyBusinessUnitId = req.body && req.body.business_unit_id
+    ? parseInt(req.body.business_unit_id, 10)
+    : undefined;
+  const companyId = await companyAccessControlService.resolveImportBusinessUnitId(
+    { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId },
+    bodyBusinessUnitId != null && !isNaN(bodyBusinessUnitId) ? bodyBusinessUnitId : null
+  );
+
   // 1. Read workbook
   let workbook;
   try {
@@ -763,6 +781,11 @@ const importFromExcel = async (filePath, userId, ip = null, companyId) => {
     const row    = rows[i];
     const rawRow = rawRows[i];
     const rowErrors = [];
+    // Declared here (not just inside the try block below) so the catch
+    // block's error log can reference it — a `const` declared inside the
+    // try was out of scope in the catch, throwing its own ReferenceError
+    // and masking whatever the real dbErr actually was.
+    let employeeId = null;
 
     // — employee identifier: prefer employee code, fall back to employee name
     let employeeCode = null;
@@ -830,6 +853,22 @@ const importFromExcel = async (filePath, userId, ip = null, companyId) => {
 
     // — Verify employee exists in DB (active only)
     try {
+      // An employee created after the Employee-Business-Unit redesign never
+      // gets employees.company_id populated — their Company/BU membership
+      // lives exclusively in employee_business_units. Matching on
+      // company_id alone wrongly rejects such an employee for THIS Business
+      // Unit even when they hold an active membership row for it (confirmed
+      // live: EMP-45 "Jack", company_id NULL, active employee_business_units
+      // row for BU 89 — passed preview but failed import with "not found"
+      // until this OR was added). Same pattern as
+      // timesheetService.validateRows()'s employee lookup.
+      const businessUnitScope = {
+        [Op.or]: [{ company_id: companyId }, { '$businessUnits.id$': companyId }],
+      };
+      const businessUnitInclude = [
+        { model: Company, as: 'businessUnits', attributes: [], through: { attributes: [] } },
+      ];
+
       let employee = null;
       if (employeeCode) {
         employee = await Employee.findOne({
@@ -839,20 +878,30 @@ const importFromExcel = async (filePath, userId, ip = null, companyId) => {
                 sequelize.fn('lower', sequelize.col('employee_code')),
                 employeeCode.toLowerCase()
               ),
-              { company_id: companyId },
+              businessUnitScope,
             ],
           },
+          include: businessUnitInclude,
           attributes: ['id', 'full_name', 'employee_code', 'status'],
+          // Without this, Sequelize wraps findOne's implicit LIMIT 1 in a
+          // subquery that the WHERE clause's `$businessUnits.id$` reference
+          // can't resolve against ("missing FROM-clause entry for table
+          // businessUnits") — confirmed live. findAll with the same
+          // where/include (no limit) doesn't need this, which is why
+          // timesheetService.validateRows()'s sibling lookup didn't hit it.
+          subQuery: false,
         });
       } else if (employeeNameProvided) {
         employee = await Employee.findOne({
           where: {
             [Op.and]: [
               sequelize.where(sequelize.fn('lower', sequelize.col('full_name')), employeeNameProvided.toLowerCase()),
-              { company_id: companyId },
+              businessUnitScope,
             ],
           },
+          include: businessUnitInclude,
           attributes: ['id', 'full_name', 'employee_code', 'status'],
+          subQuery: false,
         });
       }
 
@@ -880,7 +929,7 @@ const importFromExcel = async (filePath, userId, ip = null, companyId) => {
       }
 
       // — Upsert: check existing record
-      const employeeId = employee.id;
+      employeeId = employee.id;
       const existing = await monthlyCostRepository.findByEmployeeMonthYear(employeeId, month, year, companyId);
 
       const payload = {

@@ -18,31 +18,29 @@ const logger = require('../utils/logger');
  */
 
 /**
- * The object-level scoping context Service PO reads need for company-less
- * actors (Admin/Entity Admin) — see companyAccessControlService.js. Built
- * only from server-verified req fields, never from body/query. Mirrors
- * projectController.js's buildAuthContext().
+ * The object-level scoping context the 4 Service PO READ endpoints below
+ * need. These run authenticateReadMultiBU (servicePO.routes.js), not the
+ * single-req.companyId `authenticate` chain writes still use —
+ * req.companyIds is always a pre-resolved ARRAY, every BU the caller is
+ * mapped to when X-Company-Id is omitted, already validated against a
+ * given header/company_id query param (see resolveReportCompanyScope.js —
+ * this replaces the header-passthrough getAllServicePOs()/getActivePOs()
+ * used to do themselves). Passed through as `companyId` since
+ * resolveActorCompanyScope()/resolveActorCompanyScopeForSelectedBU()/
+ * servicePORepository's companyScope() all already accept an array as-is.
  *
  * @param {import('express').Request} req
  */
 function buildAuthContext(req) {
-  return { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId };
+  return { companyId: req.companyIds, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId };
 }
 
 /**
  * GET /api/v1/service-pos
- *
- * Passes the raw X-Company-Id header through so a company-less actor
- * (Admin/Entity Admin) gets the list narrowed to their currently selected
- * Global Business Unit when one is sent — same as getActivePOs() below.
- * Optional: omitting the header keeps the existing full-owned-scope
- * behavior, so this is not a breaking change for any other caller.
  */
 const getAllServicePOs = async (req, res) => {
   try {
-    const rawHeader = req.headers['x-company-id'];
-    const headerCompanyId = rawHeader ? parseInt(rawHeader, 10) : null;
-    const { data, meta } = await servicePOService.getAll(req.query, buildAuthContext(req), headerCompanyId);
+    const { data, meta } = await servicePOService.getAll(req.query, buildAuthContext(req));
     return sendPaginated(res, data, meta, 'Service POs fetched successfully.');
   } catch (error) {
     logger.error('getAllServicePOs error', { error: error.message });
@@ -52,19 +50,10 @@ const getAllServicePOs = async (req, res) => {
 
 /**
  * GET /api/v1/service-pos/active/list
- *
- * Passes the raw X-Company-Id header through so a company-less actor
- * (Admin/Entity Admin) gets the list narrowed to their currently selected
- * Global Business Unit when one is sent — see servicePOService.getActivePOs'
- * doc comment. Optional: omitting the header keeps the existing full-owned-
- * scope behavior, so this is not a breaking change for any other caller of
- * this endpoint.
  */
 const getActivePOs = async (req, res) => {
   try {
-    const rawHeader = req.headers['x-company-id'];
-    const headerCompanyId = rawHeader ? parseInt(rawHeader, 10) : null;
-    const pos = await servicePOService.getActivePOs(buildAuthContext(req), headerCompanyId);
+    const pos = await servicePOService.getActivePOs(buildAuthContext(req));
     return sendSuccess(res, pos, 'Active Service POs fetched successfully.');
   } catch (error) {
     logger.error('getActivePOs error', { error: error.message });

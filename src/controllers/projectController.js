@@ -19,14 +19,19 @@ const logger = require('../utils/logger');
  */
 
 /**
- * The object-level scoping context Project reads need for company-less
- * actors (Admin/Entity Admin) — see companyAccessControlService.js. Built
- * only from server-verified req fields, never from body/query.
+ * The object-level scoping context the 3 Project READ endpoints below need.
+ * These 3 routes run authenticateReadMultiBU (project.routes.js), not the
+ * single-req.companyId `authenticate` chain writes still use — req.companyIds
+ * is always a pre-resolved ARRAY, every BU the caller is mapped to when
+ * X-Company-Id is omitted (see resolveReportCompanyScope.js), passed through
+ * as `companyId` since resolveActorCompanyScope()/projectRepository's
+ * companyScope() both already accept an array as-is. Same known trade-off
+ * as clientController.js's buildClientAuthContext() — see its doc comment.
  *
  * @param {import('express').Request} req
  */
 function buildAuthContext(req) {
-  return { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId };
+  return { companyId: req.companyIds, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId };
 }
 
 /**

@@ -1,5 +1,6 @@
 'use strict';
 
+const { Op } = require('sequelize');
 const subProjectRepository = require('../repositories/subProjectRepository');
 const { ServicePO, Timesheet } = require('../models');
 const { createAuditLog } = require('../middlewares/auditLog');
@@ -296,9 +297,12 @@ const deleteSubProject = async (id, userId, ip = null, companyId) => {
  * @returns {Promise<SubProject[]>}
  */
 const getByPO = async (poId, companyId) => {
-  // Validate PO exists and belongs to this company
+  // Validate PO exists and belongs to this company — companyId may be an
+  // array here (every BU a BU-scoped caller is mapped to when
+  // X-Company-Id is omitted, via the GET /sub-projects/by-po/:poId read
+  // path — see resolveReportCompanyScope.js), never for the write paths.
   const servicePO = await ServicePO.findOne({
-    where: { id: poId, company_id: companyId },
+    where: { id: poId, company_id: Array.isArray(companyId) ? { [Op.in]: companyId } : companyId },
     attributes: ['id', 'service_po_name', 'status'],
   });
 

@@ -4,6 +4,13 @@ const express = require('express');
 const router = express.Router();
 
 const authenticate = require('../middlewares/auth');
+// GET-only: lets a BU-scoped caller mapped to more than one Business Unit
+// omit X-Company-Id, aggregating across every BU they're mapped to,
+// instead of resolveCompany.js's 400 — see resolveReportCompanyScope.js.
+// Write routes below keep the full `authenticate` (single req.companyId)
+// chain unchanged — a create/update/delete always needs exactly one target BU.
+const resolveReportCompanyScope = require('../middlewares/resolveReportCompanyScope');
+const authenticateReadMultiBU = [authenticate.authenticateIdentity, resolveReportCompanyScope];
 const subProjectController = require('../controllers/subProjectController');
 
 /**
@@ -19,29 +26,26 @@ const MUTATORS = ['Finance', 'Management', 'Project Manager'];
  *   description: Sub-project management under Service POs
  */
 
-// ─── All routes require authentication ────────────────────────────────────────
-router.use(authenticate);
-
 // ─── Read routes — any authenticated role ─────────────────────────────────────
 
 /**
  * GET /api/v1/sub-projects
  * List sub-projects with pagination, filtering, and sorting.
  */
-router.get('/', ...subProjectController.getAll);
+router.get('/', authenticateReadMultiBU, ...subProjectController.getAll);
 
 /**
  * GET /api/v1/sub-projects/by-po/:poId
  * Get all sub-projects belonging to a specific Service PO.
  * Placed BEFORE /:id so Express doesn't swallow "by-po" as an id.
  */
-router.get('/by-po/:poId', subProjectController.getByPO);
+router.get('/by-po/:poId', authenticateReadMultiBU, subProjectController.getByPO);
 
 /**
  * GET /api/v1/sub-projects/:id
  * Get a single sub-project by primary key.
  */
-router.get('/:id', subProjectController.getById);
+router.get('/:id', authenticateReadMultiBU, subProjectController.getById);
 
 // ─── Write routes — Finance, Management, Project Manager only ─────────────────
 
@@ -51,6 +55,7 @@ router.get('/:id', subProjectController.getById);
  */
 router.post(
   '/',
+  authenticate,
   ...subProjectController.create
 );
 
@@ -60,6 +65,7 @@ router.post(
  */
 router.put(
   '/:id',
+  authenticate,
   ...subProjectController.update
 );
 
@@ -70,6 +76,7 @@ router.put(
  */
 router.delete(
   '/:id',
+  authenticate,
   subProjectController.delete
 );
 

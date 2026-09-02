@@ -8,7 +8,7 @@ const employeeBusinessUnitRepository = require('../repositories/employeeBusiness
 const servicePOHierarchyRepository = require('../repositories/servicePOHierarchyRepository');
 const timesheetRepository = require('../repositories/timesheetRepository');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
-const { resolveActorCompanyScope, resolveCreateCompanyId, resolveOptionalCreateCompanyId, resolveActorCompanyScopeForSelectedBU } = require('./companyAccessControlService');
+const { resolveActorCompanyScope, resolveCreateCompanyIdForActor, resolveActorCompanyScopeForSelectedBU } = require('./companyAccessControlService');
 const { Employee, Company } = require('../models');
 const { Op } = require('sequelize');
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
@@ -193,9 +193,16 @@ const getById = async (id, authContext) => {
 
 /**
  * Create a new Service PO.
- * - Auto-generates a PO code (PO-YYYYMMDD-XXXX)
  * - Validates that start_date < end_date
  * - Validates that client and service type exist and are active
+ *
+ * Business Unit resolution for a company-less actor (Admin/Entity Admin):
+ *   1. `company_id` in the request body (explicit picker on the frontend).
+ *   2. `X-Company-Id` header as fallback (single-BU logins that omit the body field).
+ *   3. Neither present → 400 error for a normal PO; NULL (allowed) for a
+ *      centralised PO (is_centralised: true), which is intentionally BU-less.
+ * A BU-scoped actor's own `req.companyId` always wins — body and header
+ * are ignored for them entirely.
  *
  * @param {object} data   - Validated request body
  * @param {number} userId
@@ -205,17 +212,18 @@ const getById = async (id, authContext) => {
 const create = async (data, userId, req) => {
   const { company_id: bodyCompanyId, ...fields } = data;
   const authContext = { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId };
-  // A Business Unit is mandatory for a normal Service PO — a company-less
-  // actor (Admin/Entity Admin) must supply a `company_id` that is one of
-  // their own owned Business Units (resolveCreateCompanyId throws 400/403
-  // otherwise). A CENTRALISED Service PO (is_centralised: true) is the one
-  // exception: it is deliberately not tied to any Business Unit, so BU stays
-  // optional for it — same "defer/omit BU" treatment Client/Project already
-  // get via resolveOptionalCreateCompanyId. Either way, a BU-scoped actor's
-  // own req.companyId always wins over anything in the body, unchanged.
-  const companyId = fields.is_centralised === true
-    ? await resolveOptionalCreateCompanyId(authContext, bodyCompanyId)
-    : await resolveCreateCompanyId(authContext, bodyCompanyId, 'a Service PO');
+
+  // Normal Service PO: BU is mandatory (required=true).
+  // Centralised Service PO: BU is optional — stays NULL if not supplied.
+  // For a multi-BU BU Admin, an explicit body company_id wins over the
+  // X-Company-Id header; validation is handled inside resolveCreateCompanyIdForActor.
+  const companyId = await resolveCreateCompanyIdForActor(
+    req,
+    bodyCompanyId != null ? bodyCompanyId : null,
+    fields.is_centralised === true
+      ? { required: false }
+      : { required: true, resourceLabel: 'a Service PO' }
+  );
   data = fields;
 
   // Validate client exists, is active, AND belongs to the same company (or

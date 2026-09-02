@@ -13,6 +13,14 @@ const Joi = require('joi');
 
 const serviceCategoryController = require('../controllers/serviceCategoryController');
 const authenticate = require('../middlewares/auth');
+// GET-only: lets a BU-scoped caller mapped to more than one Business Unit
+// omit X-Company-Id instead of hitting resolveCompany.js's 400 — see
+// resolveReportCompanyScope.js. (Service Category is actually a single
+// GLOBAL master now — see serviceCategoryService.js — so this mainly just
+// removes the header requirement; there's no per-BU data split to
+// aggregate.) Writes below keep the full `authenticate` chain unchanged.
+const resolveReportCompanyScope = require('../middlewares/resolveReportCompanyScope');
+const authenticateReadMultiBU = [authenticate.authenticateIdentity, resolveReportCompanyScope];
 const { validate } = require('../middlewares/validateRequest');
 
 const WRITE_ROLES = ['Finance', 'Management'];
@@ -68,7 +76,7 @@ const listQuerySchema = Joi.object({
  */
 router.get(
   '/',
-  authenticate,
+  authenticateReadMultiBU,
   validate(listQuerySchema, 'query'),
   serviceCategoryController.getAllServiceCategories
 );
@@ -94,7 +102,7 @@ router.get(
  */
 router.get(
   '/:id',
-  authenticate,
+  authenticateReadMultiBU,
   serviceCategoryController.getServiceCategoryById
 );
 

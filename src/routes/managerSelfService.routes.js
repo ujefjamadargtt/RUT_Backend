@@ -16,11 +16,13 @@ const express = require('express');
 const router = express.Router();
 
 const authenticate = require('../middlewares/auth');
+const resolveMyTeamBusinessUnitScope = require('../middlewares/resolveMyTeamBusinessUnitScope');
 const authorize = require('../middlewares/authorize');
 const { validate } = require('../middlewares/validateRequest');
 const {
   assignServicePOSchema,
   mapEmployeeSchema,
+  listMyEmployeesQuerySchema,
   listMyTeamTimesheetsQuerySchema,
   approvalSummaryQuerySchema,
   bulkApproveTimesheetsSchema,
@@ -36,13 +38,24 @@ const controller = require('../controllers/managerSelfServiceController');
  *     tags: [My Team]
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: header
+ *         name: X-Company-Id
+ *         schema: { type: integer }
+ *         description: Optional Business Unit filter. Omit to return all accessible Business Units.
+ *       - in: query
+ *         name: business_unit_id
+ *         schema: { type: integer }
+ *         description: Optional Business Unit filter. Takes precedence over X-Company-Id.
  *     responses:
  *       200:
- *         description: My Employees list
+ *         description: My Employees list, including each Employee's active business_unit_ids and manager mapping_type
  */
 router.get(
   '/employees',
-  authenticate,
+  authenticate.authenticateIdentity,
+  validate(listMyEmployeesQuerySchema, 'query'),
+  resolveMyTeamBusinessUnitScope,
   authorize('manager.view_mapped_employees'),
   controller.getMyEmployees
 );

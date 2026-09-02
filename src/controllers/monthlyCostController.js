@@ -63,7 +63,12 @@ const getAll = [
   validate(listMonthlyCostsQuerySchema, 'query'),
   async (req, res) => {
     try {
-      const { data, meta } = await monthlyCostService.getAll(req.query, req.companyId);
+      // req.companyIds (array): every BU this BU-scoped caller is mapped to
+      // when X-Company-Id is omitted, or their role reach for a company-less
+      // Admin/Entity Admin/Platform Admin — see resolveReportCompanyScope.js.
+      // This route runs authenticateReadMultiBU, not the single-req.companyId
+      // `authenticate` chain the other monthly-costs routes still use.
+      const { data, meta } = await monthlyCostService.getAll(req.query, req.companyIds);
       return sendPaginated(res, data, meta, 'Monthly cost records fetched successfully.');
     } catch (error) {
       logger.error('MonthlyCostController.getAll error', { error: error.message });
@@ -553,7 +558,7 @@ const importFromExcel = async (req, res) => {
       filePath,
       req.userId,
       getIpAddress(req),
-      req.companyId
+      req
     );
 
     const message = `Import completed: ${result.imported} inserted, ${result.updated} updated, ${result.failed} failed out of ${result.total_rows} rows.`;

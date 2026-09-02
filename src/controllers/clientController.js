@@ -19,19 +19,43 @@ const logger = require('../utils/logger');
  */
 
 /**
- * The object-level scoping context Client reads/writes need for
- * company-less actors (Admin/Entity Admin) — see clientService.js's
- * resolveActorCompanyScope()/resolveCreateCompanyId(). Built only from
- * server-verified req fields, never from the request body/query.
+ * The object-level scoping context the 3 Client READ endpoints below
+ * (getAllClients/getClientById/getActiveClients) need. Unlike the write
+ * endpoints (create/update/delete, which keep the single-req.companyId
+ * `authenticate` chain and resolve scope via
+ * clientService.js's resolveActorRecordAccessScope()), these 3 routes run
+ * authenticateReadMultiBU (client.routes.js) instead — req.companyIds is
+ * always a pre-resolved ARRAY (never req.companyId): every BU the caller
+ * is mapped to when X-Company-Id is omitted, not just one, per
+ * resolveReportCompanyScope.js. Passed straight through as `companyId`
+ * here since resolveActorRecordAccessScope()/clientRepository.companyScope()
+ * both already accept an array as-is.
+ *
+ * Known trade-off: a company-less actor's own Clients left with NO
+ * Business Unit (`company_id IS NULL AND created_by = them` — see
+ * resolveActorRecordAccessScope()'s doc comment) are not specially
+ * surfaced on these 3 read routes the way they still are on write routes,
+ * since a non-null array here short-circuits that fallback. Narrow,
+ * pre-existing edge case; revisit if it turns out to matter in practice.
+ *
+ * Built only from server-verified req fields, never from the request body/query.
  *
  * @param {import('express').Request} req
- * @returns {{ companyId: number|null, hierarchyRank: number|null, employeeId: number|null }}
+ * @returns {{ companyId: number[], hierarchyRank: number|null, employeeId: number|null }}
  */
 function buildClientAuthContext(req) {
+  // selectedCompanyId: ONLY from explicit ?company_id query param — signals
+  // the caller wants just that BU's records (BU-less records excluded).
+  // The X-Company-Id header is session context, NOT a filter intent, so it
+  // must NOT be used here. When no query param is present, selectedCompanyId
+  // stays null → Admin gets their BU-less clients plus all BU clients.
+  const rawQp = req.query.company_id;
+  const selectedCompanyId = rawQp ? parseInt(rawQp, 10) : null;
   return {
-    companyId: req.companyId,
+    companyId: req.companyIds,
     hierarchyRank: req.hierarchyRank,
     employeeId: req.employeeId,
+    selectedCompanyId: Number.isFinite(selectedCompanyId) && selectedCompanyId > 0 ? selectedCompanyId : null,
   };
 }
 

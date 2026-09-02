@@ -28,6 +28,22 @@ const excludeInternalNoInvoice = {
  * All direct database interaction for service_po_monthly_budgets.
  */
 
+/**
+ * `company_id` WHERE fragment — array-aware for the 2 READ endpoints
+ * converted to the "no X-Company-Id -> role reach across every BU the
+ * caller is mapped to" contract (GET /service-po-monthly-budgets ->
+ * findOne/findBudgetsForMonth, GET .../service-pos ->
+ * findActiveServicePOsForDropdown — see resolveReportCompanyScope.js).
+ * findById/findActiveServicePOsWithBudget (used by the write path and by
+ * GET /current, respectively — neither converted) keep passing a plain
+ * scalar companyId, unaffected.
+ * @param {number|number[]} companyId
+ * @returns {object}
+ */
+function companyScope(companyId) {
+  return Array.isArray(companyId) ? { [Op.in]: companyId } : companyId;
+}
+
 const servicePOInclude = {
   model: ServicePO,
   as: 'servicePO',
@@ -53,7 +69,7 @@ const servicePOInclude = {
  */
 const findOne = async (servicePOId, month, year, companyId) => {
   return ServicePOMonthlyBudget.findOne({
-    where: { service_po_id: servicePOId, month, year, company_id: companyId },
+    where: { service_po_id: servicePOId, month, year, company_id: companyScope(companyId) },
     include: [servicePOInclude],
   });
 };
@@ -124,7 +140,7 @@ const findActiveServicePOsWithBudget = async (month, year, companyId) => {
  * @returns {Promise<ServicePOMonthlyBudget[]>}
  */
 const findBudgetsForMonth = async (month, year, companyId, servicePOIds) => {
-  const where = { year, company_id: companyId };
+  const where = { year, company_id: companyScope(companyId) };
   if (month !== undefined && month !== null) {
     where.month = month;
   }
@@ -152,7 +168,7 @@ const findActiveServicePOsForDropdown = async (companyId, servicePOIds) => {
   const where = {
     status: { [Op.in]: ACTIVE_PO_STATUSES },
     is_deleted: false,
-    company_id: companyId,
+    company_id: companyScope(companyId),
     ...excludeInternalNoInvoice,
   };
   if (servicePOIds !== null) {

@@ -7,8 +7,14 @@ const managerServicePOMappingRepository = require('../repositories/managerServic
 const employeeServicePOMappingRepository = require('../repositories/employeeServicePOMappingRepository');
 const employeeServicePOMappingService = require('./employeeServicePOMappingService');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
+const employeeRepository = require('../repositories/employeeRepository');
 const { createAuditLog } = require('../middlewares/auditLog');
 const logger = require('../utils/logger');
+
+// Platform Admin (1) / Admin (2) / Entity Admin (3) — full cross-company scope, no mapping check needed.
+const ADMIN_TIER_MAX_RANK = 3;
+// BU Admin (4) — scoped to their own Business Units, verified via employeeRepository.findById(id, companyId).
+const BU_ADMIN_RANK = 4;
 
 /**
  * Manager Self-Service — a Manager's own view of their delegated Employees
@@ -42,21 +48,73 @@ function conflictError(message) {
 }
 
 /**
- * The Manager's own delegated Employees.
+ * The Manager's own delegated Employees, or every active employee inside an
+ * Admin-tier caller's authorized Business Unit scope.
  *
  * @param {number} managerUserId
- * @param {number} companyId
+ * @param {number[]} companyIds - every accessible BU, or the selected BU
+ * @param {number|null} hierarchyRank
  * @returns {Promise<Array>}
  */
-const getMyEmployees = async (managerUserId, companyId) => {
-  const mappings = await managerEmployeeMappingRepository.findByManager(managerUserId, companyId);
-  if (mappings.length === 0) return [];
+const getMyEmployees = async (managerUserId, companyIds, hierarchyRank) => {
+  // BU Admin (rank 4) has full access to all employees in their BUs —
+  // same as Admin tier but scoped to their own BUs (enforced by the
+  // companyIds filter at the bottom rather than by a mapping check).
+  const isAdminOrBuAdminTier = hierarchyRank != null && hierarchyRank <= 4;
+  let mappings = [];
+  let employeeWhere = { status: 'active', is_deleted: false };
+
+  if (!isAdminOrBuAdminTier) {
+    // Do not restrict manager_employee_mappings.company_id here. Historic
+    // mapping rows may have NULL company_id, while the Employee's active
+    // employee_business_units membership is the authoritative BU assignment.
+    mappings = await managerEmployeeMappingRepository.findByManager(managerUserId);
+    if (mappings.length === 0) return [];
+    employeeWhere = { id: mappings.map((mapping) => mapping.employee_id) };
+  }
 
   const employees = await Employee.findAll({
-    where: { id: mappings.map((m) => m.employee_id) },
+    where: employeeWhere,
     attributes: ['id', 'employee_code', 'full_name', 'designation', 'status'],
+    include: [{
+      model: Company,
+      as: 'businessUnits',
+      attributes: ['id', 'company_name'],
+      through: { attributes: [], where: { status: 'active' } },
+      required: false,
+    }],
   });
-  return employees;
+
+  const selectedBusinessUnits = new Set(companyIds || []);
+  const mappingByEmployeeId = new Map();
+  for (const mapping of mappings) {
+    // An Employee normally has at most one mapping for a Manager. Prefer the
+    // primary assignment if legacy data contains both types for that pair.
+    const existing = mappingByEmployeeId.get(mapping.employee_id);
+    if (!existing || (mapping.mapping_type === 'PRIMARY' && existing.mapping_type !== 'PRIMARY')) {
+      mappingByEmployeeId.set(mapping.employee_id, mapping);
+    }
+  }
+
+  return employees
+    .map((employee) => {
+      const businessUnits = (employee.businessUnits || []).map((businessUnit) => ({
+        id: businessUnit.id,
+        name: businessUnit.company_name,
+      }));
+      const businessUnitIds = businessUnits.map((businessUnit) => businessUnit.id);
+      return {
+        id: employee.id,
+        employee_code: employee.employee_code,
+        full_name: employee.full_name,
+        designation: employee.designation,
+        status: employee.status,
+        business_unit_ids: businessUnitIds,
+        business_units: businessUnits,
+        mapping_type: mappingByEmployeeId.get(employee.id)?.mapping_type || null,
+      };
+    })
+    .filter((employee) => employee.business_unit_ids.some((id) => selectedBusinessUnits.has(id)));
 };
 
 /**
@@ -77,7 +135,45 @@ const getMyGrantedServicePOs = async (managerUserId, companyId) => {
   return pos;
 };
 
-async function assertOwnEmployee(managerUserId, employeeId, companyId) {
+/**
+ * Guard: confirm the caller is allowed to act on behalf of `employeeId`.
+ *
+ * - Admin / Entity Admin (rank ≤ 3): full cross-company scope — skip the
+ *   mapping check entirely (they have no rows in manager_employee_mappings
+ *   and don't need them).
+ * - BU Admin (rank 4): scoped to their own Business Units — verify the
+ *   target Employee belongs to ANY of the caller's BUs. Uses
+ *   `callerBuIds` (the full array from req.employeeBusinessUnits) so a
+ *   multi-BU Admin can act on employees in any of their BUs regardless of
+ *   which single BU is in the X-Company-Id header.
+ * - Everyone else (Manager and below): must have an active row in
+ *   manager_employee_mappings.
+ *
+ * @param {number}      managerUserId
+ * @param {number}      employeeId
+ * @param {number}      companyId      — single BU from req.companyId (used for non-BU-Admin paths)
+ * @param {number|null} hierarchyRank  — req.hierarchyRank from auth middleware
+ * @param {number[]}    [callerBuIds]  — all caller BU ids from req.employeeBusinessUnits (BU Admin path)
+ */
+async function assertOwnEmployee(managerUserId, employeeId, companyId, hierarchyRank, callerBuIds = []) {
+  // Admin-tier: full scope, no mapping check needed.
+  if (Number.isInteger(hierarchyRank) && hierarchyRank <= ADMIN_TIER_MAX_RANK) {
+    return;
+  }
+
+  // BU Admin: employee must belong to ANY of the caller's active Business Units.
+  if (hierarchyRank === BU_ADMIN_RANK) {
+    // Use the full BU array when available; fall back to the single companyId so
+    // callers that haven't been updated yet still work correctly.
+    const scopeIds = callerBuIds.length > 0 ? callerBuIds : [companyId].filter(Boolean);
+    const employee = await employeeRepository.findById(employeeId, scopeIds.length === 1 ? scopeIds[0] : scopeIds);
+    if (!employee) {
+      throw forbiddenError('This Employee is not one of your mapped Employees.');
+    }
+    return;
+  }
+
+  // Manager and below: must have an explicit mapping row.
   const mapping = await managerEmployeeMappingRepository.findByManagerAndEmployee(managerUserId, employeeId, companyId);
   if (!mapping) {
     throw forbiddenError('This Employee is not one of your mapped Employees.');
@@ -103,8 +199,8 @@ async function assertGrantedServicePO(managerUserId, servicePOId, companyId) {
  * @param {number} actorId
  * @returns {Promise<EmployeeServicePOMapping>}
  */
-const assignServicePOToEmployee = async (managerUserId, employeeId, servicePOId, companyId, actorId) => {
-  await assertOwnEmployee(managerUserId, employeeId, companyId);
+const assignServicePOToEmployee = async (managerUserId, employeeId, servicePOId, companyId, actorId, hierarchyRank = null, callerBuIds = []) => {
+  await assertOwnEmployee(managerUserId, employeeId, companyId, hierarchyRank, callerBuIds);
   await assertGrantedServicePO(managerUserId, servicePOId, companyId);
 
   const mapping = await employeeServicePOMappingService.assign(employeeId, servicePOId, actorId, companyId);
@@ -124,8 +220,8 @@ const assignServicePOToEmployee = async (managerUserId, employeeId, servicePOId,
  * @param {number} companyId
  * @returns {Promise<EmployeeServicePOMapping[]>}
  */
-const getEmployeeServicePOs = async (managerUserId, employeeId, companyId) => {
-  await assertOwnEmployee(managerUserId, employeeId, companyId);
+const getEmployeeServicePOs = async (managerUserId, employeeId, companyId, hierarchyRank = null, callerBuIds = []) => {
+  await assertOwnEmployee(managerUserId, employeeId, companyId, hierarchyRank, callerBuIds);
 
   return employeeServicePOMappingRepository.findByEmployee(employeeId, companyId);
 };
@@ -162,13 +258,15 @@ const TIMESHEET_SORT_BY_TO_WORK_LOG_COLUMN = {
  * @param {number} ownEmployeeId - the calling Manager's own req.employeeId (may be null)
  * @param {number} companyId
  * @param {object} query - startDate, endDate, poId, subProjectId, sortBy, sortOrder, page, limit
+ * @param {number|null} [hierarchyRank] - req.hierarchyRank from auth middleware
+ * @param {number[]}    [callerBuIds]   - all caller BU ids (req.employeeBusinessUnits mapped to ids)
  * @returns {Promise<{ data, meta }>}
  */
-const getTimesheets = async (managerUserId, employeeId, ownEmployeeId, companyId, query) => {
+const getTimesheets = async (managerUserId, employeeId, ownEmployeeId, companyId, query, hierarchyRank = null, callerBuIds = []) => {
   let targetEmployeeId;
 
   if (employeeId) {
-    await assertOwnEmployee(managerUserId, employeeId, companyId);
+    await assertOwnEmployee(managerUserId, employeeId, companyId, hierarchyRank, callerBuIds);
     targetEmployeeId = employeeId;
   } else {
     targetEmployeeId = ownEmployeeId;
@@ -243,21 +341,23 @@ const getTimesheets = async (managerUserId, employeeId, ownEmployeeId, companyId
  * @param {number} companyId
  * @param {number} actorId
  * @param {string} ipAddress
+ * @param {number|null} [hierarchyRank] - req.hierarchyRank from auth middleware
+ * @param {number[]}    [callerBuIds]   - all caller BU ids (BU Admin path)
  * @returns {Promise<EmployeeWorkLog>}
  */
-const approveTimesheet = async (managerUserId, id, companyId, actorId, ipAddress) => {
-  const entry = await employeeWorkLogRepository.findById(id, companyId);
+const approveTimesheet = async (managerUserId, id, companyId, actorId, ipAddress, hierarchyRank = null, callerBuIds = []) => {
+  const entry = await employeeWorkLogRepository.findById(id);
   if (!entry) {
     throw notFoundError(`Work log entry #${id} was not found.`);
   }
 
-  await assertOwnEmployee(managerUserId, entry.employee_id, companyId);
+  await assertOwnEmployee(managerUserId, entry.employee_id, companyId, hierarchyRank, callerBuIds);
 
   if (entry.status !== 'pending') {
     throw conflictError(`Only a pending work log entry can be approved (current status: ${entry.status}).`);
   }
 
-  const approved = await employeeWorkLogRepository.approveById(id, companyId);
+  const approved = await employeeWorkLogRepository.approveById(id);
   if (!approved) {
     // Lost a race against another action (e.g. a concurrent reject/resubmit)
     // between the status check above and the atomic update itself.
@@ -299,13 +399,15 @@ const approveTimesheet = async (managerUserId, id, companyId, actorId, ipAddress
  * @param {number} ownEmployeeId - the calling Manager's own req.employeeId (may be null)
  * @param {number} companyId
  * @param {object} query - startDate, endDate, log_type ('daily'|'monthly'), page, limit
+ * @param {number|null} [hierarchyRank] - req.hierarchyRank from auth middleware
+ * @param {number[]}    [callerBuIds]   - all caller BU ids (BU Admin path)
  * @returns {Promise<{ data: object[], meta: object }>}
  */
-const getApprovalSummary = async (managerUserId, employeeId, ownEmployeeId, companyId, query) => {
+const getApprovalSummary = async (managerUserId, employeeId, ownEmployeeId, companyId, query, hierarchyRank = null, callerBuIds = []) => {
   let targetEmployeeId;
 
   if (employeeId) {
-    await assertOwnEmployee(managerUserId, employeeId, companyId);
+    await assertOwnEmployee(managerUserId, employeeId, companyId, hierarchyRank, callerBuIds);
     targetEmployeeId = employeeId;
   } else {
     targetEmployeeId = ownEmployeeId;
@@ -322,7 +424,6 @@ const getApprovalSummary = async (managerUserId, employeeId, ownEmployeeId, comp
 
   const rows = await employeeWorkLogRepository.findForApprovalSummary({
     employeeId: targetEmployeeId,
-    companyId,
     startDate: query.startDate,
     endDate: query.endDate,
   });
@@ -399,22 +500,24 @@ const getApprovalSummary = async (managerUserId, employeeId, ownEmployeeId, comp
  * @param {number} companyId
  * @param {number} actorId
  * @param {string} ipAddress
+ * @param {number|null} [hierarchyRank] - req.hierarchyRank from auth middleware
+ * @param {number[]}    [callerBuIds]   - all caller BU ids (BU Admin path)
  * @returns {Promise<{ employee_id, approved: object[], total_rows_approved }>}
  */
-const bulkApproveTimesheets = async (managerUserId, body, companyId, actorId, ipAddress) => {
+const bulkApproveTimesheets = async (managerUserId, body, companyId, actorId, ipAddress, hierarchyRank = null, callerBuIds = []) => {
   const { employee_id: employeeId, dates, months } = body;
 
-  await assertOwnEmployee(managerUserId, employeeId, companyId);
+  await assertOwnEmployee(managerUserId, employeeId, companyId, hierarchyRank, callerBuIds);
 
   let totalRowsApproved = 0;
   let approved;
 
   await sequelize.transaction(async (transaction) => {
     if (dates) {
-      totalRowsApproved = await employeeWorkLogRepository.approveByEmployeeAndDates(employeeId, dates, companyId, transaction);
+      totalRowsApproved = await employeeWorkLogRepository.approveByEmployeeAndDates(employeeId, dates, transaction);
       approved = dates.map((date) => ({ date }));
     } else {
-      totalRowsApproved = await employeeWorkLogRepository.approveByEmployeeAndMonths(employeeId, months, companyId, transaction);
+      totalRowsApproved = await employeeWorkLogRepository.approveByEmployeeAndMonths(employeeId, months, transaction);
       approved = months.map(({ month, year }) => ({ month, year }));
     }
   });
@@ -454,15 +557,17 @@ const bulkApproveTimesheets = async (managerUserId, body, companyId, actorId, ip
  * @param {number} companyId
  * @param {number} actorId
  * @param {string} ipAddress
+ * @param {number|null} [hierarchyRank] - req.hierarchyRank from auth middleware
+ * @param {number[]}    [callerBuIds]   - all caller BU ids (BU Admin path)
  * @returns {Promise<EmployeeWorkLog>}
  */
-const rejectWorkLogEntry = async (managerUserId, id, remark, companyId, actorId, ipAddress) => {
+const rejectWorkLogEntry = async (managerUserId, id, remark, companyId, actorId, ipAddress, hierarchyRank = null, callerBuIds = []) => {
   const entry = await employeeWorkLogRepository.findById(id, companyId);
   if (!entry) {
     throw notFoundError(`Work log entry #${id} was not found.`);
   }
 
-  await assertOwnEmployee(managerUserId, entry.employee_id, companyId);
+  await assertOwnEmployee(managerUserId, entry.employee_id, companyId, hierarchyRank, callerBuIds);
 
   if (entry.status !== 'pending') {
     throw conflictError(`Only a pending work log entry can be rejected (current status: ${entry.status}).`);
@@ -497,8 +602,8 @@ const rejectWorkLogEntry = async (managerUserId, id, remark, companyId, actorId,
  * @param {number} companyId
  * @returns {Promise<void>}
  */
-const removeServicePOFromEmployee = async (managerUserId, employeeId, servicePOId, companyId) => {
-  await assertOwnEmployee(managerUserId, employeeId, companyId);
+const removeServicePOFromEmployee = async (managerUserId, employeeId, servicePOId, companyId, hierarchyRank = null, callerBuIds = []) => {
+  await assertOwnEmployee(managerUserId, employeeId, companyId, hierarchyRank, callerBuIds);
 
   const existing = await employeeServicePOMappingRepository.findByEmployeeAndPO(employeeId, servicePOId);
   if (!existing) {

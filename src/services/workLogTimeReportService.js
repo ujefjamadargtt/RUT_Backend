@@ -158,7 +158,7 @@ const getReport = async (userId, ownEmployeeId, companyId, query) => {
   const projectId = query.project_id ? parseInt(query.project_id, 10) : null;
 
   const workLogs = await employeeWorkLogRepository.getWorkLogTimeReportRows({
-    employeeIds, companyId, startDate, endDate, servicePOId, projectId,
+    employeeIds, startDate, endDate, servicePOId, projectId,
   });
 
   const rows = workLogs.flatMap(mapRows);

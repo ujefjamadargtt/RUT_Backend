@@ -28,12 +28,23 @@ const servicePOInclude = {
  * a number. No "omit when undefined" fallback — every function below must
  * always be company-scoped.
  *
+ * The array branch also ORs in `company_id: null` — a resource budget row's
+ * `company_id` always mirrors its Service PO's own (see
+ * resourceBudgetService.js create()/bulkUpsert()), which is legitimately
+ * NULL for a Centralised (BU-less) Service PO. Without this, a company-less
+ * Admin/Entity Admin's own Centralised-PO budget record was invisible to
+ * their own find/update/deactivate calls (`company_id IN (...)` never
+ * matches NULL) — same class of gap already fixed in projectRepository.js's
+ * companyScope(). A single-number companyId (the concrete BU-scoped path)
+ * still needs no OR: Sequelize already turns a literal `null` into `IS NULL`
+ * correctly there.
+ *
  * @param {number|number[]} companyId
  * @returns {object}
  */
 function companyScope(companyId) {
   if (Array.isArray(companyId)) {
-    return { company_id: { [Op.in]: companyId } };
+    return { [Op.or]: [{ company_id: { [Op.in]: companyId } }, { company_id: null }] };
   }
   return { company_id: companyId };
 }
@@ -103,16 +114,25 @@ const findAll = async (filters, companyId) => {
  * single-record update flow) and/or one Service PO (used by the bulk flow,
  * which is replacing every row for that Service PO in this same call).
  *
+ * Deliberately NOT company-scoped: the 176-hour cap is a per-employee,
+ * per-month invariant across the employee's ENTIRE cross-BU footprint, not
+ * per-company. Each budget row is stamped with its own Service PO's owning
+ * company_id (see resourceBudgetService.js's create()/bulkUpsert() doc
+ * comments on cross-BU staffing), so scoping this sum to one companyId would
+ * only ever see one BU's slice of the employee's hours — letting the same
+ * employee be booked well over 176 combined hours across multiple BUs
+ * undetected. Confirmed live: an employee with 150 active hours under one
+ * BU's Service PO was invisible to a second BU's cap check entirely.
+ *
  * @param {number} empId
  * @param {number} month
  * @param {number} year
- * @param {number} companyId
  * @param {{ excludeId?: number, excludeServicePOId?: number }} [exclude]
  * @param {import('sequelize').Transaction} [transaction]
  * @returns {Promise<number>}
  */
-const sumActiveHoursForEmployeeMonth = async (empId, month, year, companyId, exclude = {}, transaction) => {
-  const where = { emp_id: empId, month, year, ...companyScope(companyId), status: 'active' };
+const sumActiveHoursForEmployeeMonth = async (empId, month, year, exclude = {}, transaction) => {
+  const where = { emp_id: empId, month, year, status: 'active' };
   if (exclude.excludeId !== undefined && exclude.excludeId !== null) {
     where.id = { [Op.ne]: exclude.excludeId };
   }

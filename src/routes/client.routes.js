@@ -12,6 +12,13 @@ const router = express.Router();
 
 const clientController = require('../controllers/clientController');
 const authenticate = require('../middlewares/auth');
+// GET-only: lets a BU-scoped caller mapped to more than one Business Unit
+// omit X-Company-Id and see every Client across every BU they're mapped to,
+// instead of resolveCompany.js's 400 — see resolveReportCompanyScope.js.
+// Writes below keep the full `authenticate` (single req.companyId) chain
+// unchanged — a create/update/delete always needs exactly one target BU.
+const resolveReportCompanyScope = require('../middlewares/resolveReportCompanyScope');
+const authenticateReadMultiBU = [authenticate.authenticateIdentity, resolveReportCompanyScope];
 const { importLimiter } = require('../middlewares/rateLimiters');
 const { validate } = require('../middlewares/validateRequest');
 const {
@@ -96,7 +103,7 @@ router.post(
  */
 router.get(
   '/active/list',
-  authenticate,
+  authenticateReadMultiBU,
   clientController.getActiveClients
 );
 
@@ -138,7 +145,7 @@ router.get(
  */
 router.get(
   '/',
-  authenticate,
+  authenticateReadMultiBU,
   validate(listClientsQuerySchema, 'query'),
   clientController.getAllClients
 );
@@ -165,7 +172,7 @@ router.get(
  */
 router.get(
   '/:id',
-  authenticate,
+  authenticateReadMultiBU,
   clientController.getClientById
 );
 

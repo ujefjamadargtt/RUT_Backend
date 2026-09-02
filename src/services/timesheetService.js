@@ -5,7 +5,7 @@ const fs = require('fs');
 const xlsx = require('xlsx');
 const { Readable } = require('stream');
 const { Op } = require('sequelize');
-const { Employee, ServicePO, ServiceType, SubProject, Company, sequelize } = require('../models');
+const { Employee, ServicePO, ServiceType, SubProject, Company, EmployeeServicePOMapping, sequelize } = require('../models');
 const timesheetRepository = require('../repositories/timesheetRepository');
 const timesheetImportRepository = require('../repositories/timesheetImportRepository');
 const { createAuditLog } = require('../middlewares/auditLog');
@@ -777,39 +777,58 @@ const validateRows = async (rows, companyId) => {
   // whose legacy company_id is null but who holds a real BU grant here
   // (common for an Admin-created Employee) must still resolve, or every
   // row for them fails with a false "not found in the system".
-  const [allEmployees, allPOs] = await Promise.all([
-    Employee.findAll({
-      where: {
-        status: 'active',
-        is_deleted: false,
-        [Op.or]: [{ company_id: companyId }, { '$businessUnits.id$': companyId }],
+  const allEmployees = await Employee.findAll({
+    where: {
+      status: 'active',
+      is_deleted: false,
+      [Op.or]: [{ company_id: companyId }, { '$businessUnits.id$': companyId }],
+    },
+    attributes: ['id', 'full_name', 'employee_code', 'status'],
+    include: [{ model: Company, as: 'businessUnits', attributes: [], through: { attributes: [] } }],
+  });
+
+  // Cross-BU resourcing is intentionally allowed (see
+  // employeeServicePOMappingService.assign() and the identical comment on
+  // timesheetRepository.findEligibleServicePOById): an employee can hold an
+  // active mapping to a Service PO owned by a different Business Unit than
+  // the one this sync/import is scoped to. Without also admitting those PO
+  // ids below, every row logged against such a PO would wrongly fail with
+  // "was not found or is not available for timesheet logging" purely
+  // because the PO's own company_id differs from `companyId` — confirmed
+  // live via the Sync Employee Work Logs flow.
+  const crossBuMappings = await EmployeeServicePOMapping.findAll({
+    where: { status: 'active', employee_id: { [Op.in]: allEmployees.map((e) => e.id) } },
+    attributes: ['service_po_id'],
+  });
+  const mappedPoIds = crossBuMappings.map((m) => m.service_po_id);
+
+  const allPOs = await ServicePO.findAll({
+    where: {
+      status: timesheetRepository.ELIGIBLE_PO_STATUSES,
+      is_deleted: false,
+      // OR in company_id: null so a Centralised Service PO (see
+      // findEligibleServicePOById's identical fallback in
+      // timesheetRepository.js) isn't wrongly reported as "not found" just
+      // because it has no owning company_id, and OR in mappedPoIds so a
+      // legitimately cross-BU-mapped PO resolves too (see comment above).
+      [Op.or]: [{ company_id: companyId }, { company_id: null }, { id: { [Op.in]: mappedPoIds } }],
+    },
+    attributes: ['id', 'service_po_name', 'status'],
+    include: [
+      {
+        model: SubProject,
+        as: 'subProjects',
+        attributes: ['id', 'sub_project_name', 'status'],
+        required: false,
       },
-      attributes: ['id', 'full_name', 'employee_code', 'status'],
-      include: [{ model: Company, as: 'businessUnits', attributes: [], through: { attributes: [] } }],
-    }),
-    ServicePO.findAll({
-      where: {
-        status: timesheetRepository.ELIGIBLE_PO_STATUSES,
-        is_deleted: false,
-        company_id: companyId,
+      {
+        model: ServiceType,
+        as: 'serviceType',
+        attributes: ['id', 'service_type_name'],
+        required: false,
       },
-      attributes: ['id', 'service_po_name', 'status'],
-      include: [
-        {
-          model: SubProject,
-          as: 'subProjects',
-          attributes: ['id', 'sub_project_name', 'status'],
-          required: false,
-        },
-        {
-          model: ServiceType,
-          as: 'serviceType',
-          attributes: ['id', 'service_type_name'],
-          required: false,
-        },
-      ],
-    }),
-  ]);
+    ],
+  });
 
   // Build lookup maps (lower-cased name -> record)
   const employeeMap = new Map();

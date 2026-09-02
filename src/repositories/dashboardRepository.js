@@ -67,7 +67,7 @@ async function getTotalClients(companyId) {
  */
 async function getActivePOs(companyId) {
   const [result] = await sequelize.query(
-    "SELECT COUNT(*) AS total FROM service_pos WHERE status IN ('in-progress', 'on-hold', 'pending') AND company_id = :companyId",
+    "SELECT COUNT(*) AS total FROM service_pos WHERE status IN ('in-progress', 'on-hold', 'pending') AND (company_id = :companyId OR company_id IS NULL)",
     { replacements: { companyId }, type: QueryTypes.SELECT }
   );
   return parseInt(result.total, 10);
@@ -79,7 +79,7 @@ async function getActivePOs(companyId) {
  */
 async function getClosedPOs(companyId) {
   const [result] = await sequelize.query(
-    "SELECT COUNT(*) AS total FROM service_pos WHERE status = 'closed' AND company_id = :companyId",
+    "SELECT COUNT(*) AS total FROM service_pos WHERE status = 'closed' AND (company_id = :companyId OR company_id IS NULL)",
     { replacements: { companyId }, type: QueryTypes.SELECT }
   );
   return parseInt(result.total, 10);
@@ -203,7 +203,7 @@ async function getCurrentMonthBillableSplit(month, year, hoursSource, roleId, co
 async function getTotalRevenue(filters = {}) {
   const { year, startDate, endDate, employeeId, clientId, poId, serviceTypeId, serviceCategoryId, companyId } = filters;
 
-  const conditions = ["sp.status IN ('in-progress', 'on-hold', 'pending', 'completed', 'closed')", 'sp.company_id = :companyId'];
+  const conditions = ["sp.status IN ('in-progress', 'on-hold', 'pending', 'completed', 'closed')", '(sp.company_id = :companyId OR sp.company_id IS NULL)'];
   const replacements = { companyId };
 
   if (startDate && endDate) {
@@ -272,7 +272,7 @@ async function getTotalRevenue(filters = {}) {
 async function getTotalBudgetCost(filters = {}) {
   const { startDate, endDate, year, employeeId, clientId, poId, serviceTypeId, serviceCategoryId, companyId } = filters;
 
-  const conditions = ["cbm.status = 'active'", 'sp.company_id = :companyId'];
+  const conditions = ["cbm.status = 'active'", '(sp.company_id = :companyId OR sp.company_id IS NULL)'];
   const replacements = { companyId };
 
   if (startDate && endDate) {
@@ -456,7 +456,7 @@ async function getTopPOsByHours(hoursSource, roleId, companyId) {
        INNER JOIN service_categories sc ON sc.id = st.service_category_id
        LEFT  JOIN timesheets t         ON t.service_po_id = sp.id
                                        ${publishGuard}
-       WHERE sp.company_id = :companyId
+       WHERE (sp.company_id = :companyId OR sp.company_id IS NULL)
        GROUP BY sp.id, sp.service_po_code, sp.service_po_name, c.client_name, sc.name
      ) ranked
      WHERE rn <= 5
@@ -515,7 +515,7 @@ async function getTopPOsByHoursForPeriod(startDate, endDate, hoursSource, roleId
                                        AND t.timesheet_date >= :startDate
                                        AND t.timesheet_date <= :endDate
                                        ${publishGuard}
-       WHERE sp.company_id = :companyId
+       WHERE (sp.company_id = :companyId OR sp.company_id IS NULL)
        GROUP BY sp.id, sp.service_po_code, sp.service_po_name, c.client_name, sc.name, sc.report_bucket_key
      ) ranked
      WHERE rn <= 5
@@ -794,7 +794,7 @@ async function getPOBillableBreakdown(filters) {
     : 'COALESCE(t.modified_hours, t.hours_logged)';
 
   const replacements = { month: parseInt(month, 10), year: parseInt(year, 10), limit, offset, companyId };
-  const conditions = ["sp.is_deleted = false", "sp.company_id = :companyId"];
+  const conditions = ["sp.is_deleted = false", "(sp.company_id = :companyId OR sp.company_id IS NULL)"];
 
   if (search) {
     conditions.push('(sp.service_po_name ILIKE :search OR sp.service_po_code ILIKE :search OR c.client_name ILIKE :search)');
@@ -1756,7 +1756,7 @@ function periodKey(dateStr) {
 function buildInvoiceMasterFilters(filters, replacements) {
   const { startDate, endDate, employeeId, clientId, poId, serviceTypeId, companyId } = filters;
 
-  const conditions = ['sp.company_id = :companyId'];
+  const conditions = ['(sp.company_id = :companyId OR sp.company_id IS NULL)'];
   replacements.companyId = companyId;
 
   replacements.startPeriodKey = periodKey(startDate);
@@ -1930,7 +1930,7 @@ async function getClientWiseCostAnalytics(hoursSource, roleId, companyId) {
      FROM service_po_monthly_budgets spmb
      INNER JOIN service_pos sp ON sp.id = spmb.service_po_id
      INNER JOIN clients c      ON c.id  = sp.client_id
-     WHERE sp.company_id = :companyId
+     WHERE (sp.company_id = :companyId OR sp.company_id IS NULL)
      GROUP BY c.id, c.client_name`,
     { replacements: { companyId }, type: QueryTypes.SELECT }
   );
@@ -1982,7 +1982,7 @@ async function getClientCategoryCostMatrix(hoursSource, roleId, companyId) {
      INNER JOIN clients c             ON c.id  = sp.client_id
      INNER JOIN service_types st      ON st.id = sp.service_type_id
      LEFT  JOIN service_categories sc ON sc.id = st.service_category_id
-     WHERE sp.company_id = :companyId
+     WHERE (sp.company_id = :companyId OR sp.company_id IS NULL)
      GROUP BY c.id, c.client_name, category_name
      ORDER BY c.client_name, category_name`,
     { replacements: { companyId }, type: QueryTypes.SELECT }
@@ -2128,7 +2128,7 @@ async function getProjectWiseAnalytics(filters) {
 async function getBudgetVsBilled(filters) {
   const { startDate, endDate, clientId, poId, serviceTypeId, companyId } = filters;
   const replacements = { companyId };
-  const conditions = ['sp.company_id = :companyId', "(cbm.id IS NULL OR cbm.status = 'active')"];
+  const conditions = ['(sp.company_id = :companyId OR sp.company_id IS NULL)', "(cbm.id IS NULL OR cbm.status = 'active')"];
 
   replacements.startPeriodKey = periodKey(startDate);
   replacements.endPeriodKey = periodKey(endDate);

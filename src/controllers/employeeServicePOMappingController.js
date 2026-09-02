@@ -1,7 +1,6 @@
 'use strict';
 
 const employeeServicePOMappingService = require('../services/employeeServicePOMappingService');
-const companyAccessControlService = require('../services/companyAccessControlService');
 const { sendSuccess, sendCreated, sendError, sendNotFound } = require('../utils/response');
 
 /**
@@ -10,22 +9,38 @@ const { sendSuccess, sendCreated, sendError, sendNotFound } = require('../utils/
  */
 
 /**
- * Resolve the caller's company scope from server-verified req fields only
- * (never body/query) — a plain companyId for a BU-scoped actor, or the
- * resolved array of owned Company ids for a company-less Admin/Entity
- * Admin (companyAccessControlService.resolveActorCompanyScope). This is
- * the fix for the cross-tenant mapping IDOR: every handler below used to
- * pass raw `req.companyId` (undefined for Admin/Entity Admin) straight into
- * the service/repository layer.
+ * Resolve the caller's authorized scope for an Employee-ServicePO mapping
+ * write (assign/remove/activate/deactivate) from server-verified req fields
+ * only (never body/query) — for Admin/Entity Admin (company-less), the
+ * resolved array of owned Company ids (unchanged); for every BU-scoped rank
+ * (BU Admin/Service PO Admin/Delivery Head/etc), the caller's OWNING ADMIN's
+ * FULL multi-BU scope (employeeServicePOMappingService.
+ * resolveEmployeeMappingScope) — NOT just the single currently-selected
+ * X-Company-Id.
+ *
+ * This must match the scope getEmployeeOptionsForServicePO()/
+ * getServicePOOptionsForEmployee() already expose on the "Map Employees" /
+ * "Manage Service PO Mapping" screens (their own doc comments: a BU Admin
+ * managing multiple Business Units under the same Admin sees Employees/
+ * Service POs across ALL of them, not just whichever ONE happens to be the
+ * active Global BU). Previously this used
+ * companyAccessControlService.resolveActorCompanyScope(), which narrows a
+ * BU-scoped actor to their single active req.companyId — so the moment such
+ * a caller picked an Employee or Service PO from a DIFFERENT Business Unit
+ * than their currently-selected one (exactly what the screen's own Entity/BU
+ * filter invites them to do), assign() 404'd with "Employee or Service PO
+ * not found" even though that same Employee/Service PO was legitimately
+ * listed as eligible.
  *
  * @param {import('express').Request} req
  * @returns {Promise<number|number[]>}
  */
 function resolveScope(req) {
-  return companyAccessControlService.resolveActorCompanyScope({
+  return employeeServicePOMappingService.resolveEmployeeMappingScope({
     companyId: req.companyId,
     hierarchyRank: req.hierarchyRank,
     employeeId: req.employeeId,
+    employeeBusinessUnits: (req.employeeBusinessUnits || []).map((bu) => bu.id),
   });
 }
 

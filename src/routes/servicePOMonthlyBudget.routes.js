@@ -12,6 +12,16 @@ const router = express.Router();
 
 const authenticate = require('../middlewares/auth');
 const resolveCompanyContextForCompanyLessActors = require('../middlewares/resolveCompanyContextForCompanyLessActors');
+// GET / (getOne) and GET /service-pos (listServicePOs) only: lets a
+// BU-scoped caller mapped to more than one Business Unit omit
+// X-Company-Id, aggregating across every BU they're mapped to, instead of
+// resolveCompany.js's 400 — see resolveReportCompanyScope.js. GET /current
+// and POST / (upsert) below keep the original chain (single req.companyId,
+// resolved for a company-less actor too via
+// resolveCompanyContextForCompanyLessActors) — deliberately NOT converted,
+// applied per-route now instead of at router.use() level so these two can
+// be singled out.
+const authenticateReadMultiBU = require('../middlewares/authenticateReadMultiBU');
 const authorize = require('../middlewares/authorize');
 const { validate } = require('../middlewares/validateRequest');
 const servicePOMonthlyBudgetController = require('../controllers/servicePOMonthlyBudgetController');
@@ -19,14 +29,6 @@ const {
   getServicePOMonthlyBudgetQuerySchema,
   upsertServicePOMonthlyBudgetSchema,
 } = require('../validations/servicePOMonthlyBudgetValidation');
-
-// ─── All routes require authentication ────────────────────────────────────────
-router.use(authenticate);
-// Admin/Entity Admin (ranks 2-3) have no single req.companyId from
-// authenticate alone — this module reads req.companyId directly, so resolve
-// ONE Business Unit context for them too (see
-// resolveCompanyContextForCompanyLessActors.js for the contract).
-router.use(resolveCompanyContextForCompanyLessActors);
 
 // ─── Current month (Service PO Manager screen) — before / to keep it explicit ─
 /**
@@ -56,6 +58,8 @@ router.use(resolveCompanyContextForCompanyLessActors);
  */
 router.get(
   '/current',
+  authenticate,
+  resolveCompanyContextForCompanyLessActors,
   servicePOMonthlyBudgetController.getCurrentMonth
 );
 
@@ -85,6 +89,7 @@ router.get(
  */
 router.get(
   '/service-pos',
+  authenticateReadMultiBU,
   servicePOMonthlyBudgetController.listServicePOs
 );
 
@@ -144,6 +149,7 @@ router.get(
  */
 router.get(
   '/',
+  authenticateReadMultiBU,
   validate(getServicePOMonthlyBudgetQuerySchema, 'query'),
   servicePOMonthlyBudgetController.getOne
 );
@@ -196,6 +202,8 @@ router.get(
  */
 router.post(
   '/',
+  authenticate,
+  resolveCompanyContextForCompanyLessActors,
   authorize('servicepo.manage_future_budget'),
   validate(upsertServicePOMonthlyBudgetSchema),
   servicePOMonthlyBudgetController.upsert

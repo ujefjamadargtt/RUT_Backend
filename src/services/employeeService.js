@@ -215,6 +215,36 @@ async function attachRoleAndBusinessUnitInfo(employees) {
 }
 
 /**
+ * Attach active Business Unit mappings to lightweight employee list results.
+ * Uses the same employee_business_units read path as the Role & BU mapping
+ * screen, keeping list data aligned with saved mapping records.
+ *
+ * @param {object[]} employees - plain objects, each with an `id`
+ * @returns {Promise<object[]>}
+ */
+async function attachBusinessUnitInfo(employees) {
+  if (employees.length === 0) return employees;
+
+  const grants = await employeeBusinessUnitRepository.findBusinessUnitsByEmployeeIds(
+    employees.map((employee) => employee.id)
+  );
+  const businessUnitsByEmployee = new Map();
+  grants.forEach((grant) => {
+    if (!businessUnitsByEmployee.has(grant.employee_id)) businessUnitsByEmployee.set(grant.employee_id, []);
+    businessUnitsByEmployee.get(grant.employee_id).push({ id: grant.id, name: grant.name });
+  });
+
+  return employees.map((employee) => {
+    const businessUnits = businessUnitsByEmployee.get(employee.id) || [];
+    return {
+      ...employee,
+      business_unit_ids: businessUnits.map((businessUnit) => businessUnit.id),
+      business_units: businessUnits,
+    };
+  });
+}
+
+/**
  * Return a paginated, filtered, sorted employee list — scoped to whatever
  * Employees `authContext`'s caller is authorized to see (see
  * employeeAccessControlService.resolveEmployeeAccessWhere): an Employee
@@ -304,7 +334,7 @@ const getAll = async (query = {}, authContext) => {
   const { rows, count } = await employeeRepository.findAll(filters, { limit, offset }, sort);
   const meta = getPaginationMeta(count, page, limit);
 
-  const data = await attachManagers(rows.map(toPlain));
+  const data = await attachBusinessUnitInfo(await attachManagers(rows.map(toPlain)));
 
   return { data, meta };
 };
@@ -458,7 +488,13 @@ const getBusinessUnits = async (id, authContext) => {
   const targetHierarchyRank = ranks.length > 0 ? Math.min(...ranks) : null;
 
   if (targetHierarchyRank === 2 || targetHierarchyRank === 3) {
-    const ownedCompanyIds = await companyAccessControlService.resolveOwnedCompanyIds(targetHierarchyRank, employee.id);
+    // Use the creator-side ownership resolution (not the read-scope resolver)
+    // so the display shows Companies this Admin/Entity Admin actually set up,
+    // not every Company on the platform. resolveCompanyIdsOwnedByCreator uses
+    // findIdsOwnedByAdmin for rank-2-like creators, which is the right
+    // attribution here — "what did this employee help create" rather than
+    // "what may they read."
+    const ownedCompanyIds = await companyAccessControlService.resolveCompanyIdsOwnedByCreator(employee.id);
     if (ownedCompanyIds.length > 0) {
       const ownedCompanies = await Company.findAll({
         where: { id: { [Op.in]: ownedCompanyIds }, is_deleted: false },
@@ -984,10 +1020,11 @@ const deleteEmployee = async (id, userId, ipAddress = null, authContext) => {
  * @returns {Promise<Employee[]>}
  * @throws {{ statusCode: 404 }} servicePOId given but not found in the caller's tenant scope
  */
-const getActiveEmployees = async (authContext, servicePOId) => {
+const getActiveEmployees = async (authContext, servicePOId, businessUnitId = null) => {
   if (!servicePOId) {
     const accessWhere = await employeeAccessControlService.resolveEmployeeAccessWhere(authContext);
-    return employeeRepository.getActiveEmployees(authContext.companyId, accessWhere);
+    const employees = await employeeRepository.getActiveEmployees(authContext.companyId, accessWhere, businessUnitId);
+    return attachBusinessUnitInfo(employees.map(toPlain));
   }
 
   // resolveEmployeeMappingScope() (not resolveActorCompanyScope()) — a
@@ -1009,7 +1046,8 @@ const getActiveEmployees = async (authContext, servicePOId) => {
   // comment in employeeServicePOMappingService.js.
   const { companyId: employeeScopeId, accessWhere: employeeAccessWhere } =
     await employeeServicePOMappingService.resolveEmployeeMappingAccessScope(authContext);
-  return employeeRepository.getActiveEmployees(employeeScopeId, employeeAccessWhere);
+  const employees = await employeeRepository.getActiveEmployees(employeeScopeId, employeeAccessWhere, businessUnitId);
+  return attachBusinessUnitInfo(employees.map(toPlain));
 };
 
 /**

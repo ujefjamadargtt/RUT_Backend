@@ -18,11 +18,12 @@ const entityRepository = require('../repositories/entityRepository');
  * this stops it from having to be independently re-fixed a third time.
  *
  * - Admin (rank 2): every Company under an Entity they own, transitively —
- *   via Entity Admins they directly created (entityRepository.
- *   findIdsOwnedByAdmin, the same resolution requireAdmin.js already uses
- *   for Company/Entity Master).
+ *   via Entities they created directly (entities.created_by = adminEmployeeId)
+ *   OR via Entity Admins they created (entities.entity_admin_employee_id ->
+ *   employees.created_by = adminEmployeeId). See
+ *   entityRepository.findIdsOwnedByAdmin for the exact query.
  * - Entity Admin (rank 3): every Company under an Entity THEY directly own
- *   (entities.entity_admin_employee_id = their own id).
+ *   (entities.entity_admin_employee_id = their own employeeId).
  * - Any other rank: not applicable — returns `null` (that actor has their
  *   own single `req.companyId` instead; callers should use that, not this).
  *
@@ -133,14 +134,37 @@ async function resolveActorCompanyScope({ companyId, hierarchyRank, employeeId }
  * to resolveActorCompanyScope() — a BU-scoped actor's own records always
  * carry a real company_id, this only matters for a company-less actor).
  *
- * @param {{ companyId: number|null, hierarchyRank: number|null, employeeId: number|null }} authContext
+ * When a pre-resolved array arrives (from resolveReportCompanyScope via the
+ * controller's req.companyIds), a company-less actor (rank 1-3) still needs
+ * the `{ ownedCompanyIds, createdBy }` object shape so the repository also
+ * surfaces their own BU-less records. BU-scoped actors (rank >= 4) never
+ * create BU-less records, so the plain array is correct for them.
+ *
+ * @param {{ companyId: number|number[]|null, hierarchyRank: number|null, employeeId: number|null, selectedCompanyId?: number|null }} authContext
  * @returns {Promise<number|{ ownedCompanyIds: number[], createdBy: number|null }>}
  *   a plain companyId for a BU-scoped actor, or an object for a
  *   company-less actor — pass straight into the repository's
  *   companyScope()-equivalent, which must handle this object shape (see
  *   clientRepository.js/projectRepository.js's companyScope()).
  */
-async function resolveActorRecordAccessScope({ companyId, hierarchyRank, employeeId }) {
+async function resolveActorRecordAccessScope({ companyId, hierarchyRank, employeeId, selectedCompanyId = null }) {
+  // Array arrives when the controller passes req.companyIds (pre-resolved by
+  // resolveReportCompanyScope). For a company-less actor (ranks 1-3) we must
+  // still wrap it in the { ownedCompanyIds, createdBy } shape so the
+  // repository's companyScope() also matches company_id IS NULL rows the
+  // actor created — UNLESS a specific BU was explicitly requested via
+  // company_id query param or X-Company-Id header, in which case the caller
+  // only wants that BU's records and BU-less records are correctly excluded.
+  // BU-scoped actors (rank >= 4) never produce BU-less rows, so the plain
+  // array is always correct for them.
+  if (Array.isArray(companyId)) {
+    const isCompanyLess = Number.isInteger(hierarchyRank) && hierarchyRank <= 3;
+    if (isCompanyLess && !selectedCompanyId) {
+      return { ownedCompanyIds: companyId, createdBy: employeeId };
+    }
+    return companyId;
+  }
+
   if (companyId != null) {
     return companyId;
   }
@@ -335,6 +359,146 @@ async function resolveActorCompanyScopeForSelectedBU(authContext, headerCompanyI
 }
 
 /**
+ * Resolve the FULL array of Company ids a caller may view `/reports/*`
+ * (and `/management-reports/*`, excluding bu-performance-scorecard, which
+ * has its own separate req.entityIds-based mechanism) data for — the "no
+ * X-Company-Id -> role reach, not nothing" contract, mirroring
+ * resolveActorCompanyScopeForSelectedBU()'s pattern but (a) always returns
+ * an ARRAY (a one-element array for a single-BU actor too, so every report
+ * repository can use one `IN (:companyIds)` code path regardless of actor
+ * type) and (b) also covers Platform Admin (rank 1), which
+ * resolveOwnedCompanyIds()/resolveActorCompanyScopeForSelectedBU()
+ * deliberately do not (Platform Admin sits above Entities, not under one —
+ * "every BU" for Platform Admin means every non-deleted Company on the
+ * whole platform, not an owned-Entity subset).
+ *
+ * Callers of this function must NOT run resolveCompany.js first — that
+ * middleware 400s a BU-scoped actor mapped to more than one Business Unit
+ * who omits X-Company-Id, which is exactly the case this function exists to
+ * support (see resolveReportCompanyScope.js's own doc comment). Use
+ * authenticateIdentity instead, so `req.companyId` is never set and
+ * `req.employeeBusinessUnits` (the actor's own active BU-mapping rows) is
+ * passed in here directly.
+ *
+ * `requestedCompanyId` may come from either the `X-Company-Id` header or a
+ * `company_id` query param (the caller resolves precedence between the two
+ * — reports.routes.js's middleware passes the query param first, falling
+ * back to the header, per the /reports/* convention). Same entitlement rule
+ * either way: must be one of the actor's reachable ids, or reject 403.
+ *
+ * - BU-scoped actor (rank >= 4, e.g. BU Head/BU Admin and below): every
+ *   Business Unit in `authContext.employeeBusinessUnits` — 0 mapped BUs is
+ *   a 403 (NO_BUSINESS_UNIT), matching resolveCompany.js's own pre-existing
+ *   behavior for that case. `requestedCompanyId` narrows to that one BU if
+ *   it's one of theirs, otherwise 403 — omitting it aggregates across every
+ *   BU they're mapped to, never just one and never every BU on the platform.
+ * - Platform Admin (rank 1): every non-deleted Company in the system.
+ * - Admin (rank 2) / Entity Admin (rank 3): every Company under their own
+ *   owned Entities (resolveOwnedCompanyIds) — possibly empty (owns nothing
+ *   yet), never "every Company."
+ *
+ * @param {{ hierarchyRank: number|null, employeeId: number|null, employeeBusinessUnits: Array<{id: number}> }} authContext
+ * @param {number|null} requestedCompanyId - parsed X-Company-Id header or company_id query param, if any
+ * @returns {Promise<number[]>}
+ * @throws {Error} 403 if requestedCompanyId isn't in the actor's reachable set,
+ *   or 403 NO_BUSINESS_UNIT if a BU-scoped actor has no active BU mapping at all
+ */
+async function resolveReportCompanyScope(authContext, requestedCompanyId) {
+  const { hierarchyRank, employeeId, employeeBusinessUnits } = authContext;
+
+  let reachableCompanyIds;
+  if (hierarchyRank === 1) {
+    const companies = await Company.findAll({ where: { is_deleted: false }, attributes: ['id'] });
+    reachableCompanyIds = companies.map((c) => c.id);
+  } else if (hierarchyRank === 2 || hierarchyRank === 3) {
+    reachableCompanyIds = (await resolveOwnedCompanyIds(hierarchyRank, employeeId)) || [];
+  } else {
+    const businessUnits = employeeBusinessUnits || [];
+    if (businessUnits.length === 0) {
+      const err = new Error('Access denied: no Business Unit is assigned to your account.');
+      err.statusCode = 403;
+      err.code = 'NO_BUSINESS_UNIT';
+      throw err;
+    }
+    reachableCompanyIds = businessUnits.map((bu) => bu.id);
+  }
+
+  if (requestedCompanyId == null) {
+    return reachableCompanyIds;
+  }
+
+  if (!reachableCompanyIds.includes(requestedCompanyId)) {
+    const err = new Error('Access denied: the selected Business Unit is not assigned to your account.');
+    err.statusCode = 403;
+    err.code = 'BU_NOT_MAPPED';
+    throw err;
+  }
+
+  return [requestedCompanyId];
+}
+
+/**
+ * Resolve + validate the single explicit Business Unit id a WRITE/import
+ * flow must stamp its rows with (Monthly Costs Excel import) — unlike
+ * resolveActorCompanyScopeForSelectedBU()/resolveReportCompanyScope() (which
+ * fall back to a role-reach ARRAY when no BU is specified, for read-only
+ * multi-BU reports), a write flow that creates/updates real rows needs
+ * exactly ONE concrete Business Unit, explicitly confirmed by the caller
+ * every time — so this REQUIRES `bodyBusinessUnitId` whenever the caller has
+ * any reachable Business Unit at all (400 if missing), and validates it
+ * against that caller's own reach (403 if not theirs). Never silently
+ * defaults or falls back to "every reachable BU."
+ *
+ * - BU-scoped actor (`authContext.companyId` already resolved by
+ *   resolveCompany.js from X-Company-Id, itself already validated against
+ *   that actor's own mapped Business Units): their reach is exactly that one
+ *   BU — `bodyBusinessUnitId` must equal it (403 otherwise). The caller is
+ *   expected to always send the same id in both places (this is what the
+ *   Monthly Cost Import screen does), so this is a consistency check, not a
+ *   second independent authorization decision.
+ * - Platform Admin (rank 1): every non-deleted Company in the system.
+ * - Admin (rank 2) / Entity Admin (rank 3): every Company under their own
+ *   owned Entities (resolveOwnedCompanyIds).
+ *
+ * @param {{ companyId: number|null, hierarchyRank: number|null, employeeId: number|null }} authContext
+ * @param {number|null} bodyBusinessUnitId - parsed business_unit_id from the multipart body, if any
+ * @returns {Promise<number>}
+ * @throws {Error} 403 if the caller has no reachable Business Unit, or bodyBusinessUnitId isn't in their reach; 400 if required and missing
+ */
+async function resolveImportBusinessUnitId(authContext, bodyBusinessUnitId) {
+  let reachableCompanyIds;
+
+  if (authContext.companyId != null) {
+    reachableCompanyIds = [authContext.companyId];
+  } else if (authContext.hierarchyRank === 1) {
+    const companies = await Company.findAll({ where: { is_deleted: false }, attributes: ['id'] });
+    reachableCompanyIds = companies.map((c) => c.id);
+  } else {
+    reachableCompanyIds = (await resolveOwnedCompanyIds(authContext.hierarchyRank, authContext.employeeId)) || [];
+  }
+
+  if (reachableCompanyIds.length === 0) {
+    const err = new Error('Access denied: no Business Unit is available for cost import.');
+    err.statusCode = 403;
+    throw err;
+  }
+
+  if (bodyBusinessUnitId == null) {
+    const err = new Error('business_unit_id is required to import Monthly Costs.');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (!reachableCompanyIds.includes(bodyBusinessUnitId)) {
+    const err = new Error(`Access denied: Business Unit #${bodyBusinessUnitId} is not one of your own Business Units.`);
+    err.statusCode = 403;
+    throw err;
+  }
+
+  return bodyBusinessUnitId;
+}
+
+/**
  * Resolve the Admin (hierarchy_rank 2) employeeId that ultimately owns a
  * given Company (Business Unit) — walks Company -> Entity ->
  * Entity.created_by. Entity Master management is Admin-only (see
@@ -440,6 +604,62 @@ async function resolveAdminScopeForBusinessUnits(ownBusinessUnitIds) {
   return companyIds;
 }
 
+/**
+ * Unified BU resolution for CREATE paths — the single place the
+ * "multi-BU BU Admin body-company_id override" rule lives.
+ *
+ * Behaviour by actor type:
+ *
+ * BU-scoped actor (BU Admin and below — req.companyId is set):
+ *   - Body sends a `company_id` that is one of their mapped BUs:
+ *     → use the body value (Darshan selects "hfds" from the dropdown,
+ *       even though "datai44" is in the X-Company-Id header).
+ *   - Body sends a `company_id` NOT in their mapped BUs: → 403.
+ *   - Body omits `company_id` (or sends the same as the header BU):
+ *     → use req.companyId (the header / single-BU actor default).
+ *
+ * Company-less actor (Admin/Entity Admin — req.companyId is undefined/null):
+ *   - `required=true` (default): bodyCompanyId must be present and must
+ *     be one of their owned companies (400 if absent, 403 if not owned).
+ *     Delegates to resolveCreateCompanyId.
+ *   - `required=false`: bodyCompanyId is optional; absent → NULL (BU-less).
+ *     Delegates to resolveOptionalCreateCompanyId.
+ *
+ * @param {object} req                 - Express request with companyId, hierarchyRank,
+ *                                       employeeId, employeeBusinessUnits populated
+ * @param {number|null|undefined} bodyCompanyId - company_id from the validated request body
+ * @param {object}  [options]
+ * @param {boolean} [options.required=true] - whether BU is mandatory for a company-less actor
+ * @param {string}  [options.resourceLabel='this record'] - label for 400/403 error messages
+ * @returns {Promise<number|null>}
+ * @throws {Error} 400 / 403 if the BU is invalid for this actor
+ */
+async function resolveCreateCompanyIdForActor(req, bodyCompanyId, { required = true, resourceLabel = 'this record' } = {}) {
+  if (req.companyId != null) {
+    // BU-scoped actor.
+    if (bodyCompanyId != null && bodyCompanyId !== req.companyId) {
+      // The frontend explicitly chose a BU different from the active header BU.
+      // Validate it is within this actor's own mapped Business Units.
+      const mappedBuIds = (req.employeeBusinessUnits || []).map((bu) => bu.id);
+      if (!mappedBuIds.includes(bodyCompanyId)) {
+        const err = new Error(`Business Unit #${bodyCompanyId} is not one of your mapped Business Units.`);
+        err.statusCode = 403;
+        throw err;
+      }
+      return bodyCompanyId;
+    }
+    // No body override, or body matches the header BU → header BU wins.
+    return req.companyId;
+  }
+
+  // Company-less actor (Admin / Entity Admin).
+  const authContext = { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId };
+  if (required) {
+    return resolveCreateCompanyId(authContext, bodyCompanyId ?? null, resourceLabel);
+  }
+  return resolveOptionalCreateCompanyId(authContext, bodyCompanyId ?? null);
+}
+
 module.exports = {
   resolveOwnedCompanyIds,
   resolveCompanyIdsOwnedByCreator,
@@ -447,8 +667,11 @@ module.exports = {
   resolveActorRecordAccessScope,
   resolveCreateCompanyId,
   resolveOptionalCreateCompanyId,
+  resolveCreateCompanyIdForActor,
   resolveSingleCompanyIdForCompanyLessActor,
   resolveActorCompanyScopeForSelectedBU,
+  resolveReportCompanyScope,
+  resolveImportBusinessUnitId,
   resolveOwningAdminIdForCompany,
   resolveAdminOwnershipForBusinessUnits,
   resolveAdminScopeForBusinessUnits,

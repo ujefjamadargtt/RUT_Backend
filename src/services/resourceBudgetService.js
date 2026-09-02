@@ -199,7 +199,7 @@ const create = async (data, userId, req) => {
     throw err;
   }
 
-  const currentTotal = await resourceBudgetRepository.sumActiveHoursForEmployeeMonth(emp_id, month, year, companyId);
+  const currentTotal = await resourceBudgetRepository.sumActiveHoursForEmployeeMonth(emp_id, month, year);
   const newTotal = round2(currentTotal + hours);
   if (newTotal > MAX_MONTHLY_HOURS) {
     const err = new Error(overCapMessage(newTotal));
@@ -255,7 +255,6 @@ const update = async (id, data, userId, req) => {
     existing.emp_id,
     existing.month,
     existing.year,
-    companyId,
     { excludeId: id }
   );
   const newTotal = round2(currentTotal + hours);
@@ -385,7 +384,6 @@ const bulkUpsert = async (data, userId, req) => {
       item.emp_id,
       month,
       year,
-      companyId,
       { excludeServicePOId: service_po_id }
     );
     const newTotal = round2(baseTotal + hours);

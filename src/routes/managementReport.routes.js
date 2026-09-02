@@ -4,16 +4,17 @@ const express = require('express');
 const router = express.Router();
 
 const authenticateBase = require('../middlewares/auth');
-const resolveCompanyContextForCompanyLessActors = require('../middlewares/resolveCompanyContextForCompanyLessActors');
-// Admin/Entity Admin (ranks 2-3) have no single req.companyId from
-// authenticateBase alone — 9 of these 10 reports read req.companyId
-// directly, so `authenticate` resolves ONE Business Unit context for them
-// too (see resolveCompanyContextForCompanyLessActors.js for the contract).
-// The 10th report, bu-performance-scorecard, is explicitly a cross-BU view
-// scoped by req.entityIds instead — it uses authenticateBase directly below
-// so this doesn't force a single-BU selection onto the one report designed
-// to show every owned BU at once.
-const authenticate = [authenticateBase, resolveCompanyContextForCompanyLessActors];
+const resolveReportCompanyScope = require('../middlewares/resolveReportCompanyScope');
+// The 9 reports on the "no X-Company-Id -> role reach across every BU the
+// caller is mapped to" convention (req.companyIds, an array) — see
+// resolveReportCompanyScope.js. Deliberately authenticateIdentity, not the
+// full authenticateBase default export: resolveCompany.js (its tail) 400s a
+// BU-scoped caller mapped to more than one Business Unit who omits the
+// header, before this middleware would ever get a chance to run.
+// bu-performance-scorecard keeps its own separate req.entityIds mechanism
+// below (restricted to Entity Admin/Admin, who are exempt from
+// resolveCompany.js's BU logic entirely) — unaffected either way.
+const authenticateMultiBU = [authenticateBase.authenticateIdentity, resolveReportCompanyScope];
 const requireEntityAdminOrAdmin = require('../middlewares/requireEntityAdminOrAdmin');
 const managementReportController = require('../controllers/managementReportController');
 const { heavyReportLimiter } = require('../middlewares/rateLimiters');
@@ -80,7 +81,7 @@ router.use(heavyReportLimiter);
  *       401: { description: Unauthorized }
  *       422: { description: month and year are required }
  */
-router.get('/service-po-profitability', authenticate, managementReportController.getServicePOProfitability);
+router.get('/service-po-profitability', authenticateMultiBU, managementReportController.getServicePOProfitability);
 
 /**
  * @swagger
@@ -121,7 +122,7 @@ router.get('/service-po-profitability', authenticate, managementReportController
  *       401: { description: Unauthorized }
  *       422: { description: month and year are required }
  */
-router.get('/budgeted-margin-forecast', authenticate, managementReportController.getBudgetedMarginForecast);
+router.get('/budgeted-margin-forecast', authenticateMultiBU, managementReportController.getBudgetedMarginForecast);
 
 /**
  * @swagger
@@ -163,7 +164,7 @@ router.get('/budgeted-margin-forecast', authenticate, managementReportController
  *       401: { description: Unauthorized }
  *       422: { description: month and year are required }
  */
-router.get('/resource-staffing-plan-accuracy', authenticate, managementReportController.getResourceStaffingPlanAccuracy);
+router.get('/resource-staffing-plan-accuracy', authenticateMultiBU, managementReportController.getResourceStaffingPlanAccuracy);
 
 /**
  * @swagger
@@ -195,7 +196,7 @@ router.get('/resource-staffing-plan-accuracy', authenticate, managementReportCon
  *       401: { description: Unauthorized }
  *       422: { description: month and year are required }
  */
-router.get('/client-profitability-concentration', authenticate, managementReportController.getClientProfitabilityConcentration);
+router.get('/client-profitability-concentration', authenticateMultiBU, managementReportController.getClientProfitabilityConcentration);
 
 /**
  * @swagger
@@ -277,7 +278,7 @@ router.get('/bu-performance-scorecard', authenticateBase, requireEntityAdminOrAd
  *       401: { description: Unauthorized }
  *       422: { description: month and year are required }
  */
-router.get('/employee-capacity-forecast', authenticate, managementReportController.getEmployeeCapacityForecast);
+router.get('/employee-capacity-forecast', authenticateMultiBU, managementReportController.getEmployeeCapacityForecast);
 
 /**
  * @swagger
@@ -313,7 +314,7 @@ router.get('/employee-capacity-forecast', authenticate, managementReportControll
  *       200: { description: Paginated timeline/budget risk records }
  *       401: { description: Unauthorized }
  */
-router.get('/service-po-timeline-risk', authenticate, managementReportController.getServicePOTimelineRisk);
+router.get('/service-po-timeline-risk', authenticateMultiBU, managementReportController.getServicePOTimelineRisk);
 
 /**
  * @swagger
@@ -348,7 +349,7 @@ router.get('/service-po-timeline-risk', authenticate, managementReportController
  *       401: { description: Unauthorized }
  *       422: { description: month and year are required }
  */
-router.get('/delivery-head-performance', authenticate, managementReportController.getDeliveryHeadPerformance);
+router.get('/delivery-head-performance', authenticateMultiBU, managementReportController.getDeliveryHeadPerformance);
 
 /**
  * @swagger
@@ -397,7 +398,7 @@ router.get('/delivery-head-performance', authenticate, managementReportControlle
  *       401: { description: Unauthorized }
  *       422: { description: A month/year range must be provided }
  */
-router.get('/invoice-realization-trend', authenticate, managementReportController.getInvoiceRealizationTrend);
+router.get('/invoice-realization-trend', authenticateMultiBU, managementReportController.getInvoiceRealizationTrend);
 
 /**
  * @swagger
@@ -433,6 +434,6 @@ router.get('/invoice-realization-trend', authenticate, managementReportControlle
  *       401: { description: Unauthorized }
  *       422: { description: month and year are required }
  */
-router.get('/service-line-business-mix', authenticate, managementReportController.getServiceLineBusinessMix);
+router.get('/service-line-business-mix', authenticateMultiBU, managementReportController.getServiceLineBusinessMix);
 
 module.exports = router;

@@ -1,5 +1,6 @@
 'use strict';
 
+const { Op } = require('sequelize');
 const { ManagerServicePOMapping } = require('../models');
 
 /**
@@ -25,15 +26,20 @@ const findAllMappingsInCompany = async (companyId) => {
 
 /**
  * All active grants for one Manager — the Service POs available to them
- * when assigning Employees.
+ * when assigning Employees. Also the source for
+ * servicePOMonthlyBudgetService.getAllowedServicePOIds() (GET /service-po-
+ * monthly-budgets, /service-po-monthly-budgets/service-pos), so companyId
+ * may be an array here too — every BU a BU-scoped caller is mapped to when
+ * X-Company-Id is omitted (see resolveReportCompanyScope.js).
  *
  * @param {number} managerUserId
- * @param {number} companyId
+ * @param {number|number[]} companyId
  * @returns {Promise<ManagerServicePOMapping[]>}
  */
 const findByManager = async (managerUserId, companyId) => {
+  const companyWhere = Array.isArray(companyId) ? { [Op.in]: companyId } : companyId;
   return ManagerServicePOMapping.findAll({
-    where: { manager_user_id: managerUserId, company_id: companyId, status: 'active' },
+    where: { manager_user_id: managerUserId, company_id: companyWhere, status: 'active' },
   });
 };
 

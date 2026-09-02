@@ -12,6 +12,12 @@ const router = express.Router();
 
 const serviceTypeController = require('../controllers/serviceTypeController');
 const authenticate = require('../middlewares/auth');
+// GET-only: lets a BU-scoped caller mapped to more than one Business Unit
+// omit X-Company-Id instead of hitting resolveCompany.js's 400 — see
+// resolveReportCompanyScope.js. Writes below keep the full `authenticate`
+// chain unchanged.
+const resolveReportCompanyScope = require('../middlewares/resolveReportCompanyScope');
+const authenticateReadMultiBU = [authenticate.authenticateIdentity, resolveReportCompanyScope];
 const { validate } = require('../middlewares/validateRequest');
 const Joi = require('joi');
 
@@ -85,7 +91,7 @@ const listServiceTypeQuerySchema = Joi.object({
  */
 router.get(
   '/',
-  authenticate,
+  authenticateReadMultiBU,
   validate(listServiceTypeQuerySchema, 'query'),
   serviceTypeController.getAllServiceTypes
 );
@@ -111,7 +117,7 @@ router.get(
  */
 router.get(
   '/:id',
-  authenticate,
+  authenticateReadMultiBU,
   serviceTypeController.getServiceTypeById
 );
 

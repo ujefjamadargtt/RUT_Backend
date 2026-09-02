@@ -2,7 +2,7 @@
 
 const projectRepository = require('../repositories/projectRepository');
 const clientRepository = require('../repositories/clientRepository');
-const { resolveActorCompanyScope, resolveOptionalCreateCompanyId } = require('./companyAccessControlService');
+const { resolveActorCompanyScope, resolveCreateCompanyIdForActor } = require('./companyAccessControlService');
 const { generateProjectCode } = require('../helpers/codeGenerator');
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
@@ -90,6 +90,19 @@ const getById = async (id, authContext) => {
  * for existence, active status, and same-company membership, the same
  * pattern every other cross-entity FK in this codebase follows.
  *
+ * Business Unit resolution for a company-less actor (Admin/Entity Admin):
+ *   1. `company_id` in the request body (explicit picker on the frontend),
+ *      validated to be one of the actor's own owned Companies.
+ *   2. Neither present → BU assignment is deferred, same as Client — the
+ *      Project is created with `company_id` NULL and can be mapped to a
+ *      Business Unit later. This is what lets a company-less actor create a
+ *      Project under a BU-less Client (the two must be able to start out in
+ *      the same "no BU yet" state, or a BU-less Client would be permanently
+ *      unable to have any Project at all).
+ * A BU-scoped actor's own `req.companyId` always wins — body is ignored for
+ * them entirely (their own mapped Business Units may still override via
+ * resolveCreateCompanyIdForActor's body-company_id branch, same as Client).
+ *
  * @param {object} data   - Validated body (client_id, project_name, project_description, status, [project_code], [company_id])
  * @param {number} userId
  * @param {object} req
@@ -97,8 +110,9 @@ const getById = async (id, authContext) => {
  */
 const create = async (data, userId, req) => {
   const { company_id: bodyCompanyId, ...fields } = data;
+
+  const companyId = await resolveCreateCompanyIdForActor(req, bodyCompanyId != null ? bodyCompanyId : null, { required: false, resourceLabel: 'a Project' });
   const authContext = { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId };
-  const companyId = await resolveOptionalCreateCompanyId(authContext, bodyCompanyId);
   data = fields;
 
   // Client lookup: when this Project is being created WITH a Business

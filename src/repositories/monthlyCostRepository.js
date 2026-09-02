@@ -50,6 +50,22 @@ const normalizeMonthlyCostPayload = (data = {}) => {
   return payload;
 };
 
+/**
+ * `company_id` WHERE fragment — array-aware for GET /monthly-costs
+ * (findAll), which now accepts req.companyIds (every BU a BU-scoped caller
+ * is mapped to when X-Company-Id is omitted — see
+ * resolveReportCompanyScope.js). Write paths (create/update/delete,
+ * getById) keep passing a plain scalar companyId, unaffected.
+ * @param {number|number[]} companyId
+ * @returns {object}
+ */
+function companyScope(companyId) {
+  if (Array.isArray(companyId)) {
+    return { company_id: { [Op.in]: companyId } };
+  }
+  return { company_id: companyId };
+}
+
 // ─── Standard employee include ─────────────────────────────────────────────────
 const employeeInclude = {
   model: Employee,
@@ -73,7 +89,7 @@ const employeeInclude = {
  */
 const findAll = async (filters = {}, pagination = {}, sort = {}) => {
   try {
-    const where = { company_id: filters.companyId };
+    const where = { ...companyScope(filters.companyId) };
 
     if (filters.year) {
       where.month_year = { [Op.like]: `${parseInt(filters.year, 10)}-%` };

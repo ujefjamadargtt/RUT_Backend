@@ -140,7 +140,7 @@ async function getUnderstaffedActivePOs(limit = 10, companyId) {
      INNER JOIN clients c ON c.id = sp.client_id
      LEFT JOIN service_po_resources spr ON spr.service_po_id = sp.id
      WHERE sp.status = 'in-progress' AND sp.is_deleted = false
-       AND sp.company_id = :companyId
+       AND (sp.company_id = :companyId OR sp.company_id IS NULL)
      GROUP BY sp.id, sp.service_po_name, c.client_name
      HAVING COUNT(spr.employee_id) < 3
      ORDER BY assigned_count ASC
@@ -233,7 +233,7 @@ async function getWeeklyResourceDigestData(companyId) {
     sequelize.query(
       `SELECT COUNT(*) AS count FROM service_pos
        WHERE status IN ('completed', 'closed') AND updated_at::date BETWEEN :startDate AND :endDate
-         AND company_id = :companyId`,
+         AND (company_id = :companyId OR company_id IS NULL)`,
       { replacements: { startDate, endDate, companyId }, type: QueryTypes.SELECT }
     ),
   ]);
@@ -271,7 +271,7 @@ async function getPoEndingAlertsData(companyId) {
      INNER JOIN clients c ON c.id = sp.client_id
      WHERE sp.status = 'in-progress' AND sp.is_deleted = false
        AND sp.end_date BETWEEN :today AND :in30
-       AND sp.company_id = :companyId
+       AND (sp.company_id = :companyId OR sp.company_id IS NULL)
      ORDER BY sp.end_date`,
     { replacements: { today, in30, companyId }, type: QueryTypes.SELECT }
   );
@@ -296,13 +296,17 @@ async function getPoEndingAlertsData(companyId) {
     const endingPoIds = endingPos.map((r) => r.service_po_id);
 
     const [assignments, endingAssignees] = await Promise.all([
+      // Deliberately NOT scoped to :companyId — this builds each employee's
+      // FULL active-assignment portfolio (any BU) so an employee still
+      // staffed on a Centralised or cross-BU-owned PO isn't wrongly counted
+      // as "becoming fully free" just because that other PO belongs to a
+      // different company_id than this alert run.
       sequelize.query(
         `SELECT spr.employee_id, spr.service_po_id
          FROM service_po_resources spr
          INNER JOIN service_pos sp ON sp.id = spr.service_po_id
-         WHERE sp.status = 'in-progress' AND sp.is_deleted = false
-           AND sp.company_id = :companyId`,
-        { replacements: { companyId }, type: QueryTypes.SELECT }
+         WHERE sp.status = 'in-progress' AND sp.is_deleted = false`,
+        { type: QueryTypes.SELECT }
       ),
       sequelize.query(
         `SELECT DISTINCT spr.employee_id, e.full_name, e.designation
@@ -600,7 +604,7 @@ async function getQuarterEndReviewData(companyId) {
     sequelize.query(
       `SELECT COUNT(*) AS count FROM service_pos
        WHERE status IN ('completed', 'closed') AND updated_at::date BETWEEN :start AND :end
-         AND company_id = :companyId`,
+         AND (company_id = :companyId OR company_id IS NULL)`,
       { replacements: { start, end, companyId }, type: QueryTypes.SELECT }
     ),
     sequelize.query(
@@ -648,7 +652,7 @@ async function getNewPoStaffingSuggestionData(servicePoId, companyId) {
      INNER JOIN clients c ON c.id = sp.client_id
      INNER JOIN service_types st ON st.id = sp.service_type_id
      LEFT JOIN service_categories sc ON sc.id = st.service_category_id
-     WHERE sp.id = :servicePoId AND sp.company_id = :companyId`,
+     WHERE sp.id = :servicePoId AND (sp.company_id = :companyId OR sp.company_id IS NULL)`,
     { replacements: { servicePoId, companyId }, type: QueryTypes.SELECT }
   );
 
@@ -683,8 +687,12 @@ async function getNewPoStaffingSuggestionData(servicePoId, companyId) {
   if (benchRows.length > 0) {
     candidateDetails = await sequelize.query(
       `SELECT id AS employee_id, full_name, designation, resource_description
-       FROM employees
-       WHERE id IN (:employeeIds) AND company_id = :companyId`,
+       FROM employees e
+       WHERE id IN (:employeeIds)
+         AND (e.company_id = :companyId OR EXISTS (
+           SELECT 1 FROM employee_business_units ebu
+           WHERE ebu.employee_id = e.id AND ebu.business_unit_id = :companyId AND ebu.status = 'active'
+         ))`,
       { replacements: { employeeIds, companyId }, type: QueryTypes.SELECT }
     );
   }

@@ -144,7 +144,15 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
   // used anywhere else in this function, so this never collides with the
   // `Op.or` key search may have just set above.
   if (businessUnitId) {
-    where[Op.and] = [await employeeScope(businessUnitId)];
+    // The explicit list filter must follow the mapping table, not the
+    // legacy employees.company_id column. This is the exact table updated by
+    // the Role & BU Mapping feature.
+    const buRows = await EmployeeBusinessUnit.findAll({
+      where: { business_unit_id: businessUnitId, status: 'active' },
+      attributes: ['employee_id'],
+      raw: true,
+    });
+    where[Op.and] = [{ id: { [Op.in]: buRows.map((row) => row.employee_id) } }];
   }
 
   return Employee.findAndCountAll({
@@ -288,11 +296,22 @@ const softDelete = async (id, updatedBy, companyId) => {
  * @param {object} [accessWhere]
  * @returns {Promise<Employee[]>}
  */
-const getActiveEmployees = async (companyId, accessWhere = null) => {
+const getActiveEmployees = async (companyId, accessWhere = null, businessUnitId = null) => {
+  const where = accessWhere
+    ? { [Op.and]: [{ status: 'active', is_deleted: false }, accessWhere] }
+    : { status: 'active', is_deleted: false, ...(await employeeScope(companyId)) };
+
+  if (businessUnitId) {
+    const buRows = await EmployeeBusinessUnit.findAll({
+      where: { business_unit_id: businessUnitId, status: 'active' },
+      attributes: ['employee_id'],
+      raw: true,
+    });
+    where[Op.and] = [...(where[Op.and] || []), { id: { [Op.in]: buRows.map((row) => row.employee_id) } }];
+  }
+
   return Employee.findAll({
-    where: accessWhere
-      ? { [Op.and]: [{ status: 'active', is_deleted: false }, accessWhere] }
-      : { status: 'active', is_deleted: false, ...(await employeeScope(companyId)) },
+    where,
     order: [['full_name', 'ASC']],
     attributes: [
       'id',

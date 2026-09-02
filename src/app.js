@@ -39,6 +39,7 @@ const resourceBudgetRoutes = require('./routes/resourceBudget.routes');
 const timesheetRoutes = require('./routes/timesheet.routes');
 const reportRoutes = require('./routes/report.routes');
 const managementReportRoutes = require('./routes/managementReport.routes');
+const tenantExportRoutes = require('./routes/tenantExport.routes');
 const dashboardRoutes = require('./routes/dashboard.routes');
 const notificationRoutes = require('./routes/notification.routes');
 const aiInsightRoutes = require('./routes/aiInsight.routes');
@@ -253,6 +254,7 @@ app.use(`${API_PREFIX}/reports`, reportRoutes);
 // Controller/Routes) — mounted at the same /reports base path; endpoint
 // paths are disjoint from report.routes.js so this is a safe co-mount.
 app.use(`${API_PREFIX}/reports`, managementReportRoutes);
+app.use(`${API_PREFIX}/reports`, tenantExportRoutes);
 app.use(`${API_PREFIX}/dashboard`, dashboardRoutes);
 app.use(`${API_PREFIX}/notifications`, notificationRoutes);
 app.use(`${API_PREFIX}/ai-insights`, aiInsightRoutes);

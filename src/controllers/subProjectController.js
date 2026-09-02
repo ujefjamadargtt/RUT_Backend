@@ -61,7 +61,7 @@ const getAll = [
   validate(listSubProjectsQuerySchema, 'query'),
   async (req, res) => {
     try {
-      const { data, meta } = await subProjectService.getAll(req.query, req.companyId);
+      const { data, meta } = await subProjectService.getAll(req.query, req.companyIds);
       return sendPaginated(res, data, meta, 'Sub-projects fetched successfully.');
     } catch (error) {
       logger.error('SubProjectController.getAll error', { error: error.message });
@@ -92,7 +92,7 @@ const getAll = [
  */
 const getById = async (req, res) => {
   try {
-    const subProject = await subProjectService.getById(req.params.id, req.companyId);
+    const subProject = await subProjectService.getById(req.params.id, req.companyIds);
     return sendSuccess(res, subProject, 'Sub-project fetched successfully.');
   } catch (error) {
     logger.error('SubProjectController.getById error', { id: req.params.id, error: error.message });
@@ -125,7 +125,7 @@ const getById = async (req, res) => {
  */
 const getByPO = async (req, res) => {
   try {
-    const subProjects = await subProjectService.getByPO(req.params.poId, req.companyId);
+    const subProjects = await subProjectService.getByPO(req.params.poId, req.companyIds);
     return sendSuccess(res, subProjects, 'Sub-projects for PO fetched successfully.');
   } catch (error) {
     logger.error('SubProjectController.getByPO error', { poId: req.params.poId, error: error.message });
