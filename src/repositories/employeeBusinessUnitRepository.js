@@ -72,6 +72,27 @@ const findBusinessUnitsByEmployeeIds = async (employeeIds) => {
 };
 
 /**
+ * Reverse of findIdsByEmployeeId() — every distinct Employee id with an
+ * ACTIVE grant to any of the given Business Units. Used to find the
+ * existing-Employee candidates for a newly-created Centralised Service PO
+ * (employeeServicePOMappingService.autoMapExistingEmployeesToCentralisedServicePO()
+ * — the mirror, in the other direction, of autoMapCentralisedServicePOs()'s
+ * own `EmployeeBusinessUnit.findAll({ business_unit_id, status: 'active' })`
+ * lookup in employeeRepository.getActiveEmployees()).
+ *
+ * @param {number[]} businessUnitIds
+ * @returns {Promise<number[]>}
+ */
+const findActiveEmployeeIdsByBusinessUnitIds = async (businessUnitIds) => {
+  if (!businessUnitIds || businessUnitIds.length === 0) return [];
+  const grants = await EmployeeBusinessUnit.findAll({
+    where: { business_unit_id: { [Op.in]: businessUnitIds }, status: 'active' },
+    attributes: ['employee_id'],
+  });
+  return [...new Set(grants.map((grant) => grant.employee_id))];
+};
+
+/**
  * @param {number} employeeId
  * @param {number} businessUnitId
  * @returns {Promise<boolean>}
@@ -123,6 +144,7 @@ module.exports = {
   findBusinessUnitsByEmployeeId,
   findIdsByEmployeeId,
   findBusinessUnitsByEmployeeIds,
+  findActiveEmployeeIdsByBusinessUnitIds,
   exists,
   replaceForEmployee,
 };

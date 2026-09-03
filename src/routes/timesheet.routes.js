@@ -5,6 +5,7 @@ const router = express.Router();
 
 const authenticateBase = require('../middlewares/auth');
 const resolveCompanyContextForCompanyLessActors = require('../middlewares/resolveCompanyContextForCompanyLessActors');
+const authenticateReadMultiBU = require('../middlewares/authenticateReadMultiBU');
 // Admin/Entity Admin (ranks 2-3) have no single req.companyId from
 // authenticateBase alone — this module's controllers all read req.companyId
 // directly, so every route here resolves ONE Business Unit context for them
@@ -59,6 +60,13 @@ const {
  *         name: year
  *         schema: { type: integer }
  *         description: Filter to imports whose import_year matches
+ *       - in: query
+ *         name: company_id
+ *         schema: { type: integer }
+ *         description: >
+ *           Narrow to one specific Business Unit, validated against the
+ *           caller's own reach. Omit to see every Business Unit the caller
+ *           can reach at once (never a single frozen/wrong BU, never empty).
  *     responses:
  *       200:
  *         description: >
@@ -68,9 +76,17 @@ const {
  *       401:
  *         description: Unauthorized
  */
+// A missing X-Company-Id/company_id resolves to every Business Unit the
+// caller can reach (never a single frozen one, never empty) — same
+// "authenticateReadMultiBU" contract already used by /reports and
+// /management-reports (see that middleware's doc comment). An explicit
+// `company_id` query param narrows to just that one BU, validated against
+// the caller's own reach. This is a GET-only list endpoint — every other
+// route in this file still needs exactly one target BU and stays on the
+// plain `authenticate` chain above.
 router.get(
   '/import/history',
-  authenticate,
+  authenticateReadMultiBU,
   timesheetController.getHistory
 );
 

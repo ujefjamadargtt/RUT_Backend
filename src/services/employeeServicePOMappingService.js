@@ -70,7 +70,7 @@ const assign = async (employeeId, servicePOId, userId, companyId) => {
     throw notFoundError(`Employee #${employeeId} was not found in this company.`);
   }
 
-  const servicePO = await servicePORepository.findById(servicePOId, companyId);
+  const servicePO = await servicePORepository.findById(servicePOId, companyId, userId);
   if (!servicePO) {
     throw notFoundError(`Service PO #${servicePOId} was not found in this company.`);
   }
@@ -196,6 +196,96 @@ const autoMapCentralisedServicePOs = async (employeeId, companyId, userId, trans
     employeeId,
     companyId,
     servicePOIds: applicable.map((p) => p.id),
+  });
+};
+
+/**
+ * Auto-map a newly-created Centralised Service PO to every existing
+ * eligible Employee — the mirror of autoMapCentralisedServicePOs() above,
+ * in the other direction: that one runs at EMPLOYEE-creation time and
+ * reaches existing Centralised POs; this one runs at Service-PO-creation
+ * time and reaches existing Employees. Same ownership rule, viewed from the
+ * PO's side (see servicePOService.create()'s doc comment for how
+ * `companyId` itself is resolved for a Centralised PO):
+ *
+ * - Scoped to one company (companyId != null): every ACTIVE Employee
+ *   actually assigned (employee_business_units, status 'active') to that
+ *   SAME Business Unit — ownership is already structurally guaranteed by
+ *   the exact match, same as the original direction's per-company branch.
+ * - BU-less (companyId == null): this new PO is owned by the CREATING
+ *   actor's (userId's) own Admin/Entity Admin ownership hierarchy, not
+ *   every Employee on the platform — same "company-less record ownership
+ *   is exact created_by-hierarchy equality, never a blanket match" rule.
+ *   Applicable Employees are (a) every active Employee assigned to ANY
+ *   Business Unit within that hierarchy
+ *   (companyAccessControlService.resolveCompanyIdsOwnedByCreator(userId)),
+ *   plus (b) every active, genuinely unassigned Employee (no
+ *   employee_business_units row, no legacy company_id either) whose own
+ *   `created_by` is this SAME creating actor — exact equality, mirroring
+ *   autoMapCentralisedServicePOs()'s own BU-less rule from the other side.
+ *
+ * Each mapping row's own company_id is set to this PO's own company_id
+ * (null for a BU-less PO), same "the Service PO owns the mapping's
+ * company_id" precedent assign()/autoMapCentralisedServicePOs() above
+ * already establish.
+ *
+ * Only ever runs at Service-PO-creation time — it does not, and must not,
+ * run when an existing PO's is_centralised flag changes, so existing
+ * Employees are never retroactively mapped/unmapped by a later flag flip
+ * (same precedent as autoMapCentralisedServicePOs()). Manual mappings
+ * (assign()) and this automatic path share the same unique constraint
+ * (uq_employee_servicepo_mapping) + bulkCreate ignoreDuplicates, so
+ * whichever one runs first "wins" and the other is silently a no-op for
+ * that pair.
+ *
+ * @param {number} servicePOId
+ * @param {number|null} companyId - the new Service PO's own company_id
+ * @param {number} userId - the actor creating this Service PO (becomes the
+ *   new mapping rows' own `created_by`)
+ * @param {import('sequelize').Transaction} [transaction]
+ * @returns {Promise<void>}
+ */
+const autoMapExistingEmployeesToCentralisedServicePO = async (servicePOId, companyId, userId, transaction) => {
+  let employeeIds;
+
+  if (companyId != null) {
+    employeeIds = await employeeBusinessUnitRepository.findActiveEmployeeIdsByBusinessUnitIds([companyId]);
+  } else {
+    const ownedCompanyIds = await companyAccessControlService.resolveCompanyIdsOwnedByCreator(userId);
+    const withinHierarchy = ownedCompanyIds.length > 0
+      ? await employeeBusinessUnitRepository.findActiveEmployeeIdsByBusinessUnitIds(ownedCompanyIds)
+      : [];
+
+    const unassignedCandidates = await employeeRepository.findActiveUnassignedByCreator(userId);
+    let unassignedIds = [];
+    if (unassignedCandidates.length > 0) {
+      const buRows = await employeeBusinessUnitRepository.findBusinessUnitsByEmployeeIds(
+        unassignedCandidates.map((e) => e.id)
+      );
+      const withBU = new Set(buRows.map((row) => row.employee_id));
+      unassignedIds = unassignedCandidates.map((e) => e.id).filter((id) => !withBU.has(id));
+    }
+
+    employeeIds = [...new Set([...withinHierarchy, ...unassignedIds])];
+  }
+
+  if (!employeeIds.length) return;
+
+  const records = employeeIds.map((employee_id) => ({
+    company_id: companyId,
+    employee_id,
+    service_po_id: servicePOId,
+    status: 'active',
+    created_by: userId,
+    updated_by: userId,
+  }));
+
+  await employeeServicePOMappingRepository.bulkCreate(records, { transaction });
+
+  logger.info('Centralised Service PO auto-mapped to existing Employees', {
+    servicePOId,
+    companyId,
+    employeeIds,
   });
 };
 
@@ -802,6 +892,7 @@ const getEmployeeMappingFilterOptions = async (authContext) => {
 module.exports = {
   assign,
   autoMapCentralisedServicePOs,
+  autoMapExistingEmployeesToCentralisedServicePO,
   removeMapping,
   activateMapping,
   deactivateMapping,

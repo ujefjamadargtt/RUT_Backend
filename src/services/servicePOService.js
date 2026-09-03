@@ -8,8 +8,9 @@ const employeeBusinessUnitRepository = require('../repositories/employeeBusiness
 const servicePOHierarchyRepository = require('../repositories/servicePOHierarchyRepository');
 const timesheetRepository = require('../repositories/timesheetRepository');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
+const employeeServicePOMappingService = require('./employeeServicePOMappingService');
 const { resolveActorCompanyScope, resolveCreateCompanyIdForActor, resolveActorCompanyScopeForSelectedBU } = require('./companyAccessControlService');
-const { Employee, Company } = require('../models');
+const { Employee, Company, sequelize } = require('../models');
 const { Op } = require('sequelize');
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
@@ -304,7 +305,22 @@ const create = async (data, userId, req) => {
     updated_by: userId,
   };
 
-  const po = await servicePORepository.create(payload);
+  let po;
+  await sequelize.transaction(async (transaction) => {
+    po = await servicePORepository.create(payload, { transaction });
+
+    // Centralised PO -> existing Employees, the mirror (in the other
+    // direction) of employeeService.create()'s own
+    // autoMapCentralisedServicePOs() call — see
+    // employeeServicePOMappingService.autoMapExistingEmployeesToCentralisedServicePO()'s
+    // doc comment for the full ownership rule. Only Centralised POs
+    // auto-map at all; a normal PO is never auto-mapped to anyone.
+    if (payload.is_centralised === true) {
+      await employeeServicePOMappingService.autoMapExistingEmployeesToCentralisedServicePO(
+        po.id, companyId, userId, transaction
+      );
+    }
+  });
 
   await createAuditLog(
     userId,

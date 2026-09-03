@@ -1,7 +1,7 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { TimesheetImportHistory, TimesheetImportError, User, Employee, sequelize } = require('../models');
+const { TimesheetImportHistory, TimesheetImportError, User, Employee, Company, sequelize } = require('../models');
 const { QueryTypes } = require('sequelize');
 
 /**
@@ -115,36 +115,60 @@ const findImportById = async (id, companyId) => {
 /**
  * Fetch a paginated list of all import history records, newest first.
  *
+ * When `companyId` resolves to MORE THAN ONE Business Unit (the
+ * authenticateReadMultiBU "All BU" case — see timesheet.routes.js), each
+ * row's own Company is also joined in as `company` ({id, company_code,
+ * company_name}) — without it, two different BUs' same-named "Aug.xlsx"
+ * rows would be visually indistinguishable in a combined list. Omitted
+ * for the single-BU case (a plain number, or an array already narrowed to
+ * exactly one id) since there's no ambiguity to resolve there and it's one
+ * less join on the far more common request shape.
+ *
  * @param {object} pagination     - { limit, offset }
- * @param {object} [filters]      - { month, year } — filters on import_month/import_year
+ * @param {object} [filters]      - { month, year, companyId } — companyId is
+ *   number|number[] (see companyScope()'s doc comment); month/year filter on
+ *   import_month/import_year
  * @returns {Promise<{ rows: TimesheetImportHistory[], count: number }>}
  */
 const findAllImports = async (pagination = {}, filters = {}) => {
   const { limit = 20, offset = 0 } = pagination;
   const { month, year, companyId } = filters;
 
-  const where = { company_id: companyId };
+  const where = { ...companyScope(companyId) };
   if (month) where.import_month = month;
   if (year) where.import_year = year;
 
+  const isMultiBU = Array.isArray(companyId) && companyId.length > 1;
+
+  const include = [
+    {
+      model: User,
+      as: 'importer',
+      attributes: ['id', 'email'],
+      required: false,
+      include: [
+        {
+          model: Employee,
+          as: 'employee',
+          attributes: ['id', 'full_name', 'employee_code'],
+          required: false,
+        },
+      ],
+    },
+  ];
+
+  if (isMultiBU) {
+    include.push({
+      model: Company,
+      as: 'company',
+      attributes: ['id', 'company_code', 'company_name'],
+      required: false,
+    });
+  }
+
   return TimesheetImportHistory.findAndCountAll({
     where,
-    include: [
-      {
-        model: User,
-        as: 'importer',
-        attributes: ['id', 'email'],
-        required: false,
-        include: [
-          {
-            model: Employee,
-            as: 'employee',
-            attributes: ['id', 'full_name', 'employee_code'],
-            required: false,
-          },
-        ],
-      },
-    ],
+    include,
     limit,
     offset,
     order: [['created_at', 'DESC']],
@@ -158,18 +182,20 @@ const findAllImports = async (pagination = {}, filters = {}) => {
  * figure without an N+1 query per row.
  *
  * @param {number[]} importIds
+ * @param {number|number[]} companyId
  * @returns {Promise<Map<number, number>>} import_id -> distinct employee count
  */
 const getEmployeeCountsByImportIds = async (importIds, companyId) => {
   const counts = new Map();
   if (!importIds || importIds.length === 0) return counts;
 
+  const companyIds = Array.isArray(companyId) ? companyId : [companyId];
   const rows = await sequelize.query(
     `SELECT timesheet_import_id, COUNT(DISTINCT employee_id) AS total_employees
      FROM timesheets
-     WHERE timesheet_import_id IN (:importIds) AND company_id = :companyId
+     WHERE timesheet_import_id IN (:importIds) AND company_id IN (:companyIds)
      GROUP BY timesheet_import_id`,
-    { replacements: { importIds, companyId }, type: QueryTypes.SELECT }
+    { replacements: { importIds, companyIds }, type: QueryTypes.SELECT }
   );
 
   rows.forEach((r) => {
@@ -202,13 +228,28 @@ const deleteErrorsByImportIds = async (importIds, transaction = null, companyId)
 };
 
 /**
- * Find the existing import history record for one company/month/year/source
- * combination, if any — the lookup behind the "Sync Employee Work Logs"
- * idempotency rule: there must only ever be ONE Sync import per
- * Company + Month + Year, so a repeat sync UPDATES this row instead of
- * creating a new one (see timesheetService.previewPmsImport/runImportPreview).
- * Regardless of status — even a previously 'failed' attempt should be
- * reused/retried rather than piling up a second row for the same period.
+ * Find the existing INCOMPLETE import history record for one
+ * company/month/year/source combination, if any — the lookup behind the
+ * "Sync Employee Work Logs" idempotency rule: there must only ever be ONE
+ * IN-PROGRESS Sync import per Company + Month + Year, so a repeat sync
+ * UPDATES this row instead of creating a new one (see
+ * timesheetService.previewPmsImport/runImportPreview). A previously
+ * 'pending', 'processing', or 'failed' attempt is safe to reuse/reset back
+ * to 'pending' — nothing has ever been committed to `timesheets` for it.
+ *
+ * Deliberately EXCLUDES 'completed'/'partial' rows: those already have real
+ * timesheets rows linked via timesheet_import_id (confirmImport() actually
+ * ran). Reusing/overwriting one back to 'pending' here would silently
+ * disconnect that live, already-committed data from its own history
+ * record — the reported bug where an import that had successfully
+ * confirmed (0 errors, all rows inserted) reverted to 'pending' forever
+ * the moment Sync was previewed again for the same month, even though
+ * nothing about the already-imported data changed. A repeat preview over
+ * an already-completed period instead falls through to creating a NEW
+ * history row (below) — confirmImport()'s own full-replace logic
+ * (deleteImportsByIds) is what correctly retires the old completed row for
+ * this period, at the moment the NEW one is actually confirmed, not
+ * eagerly on a read-ish preview call.
  *
  * @param {number} companyId
  * @param {number} month
@@ -218,7 +259,13 @@ const deleteErrorsByImportIds = async (importIds, transaction = null, companyId)
  */
 const findByMonthYearSource = async (companyId, month, year, source) => {
   return TimesheetImportHistory.findOne({
-    where: { company_id: companyId, import_month: month, import_year: year, source },
+    where: {
+      company_id: companyId,
+      import_month: month,
+      import_year: year,
+      source,
+      status: { [Op.notIn]: ['completed', 'partial'] },
+    },
     order: [['id', 'DESC']],
   });
 };

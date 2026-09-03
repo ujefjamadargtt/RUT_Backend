@@ -462,6 +462,28 @@ const findAllEmails = async () => {
 };
 
 /**
+ * Every active, non-deleted Employee with no legacy `company_id` at all,
+ * created by one specific actor — candidate list for the "genuinely
+ * unassigned Employee" branch of employeeServicePOMappingService.
+ * autoMapExistingEmployeesToCentralisedServicePO() (the mirror, in the
+ * other direction, of assign()'s own unassigned-Employee fallback). Callers
+ * must still confirm each candidate has NO employee_business_units row
+ * either (via employeeBusinessUnitRepository.findBusinessUnitsByEmployeeIds)
+ * — `company_id: null` alone doesn't guarantee that, same distinction
+ * assign() itself already draws.
+ *
+ * @param {number} createdBy
+ * @returns {Promise<{id: number}[]>}
+ */
+const findActiveUnassignedByCreator = async (createdBy) => {
+  return Employee.findAll({
+    where: { company_id: null, created_by: createdBy, status: 'active', is_deleted: false },
+    attributes: ['id'],
+    raw: true,
+  });
+};
+
+/**
  * Fetch a paginated, filtered, sorted list of Employees holding one role,
  * scoped to whoever created them — Admin's "View Entity Admins"/Platform
  * Admin's "View Admins" module's data source. Admin/Entity Admin/Platform
@@ -555,4 +577,5 @@ module.exports = {
   findActiveAllocations,
   findAllForImport,
   findAllEmails,
+  findActiveUnassignedByCreator,
 };

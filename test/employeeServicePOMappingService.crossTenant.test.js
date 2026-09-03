@@ -116,6 +116,34 @@ test('assign() allows a genuinely unassigned Employee (no company_id, no Busines
   restore();
 });
 
+test('assign() passes the caller\'s own id as createdBy to servicePORepository.findById, so a BU-less Centralised PO (company_id NULL) the caller owns can be found', async () => {
+  // Regression: assign() used to call servicePORepository.findById(id, scope)
+  // with only 2 args, unlike every other lookup in this module
+  // (getServicePOEmployees/getEmployeeOptionsForServicePO), which all pass
+  // authContext.employeeId as createdBy. Without it, companyScope()'s
+  // { company_id: null, created_by: createdBy } fallback branch is
+  // unreachable, so a genuinely BU-less Centralised PO the caller just
+  // created always 404'd here even though it was correctly visible on the
+  // mapping screens.
+  employeeRepository.findById = async () => ({ id: 101, company_id: 10, status: 'active' });
+  servicePORepository.findById = async (id, scope, createdBy) => {
+    assert.equal(createdBy, 1); // the caller's userId, forwarded through
+    return { id: 401, company_id: null, status: 'in-progress' };
+  };
+  employeeServicePOMappingRepository.findByEmployeeAndPO = async () => null;
+
+  let capturedPayload;
+  employeeServicePOMappingRepository.create = async (data) => {
+    capturedPayload = data;
+    return { id: 1, ...data };
+  };
+
+  await employeeServicePOMappingService.assign(101, 401, 1, [10, 20]);
+
+  assert.equal(capturedPayload.company_id, null);
+  restore();
+});
+
 test('assign() happy path: Employee and Service PO in the SAME company -> mapping created with that concrete company_id, not the caller\'s broader scope array', async () => {
   employeeRepository.findById = async () => ({ id: 101, company_id: 10, status: 'active' });
   servicePORepository.findById = async () => ({ id: 401, company_id: 10, status: 'in-progress' });

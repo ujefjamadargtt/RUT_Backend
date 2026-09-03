@@ -147,11 +147,18 @@ const confirm = async (req, res, next) => {
 /**
  * GET /api/v1/timesheets/import/history
  *
- * Returns a paginated list of all past import operations.
+ * Returns a paginated list of all past import operations. Mounted on
+ * authenticateReadMultiBU (see timesheet.routes.js) — req.companyIds is
+ * always an array: every Business Unit the caller can reach when no
+ * X-Company-Id/company_id is given, or just the one explicitly requested
+ * (validated against that same reach) otherwise. Never a single frozen
+ * req.companyId, so a just-confirmed import under ANY of the caller's
+ * Business Units always shows up here, regardless of which BU happened to
+ * be "active" elsewhere in the app when this list was last loaded.
  */
 const getHistory = async (req, res, next) => {
   try {
-    const { data, meta } = await timesheetService.getImportHistory(req.query, req.companyId);
+    const { data, meta } = await timesheetService.getImportHistory(req.query, req.companyIds);
     return sendPaginated(res, data, meta, 'Import history fetched successfully.');
   } catch (err) {
     return handleError(next, err, 'getHistory');

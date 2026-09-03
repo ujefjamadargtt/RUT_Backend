@@ -1063,9 +1063,13 @@ const previewPmsImport = async (month, year, userId, companyId) => {
   const workLogs = await employeeWorkLogRepository.findForSync(companyId, month, year);
   const parsedRows = mapWorkLogsToImportRows(workLogs);
 
-  // Find-or-update: reuse the existing Sync import for this
-  // company+month+year (any source='pms' record, whatever its status) so a
-  // repeat sync never creates a second import history row for the same period.
+  // Find-or-update: reuse the existing INCOMPLETE Sync import for this
+  // company+month+year (source='pms', status pending/processing/failed) so
+  // a repeat sync never creates a second in-progress import history row for
+  // the same period. An already 'completed'/'partial' row is deliberately
+  // excluded by findByMonthYearSource() — see its own doc comment — so a
+  // fresh preview here falls through to creating a NEW row instead of
+  // reverting the already-confirmed one back to 'pending'.
   const existing = await timesheetImportRepository.findByMonthYearSource(companyId, month, year, 'pms');
 
   return runImportPreview(parsedRows, {
@@ -1348,7 +1352,13 @@ const confirmImport = async (importId, userId, ipAddress = null, companyId) => {
 
     const inserted = await timesheetRepository.bulkCreate(records, t);
 
-    // 5. Update history: completed (also stamp month/year from actual data).
+    // 5. Update history: completed/partial/failed (also stamp month/year
+    // from actual data). 'completed' when every re-validated row made it
+    // in, 'partial' when some rows were inserted but others still errored
+    // on re-validation, 'failed' when re-validation left nothing to insert
+    // at all (defensive — the validRows.length === 0 guard above already
+    // aborts before reaching this point, so inserted.length should never
+    // actually be 0 here).
     // is_publish is true only if EVERY row in this batch ended up published
     // — a batch spanning employees with different approval-required flags
     // can now be a mix, so the history row's own flag reflects "is the
@@ -1356,8 +1366,11 @@ const confirmImport = async (importId, userId, ipAddress = null, companyId) => {
     // in the batch shares the same flag (the common case), this produces
     // the exact same value as before.
     const historyIsPublish = records.every((record) => record.is_publish);
+    const finalStatus = inserted.length === 0
+      ? 'failed'
+      : (errorRows.length === 0 ? 'completed' : 'partial');
     await timesheetImportRepository.updateImportHistory(importId, {
-      status:       'completed',
+      status:       finalStatus,
       valid_rows:   inserted.length,
       error_rows:   errorRows.length,
       import_month: importMonth,
@@ -1404,11 +1417,13 @@ const confirmImport = async (importId, userId, ipAddress = null, companyId) => {
     logger.info('Timesheet import confirmed', {
       importId,
       userId,
+      status: finalStatus,
       insertedRows: inserted.length,
     });
 
     return {
       importId,
+      status:       finalStatus,
       insertedRows: inserted.length,
       errorRows:    errorRows.length,
       duplicates,
