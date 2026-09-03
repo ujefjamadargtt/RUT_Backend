@@ -49,6 +49,7 @@ const employeeTimesheetRoutes = require('./routes/employeeTimesheet.routes');
 const employeeMonthlyWorkLogRoutes = require('./routes/employeeMonthlyWorkLog.routes');
 const employeeReportRoutes = require('./routes/employeeReport.routes');
 const platformAdminRoutes = require('./routes/platformAdmin.routes');
+const employeeWorkLogComplianceRoutes = require('./routes/employeeWorkLogCompliance.routes');
 
 const app = express();
 
@@ -264,6 +265,9 @@ app.use(`${API_PREFIX}/employee-timesheets`, employeeTimesheetRoutes);
 app.use(`${API_PREFIX}/employee-timesheets/monthly`, employeeMonthlyWorkLogRoutes);
 app.use(`${API_PREFIX}/employee-reports`, employeeReportRoutes);
 app.use(`${API_PREFIX}/platform-admin`, platformAdminRoutes);
+// Employee Work Log Compliance / Missing Work Log report — mounted at the
+// same /reports base path; paths are disjoint from all existing report routes.
+app.use(`${API_PREFIX}/reports`, employeeWorkLogComplianceRoutes);
 
 // ─── 404 Handler ──────────────────────────────────────────────────────────────
 app.use((req, res) => {
@@ -280,6 +284,15 @@ app.use((err, req, res, _next) => {
     url: req.originalUrl,
     ip: req.ip,
   });
+
+  // Malformed/non-object JSON request body (express.json() strict-mode
+  // rejection, e.g. a client sending a literal `null` or `"foo"` body
+  // instead of `{}`/omitting the body). Without this, body-parser's raw
+  // parser-internals message (e.g. `Unexpected token 'n', "null" is not
+  // valid JSON`) leaks straight to the client.
+  if (err.type === 'entity.parse.failed') {
+    return sendError(res, 'Invalid JSON in request body', 400);
+  }
 
   // Sequelize validation errors
   if (err.name === 'SequelizeValidationError' || err.name === 'SequelizeUniqueConstraintError') {

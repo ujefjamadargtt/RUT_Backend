@@ -1,7 +1,7 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { ManagerEmployeeMapping } = require('../models');
+const { ManagerEmployeeMapping, Employee } = require('../models');
 
 /**
  * Manager Employee Mapping Repository
@@ -140,6 +140,26 @@ const findByManagerAndEmployee = async (managerUserId, employeeId, companyId) =>
 };
 
 /**
+ * The Employee's active PRIMARY Manager mapping row, with the manager's own
+ * id/full_name/email/status loaded — the sole source of truth the
+ * "Remind for Approval" feature (employeeTimesheetService.
+ * remindPrimaryManagerForApproval) uses to resolve who receives the
+ * reminder email. Deliberately status:'active' scoped (unlike
+ * findByEmployeeAndType, used for the 409-uniqueness check when assigning a
+ * manager) — a reminder must never be sent to a manager whose mapping has
+ * since been deactivated.
+ *
+ * @param {number} employeeId
+ * @returns {Promise<ManagerEmployeeMapping|null>}
+ */
+const findActivePrimaryManagerForEmployee = async (employeeId) => {
+  return ManagerEmployeeMapping.findOne({
+    where: { employee_id: employeeId, mapping_type: 'PRIMARY', status: 'active' },
+    include: [{ model: Employee, as: 'manager', attributes: ['id', 'full_name', 'email', 'status'] }],
+  });
+};
+
+/**
  * @param {object} data
  * @param {object} [options] - Sequelize options (e.g. { transaction })
  * @returns {Promise<ManagerEmployeeMapping>}
@@ -164,6 +184,7 @@ module.exports = {
   findByManagerEmployeeIds,
   findByEmployeeAndType,
   findByManagerAndEmployee,
+  findActivePrimaryManagerForEmployee,
   create,
   deleteById,
 };

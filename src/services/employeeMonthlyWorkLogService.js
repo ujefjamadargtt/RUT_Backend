@@ -46,11 +46,11 @@ function validationError(message) {
  * shape shared by getMonthlyWorkLog and submitMonthlyWorkLog.
  */
 async function buildMonthlyWorkLogDTO(employeeId, companyId, month, year) {
-  const { endDate } = dateHelper.getMonthBounds(month, year);
+  const { startDate, endDate } = dateHelper.getMonthBounds(month, year);
 
   const [{ mappedPOs, hierarchyRowsByPOId }, breakdownRows] = await Promise.all([
     employeeTimesheetService.loadMappedPOsWithHierarchy(employeeId, companyId),
-    employeeWorkLogRepository.getMonthlyLogHierarchyBreakdown({ employeeId, date: endDate, companyId }),
+    employeeWorkLogRepository.getHierarchyBreakdownForRange({ employeeId, startDate, endDate }),
   ]);
 
   const hoursByPOId = employeeTimesheetService.groupHoursByServicePO(breakdownRows);
@@ -188,8 +188,11 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data) => {
 };
 
 /**
- * Delete the Monthly Work Log for one month (only log_type: 'monthly' rows
- * — never touches Daily entries).
+ * Delete every timesheet entry for one month — Daily or Monthly alike, same
+ * "whole-month REPLACE" scope as submitMonthlyWorkLog's clear step. Matches
+ * the UI's delete confirmation, which tells the employee every work log
+ * entry for the month is removed, including ones logged day by day in
+ * Daily mode.
  *
  * @param {number} employeeId
  * @param {number} companyId
@@ -200,7 +203,7 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data) => {
 const deleteMonthlyWorkLog = async (employeeId, companyId, month, year) => {
   const { startDate, endDate } = dateHelper.getMonthBounds(month, year);
 
-  await employeeWorkLogRepository.deleteMonthlyEntries(employeeId, startDate, endDate, companyId);
+  await employeeWorkLogRepository.deleteByEmployeeAndDateRange(employeeId, startDate, endDate, companyId);
 
   logger.info('Employee monthly work log deleted', { employeeId, companyId, month, year });
 };

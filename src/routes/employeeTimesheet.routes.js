@@ -6,6 +6,7 @@ const router = express.Router();
 const authenticate = require('../middlewares/auth');
 const authorize = require('../middlewares/authorize');
 const requireCompanyScope = require('../middlewares/requireCompanyScope');
+const { reminderLimiter } = require('../middlewares/rateLimiters');
 const { validate } = require('../middlewares/validateRequest');
 const {
   replaceDailyEntriesSchema,
@@ -418,6 +419,42 @@ router.delete(
   requireCompanyScope,
   authorize('employee.fill_worklog'),
   controller.deleteEntry
+);
+
+/**
+ * @swagger
+ * /employee-timesheets/remind-approval:
+ *   post:
+ *     summary: >
+ *       "Remind for Approval" — sends a reminder email to the caller's own
+ *       active PRIMARY Manager that their work logs/timesheet are pending
+ *       approval. Notification only — never creates/modifies a work log or
+ *       changes any approval status, and is rate-limited per employee to
+ *       prevent duplicate-click spam.
+ *     tags: [Employee Timesheet]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: >
+ *           { message, managerName, pendingCount, period } — reminder
+ *           email sent to the primary manager.
+ *       400:
+ *         description: >
+ *           No active PRIMARY manager assigned, manager has no email
+ *           configured, or no work logs are currently pending approval.
+ *       429:
+ *         description: A reminder was already sent recently for this employee.
+ *       502:
+ *         description: The email provider failed to accept the email.
+ */
+router.post(
+  '/remind-approval',
+  authenticate,
+  requireCompanyScope,
+  authorize('employee.view_timesheet'),
+  reminderLimiter,
+  controller.remindApproval
 );
 
 module.exports = router;

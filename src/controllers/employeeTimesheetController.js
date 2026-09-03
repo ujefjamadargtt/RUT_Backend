@@ -23,6 +23,7 @@ const handleServiceError = (err, res, next) => {
   if (err.statusCode === 403) return sendError(res, err.message, 403);
   if (err.statusCode === 409) return sendError(res, err.message, 409);
   if (err.statusCode === 400 || err.statusCode === 422) return sendError(res, err.message, err.statusCode);
+  if (err.statusCode === 502) return sendError(res, err.message, 502);
   next(err);
 };
 
@@ -183,6 +184,27 @@ const deleteEntry = async (req, res, next) => {
   }
 };
 
+/**
+ * POST /api/v1/employee-timesheets/remind-approval
+ * "Remind for Approval" — sends a reminder email to the caller's own
+ * active PRIMARY Manager about their pending work logs. Employee identity
+ * (id + name) is taken only from the authenticated session (req.employeeId
+ * / req.user), never from the request body. Notification only — never
+ * creates/modifies a work log or changes any approval status.
+ */
+const remindApproval = async (req, res, next) => {
+  try {
+    const result = await employeeTimesheetService.remindPrimaryManagerForApproval(
+      req.employeeId,
+      req.user.full_name,
+      req.companyId
+    );
+    return sendSuccess(res, result, result.message);
+  } catch (err) {
+    handleServiceError(err, res, next);
+  }
+};
+
 module.exports = {
   getCalendar,
   getDaily,
@@ -194,4 +216,5 @@ module.exports = {
   resubmitEntry,
   getEntries,
   deleteEntry,
+  remindApproval,
 };

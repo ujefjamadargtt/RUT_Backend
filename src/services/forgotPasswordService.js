@@ -2,24 +2,23 @@
 
 const bcrypt = require('bcrypt');
 const { literal } = require('sequelize');
-const userRepository = require('../repositories/userRepository');
+const employeeRepository = require('../repositories/employeeRepository');
 const passwordResetRepository = require('../repositories/passwordResetRepository');
-const emailService = require('../utils/emailService');
 const { OTP_EMAIL_SUBJECT, buildOtpEmailHtml } = require('../utils/emailTemplates');
+const emailLogService = require('./emailLogService');
 const logger = require('../utils/logger');
 
 /**
  * Forgot Password Service
  *
- * Resolves an email against User Master only — Employees authenticate
- * exclusively through their linked User row now (see
- * database/migrations/20260842_employees_drop_login_columns.sql), so there
- * is no longer a dual User/Employee lookup or loginType disambiguation.
+ * Resolves an email against the Employee Master — Employees are the sole
+ * login identity now (see the Employee-as-Identity redesign,
+ * database/migrations/20260864-20260880 — authService.login() validates
+ * exclusively via `employee.validatePassword()`, never a `users` row).
  * `password_reset_otps`/`password_reset_history` still carry a `login_type`
- * column from when both account types existed — every row this service
- * writes simply passes the literal `'user'`, keeping that schema untouched
- * (it's an OTP-stream partition key, not a business concept this service
- * needs to reintroduce).
+ * column from when both account types existed; every row this service
+ * writes now passes the literal `'employee'` (previously `'user'`, back
+ * when Users were still the login identity this flow reset).
  *
  * This flow EXPLICITLY discloses whether an email is registered ("Email ID
  * is not registered.") — a deliberate, repeated product requirement.
@@ -30,12 +29,12 @@ const logger = require('../utils/logger');
  * SQL-side NOW() comparisons — see that file's module doc.
  */
 
-const LOGIN_TYPE = 'user';
+const LOGIN_TYPE = 'employee';
 const OTP_LENGTH = 6;
 const OTP_VALIDITY_MINUTES = 5;
 const MAX_ATTEMPTS = 5;
 const RESEND_COOLDOWN_SECONDS = 60;
-const BCRYPT_ROUNDS = 12; // matches User.js's own password hashing
+const BCRYPT_ROUNDS = 12; // matches Employee.js's own OTP/password hashing rounds
 const PURPOSE = 'password_reset';
 
 function badRequest(message) {
@@ -60,20 +59,6 @@ function emailNotRegisteredError() {
   return err;
 }
 
-/**
- * Wrap the existing callback-based emailService.sendEmail() in a Promise
- * for exactly this one call site — the utility itself is never touched or
- * converted; every other part of this file stays async/await as normal.
- */
-function sendEmailAsync(to, subject, html) {
-  return new Promise((resolve, reject) => {
-    emailService.sendEmail(to, subject, html, (err, ...rest) => {
-      if (err) reject(err instanceof Error ? err : new Error(String(err)));
-      else resolve(rest);
-    });
-  });
-}
-
 /** 6-digit numeric OTP, e.g. "582194" — always exactly 6 digits. */
 function generateOtp() {
   return Math.floor(100000 + Math.random() * 900000).toString();
@@ -84,17 +69,17 @@ function generateOtp() {
  * persist it, returning the plaintext value for emailing (never persisted
  * in plaintext).
  */
-async function issueOtp(user, email, ipAddress) {
+async function issueOtp(employee, email, ipAddress) {
   await passwordResetRepository.expirePendingByEmail(email, PURPOSE, LOGIN_TYPE);
 
   const plainOtp = generateOtp();
   const hashedOtp = await bcrypt.hash(plainOtp, BCRYPT_ROUNDS);
 
   await passwordResetRepository.createOtp({
-    company_id: user.company_id,
+    company_id: employee.company_id,
     login_type: LOGIN_TYPE,
-    user_id: user.id,
-    employee_id: null,
+    user_id: null,
+    employee_id: employee.id,
     email,
     otp: hashedOtp,
     purpose: PURPOSE,
@@ -108,15 +93,22 @@ async function issueOtp(user, email, ipAddress) {
 }
 
 /**
- * Send the OTP email. A transport failure is logged but never surfaced to
- * the caller as a distinct error — the OTP has already been persisted and
- * the caller still gets a normal success response regardless of whether
- * the Company Email API is reachable.
+ * Send the OTP email (and record it in `email_logs` — see
+ * emailLogService.sendAndLog). A transport failure is logged but never
+ * surfaced to the caller as a distinct error — the OTP has already been
+ * persisted and the caller still gets a normal success response regardless
+ * of whether the Company Email API is reachable.
  */
-async function sendOtpEmail(email, plainOtp) {
+async function sendOtpEmail(email, plainOtp, companyId) {
   const html = buildOtpEmailHtml(plainOtp, OTP_VALIDITY_MINUTES);
   try {
-    await sendEmailAsync(email, OTP_EMAIL_SUBJECT, html);
+    await emailLogService.sendAndLog({
+      to: email,
+      subject: OTP_EMAIL_SUBJECT,
+      html,
+      mailType: emailLogService.MAIL_TYPES.PASSWORD_RESET_OTP,
+      companyId: companyId || null,
+    });
   } catch (err) {
     logger.error('Failed to send password reset OTP email', { email, error: err.message });
   }
@@ -128,7 +120,7 @@ async function sendOtpEmail(email, plainOtp) {
  */
 async function sendOrResendOtp(email, ipAddress, userAgent, historyAction) {
   const normalizedEmail = email.toLowerCase().trim();
-  const user = await userRepository.findByEmail(normalizedEmail);
+  const employee = await employeeRepository.findByEmail(normalizedEmail);
 
   const failNotFound = async (remarks) => {
     await passwordResetRepository.logHistory({
@@ -141,11 +133,11 @@ async function sendOrResendOtp(email, ipAddress, userAgent, historyAction) {
     throw emailNotRegisteredError();
   };
 
-  if (!user) {
+  if (!employee) {
     return failNotFound('No account found for this email.');
   }
 
-  if (user.status !== 'active') {
+  if (employee.status !== 'active') {
     // Deliberately treated the same as NOT_FOUND for this specific flow:
     // an unauthenticated forgot-password request revealing "this account
     // exists but is deactivated" is its own disclosure risk.
@@ -157,15 +149,15 @@ async function sendOrResendOtp(email, ipAddress, userAgent, historyAction) {
     throw cooldownError();
   }
 
-  const plainOtp = await issueOtp(user, normalizedEmail, ipAddress);
-  await sendOtpEmail(normalizedEmail, plainOtp);
+  const plainOtp = await issueOtp(employee, normalizedEmail, ipAddress);
+  await sendOtpEmail(normalizedEmail, plainOtp, employee.company_id);
 
   await passwordResetRepository.logHistory({
-    company_id: user.company_id,
+    company_id: employee.company_id,
     email: normalizedEmail,
     login_type: LOGIN_TYPE,
-    user_id: user.id,
-    employee_id: null,
+    user_id: null,
+    employee_id: employee.id,
     action: historyAction,
     ip_address: ipAddress || null,
     user_agent: userAgent || null,
@@ -263,7 +255,7 @@ const verifyOtp = async (email, otp, ipAddress, userAgent) => {
     company_id: matched.company_id,
     email: normalizedEmail,
     login_type: LOGIN_TYPE,
-    user_id: matched.user_id,
+    employee_id: matched.employee_id,
     action: 'OTP_VERIFIED',
     ip_address: ipAddress || null,
     user_agent: userAgent || null,
@@ -305,7 +297,10 @@ const resetPassword = async (email, otp, password, ipAddress, userAgent) => {
     return fail('Submitted OTP does not match the verified OTP.');
   }
 
-  await userRepository.update(verified.user_id, { password }, {}, verified.company_id);
+  // Sets (and hashes, via Employee's own beforeUpdate hook) the Employee's
+  // password directly — the same helper the self-service change-password
+  // flow uses (employeeRepository.updatePassword).
+  await employeeRepository.updatePassword(verified.employee_id, password);
 
   await passwordResetRepository.updateOtpById(verified.id, {
     status: 'used',
@@ -316,7 +311,7 @@ const resetPassword = async (email, otp, password, ipAddress, userAgent) => {
     company_id: verified.company_id,
     email: normalizedEmail,
     login_type: LOGIN_TYPE,
-    user_id: verified.user_id,
+    employee_id: verified.employee_id,
     action: 'PASSWORD_RESET',
     ip_address: ipAddress || null,
     user_agent: userAgent || null,

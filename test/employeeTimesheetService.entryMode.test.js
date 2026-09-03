@@ -276,7 +276,7 @@ test('TEST 8 / TEST 1-3: TIME_BASED exists this month -> adding another TIME_BAS
 function stubMonthlySubmit() {
   employeeWorkLogRepository.deleteByEmployeeAndDateRange = async () => 0;
   employeeWorkLogRepository.bulkCreate = async (rows) => rows.map((r, i) => ({ id: 700 + i, ...r }));
-  employeeWorkLogRepository.getMonthlyLogHierarchyBreakdown = async () => [];
+  employeeWorkLogRepository.getHierarchyBreakdownForRange = async () => [];
   const employeeTimesheetServiceModule = require('../src/services/employeeTimesheetService');
   const originalLoadMapped = employeeTimesheetServiceModule.loadMappedPOsWithHierarchy;
   employeeTimesheetServiceModule.loadMappedPOsWithHierarchy = async () => ({ mappedPOs: [], hierarchyRowsByPOId: new Map() });

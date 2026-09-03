@@ -74,10 +74,29 @@ const heavyReportLimiter = rateLimit({
   message: jsonMessage('Too many report requests. Please slow down and try again shortly.'),
 });
 
+/**
+ * Approval Reminder limiter
+ * The Employee-initiated "Remind" action (POST /employee-timesheets/
+ * remind-approval) — throttled per Employee (never per IP, so one office
+ * NAT can't rate-limit a whole team), so repeated/accidental clicks can
+ * never spam the same Manager with duplicate reminder emails. A UX/abuse
+ * safeguard, not a security control — the endpoint itself is idempotent
+ * (notification-only) regardless.
+ */
+const reminderLimiter = rateLimit({
+  windowMs: parseInt(process.env.REMINDER_RATE_LIMIT_WINDOW_MS, 10) || 5 * 60 * 1000,
+  max: parseInt(process.env.REMINDER_RATE_LIMIT_MAX, 10) || 1,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `${req.employeeId || req.ip}`,
+  message: jsonMessage('A reminder was already sent recently. Please wait before sending another.'),
+});
+
 module.exports = {
   apiLimiter,
   authLimiter,
   importLimiter,
   aiLimiter,
   heavyReportLimiter,
+  reminderLimiter,
 };

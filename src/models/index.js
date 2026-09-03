@@ -74,6 +74,7 @@ const EmployeeWorkLog        = require('./EmployeeWorkLog')(sequelize);
 const EmployeeWorkLogTimeEntry = require('./EmployeeWorkLogTimeEntry')(sequelize);
 const PasswordResetOtp       = require('./PasswordResetOtp')(sequelize);
 const PasswordResetHistory   = require('./PasswordResetHistory')(sequelize);
+const EmailLog                = require('./EmailLog')(sequelize);
 const CostBudget             = require('./CostBudget')(sequelize);
 const ResourceBudget         = require('./ResourceBudget')(sequelize);
 
@@ -420,6 +421,12 @@ PasswordResetHistory.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
 Employee.hasMany(PasswordResetHistory, { foreignKey: 'employee_id', as: 'passwordResetHistory' });
 PasswordResetHistory.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
 PasswordResetHistory.belongsTo(Company, { foreignKey: 'company_id', as: 'company' });
+
+// Email Logs — application-wide outbound email audit trail (every mail
+// type: OTP, Approval Reminder, Work Log Compliance Reminder, ...).
+EmailLog.belongsTo(Company, { foreignKey: 'company_id', as: 'company' });
+EmailLog.belongsTo(Employee, { foreignKey: 'triggered_by_employee_id', as: 'triggeredByEmployee' });
+EmailLog.belongsTo(Employee, { foreignKey: 'related_employee_id', as: 'relatedEmployee' });
 EmployeeWorkLog.belongsTo(Company, { foreignKey: 'company_id', as: 'company' });
 
 // Cost Budget Master — one row per (service_po_id, month, year), see
@@ -486,6 +493,7 @@ module.exports = {
   EmployeeWorkLogTimeEntry,
   PasswordResetOtp,
   PasswordResetHistory,
+  EmailLog,
   CostBudget,
   ResourceBudget,
 };

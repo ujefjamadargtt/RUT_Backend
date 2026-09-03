@@ -618,6 +618,35 @@ const getWorkLogTimeReportRows = async ({ employeeIds, startDate, endDate, servi
  * @param {object} params - { employeeId, startDate, endDate }
  * @returns {Promise<EmployeeWorkLog[]>}
  */
+/**
+ * Pending-approval summary for one employee — count + date range, in a
+ * single aggregate query (never a full row fetch) — backing the
+ * "Remind for Approval" reminder email (employeeTimesheetService.
+ * remindPrimaryManagerForApproval's "is there actually anything pending"
+ * check and its email's optional Period/Pending-count context). Read-only;
+ * never touches `status`.
+ *
+ * @param {number} employeeId
+ * @param {number} companyId
+ * @returns {Promise<{ count: number, minDate: string|null, maxDate: string|null }>}
+ */
+const getPendingApprovalSummary = async (employeeId, companyId) => {
+  const row = await EmployeeWorkLog.findOne({
+    where: { employee_id: employeeId, company_id: companyId, status: 'pending' },
+    attributes: [
+      [fn('COUNT', col('id')), 'count'],
+      [fn('MIN', col('work_date')), 'minDate'],
+      [fn('MAX', col('work_date')), 'maxDate'],
+    ],
+    raw: true,
+  });
+  return {
+    count: parseInt(row && row.count, 10) || 0,
+    minDate: (row && row.minDate) || null,
+    maxDate: (row && row.maxDate) || null,
+  };
+};
+
 const findForApprovalSummary = async ({ employeeId, startDate, endDate }) => {
   const where = { employee_id: employeeId };
   if (startDate) where.work_date = { ...where.work_date, [Op.gte]: startDate };
@@ -895,54 +924,6 @@ const deleteByEmployeeAndDateRange = async (employeeId, startDate, endDate, comp
 };
 
 /**
- * Monthly Work Log hierarchy breakdown for ONE date (the month's last day)
- * — same shape as getDailyHierarchyBreakdown, but filtered to
- * log_type: 'monthly' so a Daily row that happens to land on the month's
- * last day never leaks into the Monthly Work Log view.
- * Deliberately NOT company/BU-scoped (companyId accepted but unused) — same
- * reasoning as getCalendarSummary() above.
- * @param {object} params - { employeeId, date, companyId }
- * @returns {Promise<Array<{ service_po_id, hierarchy_node_id, total_hours }>>}
- */
-const getMonthlyLogHierarchyBreakdown = async ({ employeeId, date, companyId }) => {
-  return EmployeeWorkLog.findAll({
-    attributes: [
-      'service_po_id',
-      'hierarchy_node_id',
-      [fn('SUM', col('hours')), 'total_hours'],
-    ],
-    where: {
-      work_date: date,
-      employee_id: parseInt(employeeId, 10),
-      log_type: 'monthly',
-    },
-    group: ['service_po_id', 'hierarchy_node_id'],
-    raw: true,
-  });
-};
-
-/**
- * Hard-delete the Monthly Work Log entries (log_type: 'monthly' only —
- * never touches Daily rows) for one employee within a date range. Backs
- * employeeMonthlyWorkLogService.deleteMonthlyWorkLog.
- * @param {number} employeeId
- * @param {string} startDate - "YYYY-MM-DD"
- * @param {string} endDate - "YYYY-MM-DD"
- * @param {number} companyId
- * @returns {Promise<number>} rows deleted
- */
-const deleteMonthlyEntries = async (employeeId, startDate, endDate, companyId) => {
-  return EmployeeWorkLog.destroy({
-    where: {
-      employee_id: employeeId,
-      work_date: { [Op.gte]: startDate, [Op.lte]: endDate },
-      company_id: companyId,
-      log_type: 'monthly',
-    },
-  });
-};
-
-/**
  * Whether a Monthly Work Log entry already exists for this employee within
  * a date range — backs the Daily-side guard
  * (employeeTimesheetService.assertNoMonthlyLogForDate) that blocks Daily
@@ -1046,8 +1027,6 @@ module.exports = {
   getDailyHierarchyBreakdown,
   getMonthlyHierarchyBreakdown,
   getHierarchyBreakdownForRange,
-  getMonthlyLogHierarchyBreakdown,
-  deleteMonthlyEntries,
   hasMonthlyEntry,
   getMonthEntryModeSummary,
   findForSync,
@@ -1065,4 +1044,5 @@ module.exports = {
   resubmitById,
   existsForServicePOOrHierarchy,
   existsForHierarchyNodes,
+  getPendingApprovalSummary,
 };

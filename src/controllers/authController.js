@@ -281,7 +281,13 @@ const resendOtp = async (req, res, next) => {
  * POST /api/auth/verify-otp
  *
  * Request body: { email: string, otp: string }
- * Response 200: { success: true, message: 'OTP verified successfully.', data: null }
+ * Response 200: { success: true, message: 'OTP verified successfully.', data: { verified: true, email } }
+ *   `data` is a small, non-null payload (rather than null, like the sibling
+ *   reset-password/change-password endpoints) specifically so a frontend
+ *   step-navigation guard that checks for a truthy `data` before advancing
+ *   to the "set new password" screen has something to check against — the
+ *   frontend still only needs to resend the same `email`+`otp` to
+ *   POST /auth/reset-password next; nothing here is a token/credential.
  * Response 400: invalid/expired OTP or attempts exceeded
  */
 const verifyOtp = async (req, res, next) => {
@@ -292,7 +298,7 @@ const verifyOtp = async (req, res, next) => {
 
     const result = await forgotPasswordService.verifyOtp(email, otp, ipAddress, userAgent);
 
-    return sendSuccess(res, null, result.message);
+    return sendSuccess(res, { verified: true, email }, result.message);
   } catch (err) {
     if (err.statusCode === 400) {
       return sendError(res, err.message, 400);
