@@ -941,6 +941,29 @@ async function getOperationalCostBreakdown(filters) {
  * @param {number} filters.offset
  * @returns {{ rows: object[], count: number }}
  */
+/**
+ * Employee Utilization Summary — DELIBERATELY the one utilization/hours
+ * report in this file that is NOT scoped by the hours' own company_id.
+ *
+ * WHICH EMPLOYEES qualify is scoped to the caller's own BU(s)
+ * (EMPLOYEE_COMPANY_SCOPE_SQL_MULTI — company_id match OR an
+ * employee_business_units row) — same as every other report here. But once
+ * an employee qualifies, the `timesheets` LEFT JOIN below carries no
+ * `company_id` condition at all, so EVERY hour they logged that
+ * month is summed in — including hours against a Service PO owned by a
+ * DIFFERENT Business Unit than the caller's own (cross-BU resourcing, see
+ * employeeServicePOMappingService.assign()'s doc comment).
+ *
+ * This is intentional, not a scoping gap: every other report in this file
+ * (getResourceUtilization, getEmployeeBenchPercentage's detail, the main
+ * Dashboard, etc.) answers "how much revenue/activity happened under MY
+ * BU's own Service POs" and is correctly `t.company_id IN (:companyIds)`-
+ * scoped for that. This report answers a DIFFERENT question a BU
+ * Admin/Manager also needs — "how much is MY employee actually working,
+ * period" — which has to include cross-BU work or it understates/hides a
+ * cross-BU-resourced employee's real workload. Consumed today by
+ * aiCopilotService's `utilization` intent for exactly this reason.
+ */
 async function getEmployeeUtilizationSummary(filters) {
   const {
     month,
@@ -1031,6 +1054,9 @@ async function getEmployeeUtilizationSummary(filters) {
           ELSE 'others'
         END AS nb_category
       FROM employees e
+      -- No company_id condition here on purpose — see this function's doc
+      -- comment: every hour this (already BU-scoped) employee logged counts,
+      -- even against a cross-BU Service PO.
       LEFT JOIN timesheets t
             ON  t.employee_id = e.id
            AND  EXTRACT(MONTH FROM t.timesheet_date) = :month
@@ -1146,7 +1172,19 @@ async function getServicePOSummary(filters) {
   const monthYear = formatMonthYear(month, year);
 
   const replacements = { monthNum, yearNum, monthYear, stdHours: STANDARD_HOURS, limit, offset, companyIds: filters.companyIds };
-  const conditions = ['(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)'];
+  // NULL-company (Centralised) POs only widen into scope when they belong
+  // to THIS caller's own tenant (created_by one of their Entity's own
+  // creator/admin) — see servicePORepository.companyScope()'s doc comment
+  // and companyAccessControlService.resolveCentralisedOwnerCreatorIds().
+  // An unconditional `OR sp.company_id IS NULL` would leak every OTHER
+  // tenant's Centralised PO into this report too.
+  const centralisedOwnerIds = filters.centralisedOwnerIds;
+  let scopeCondition = 'sp.company_id IN (:companyIds)';
+  if (Array.isArray(centralisedOwnerIds) && centralisedOwnerIds.length > 0) {
+    scopeCondition += ' OR (sp.company_id IS NULL AND sp.is_centralised = true AND sp.created_by IN (:centralisedOwnerIds))';
+    replacements.centralisedOwnerIds = centralisedOwnerIds;
+  }
+  const conditions = [`(${scopeCondition})`];
 
   if (status && status !== 'all') {
     conditions.push('sp.status = :status');
@@ -1353,7 +1391,19 @@ async function getInvoicePOSummary(filters) {
   const monthYear = formatMonthYear(month, year);
 
   const replacements = { monthNum, yearNum, monthYear, limit, offset, companyIds: filters.companyIds };
-  const conditions = ['(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)'];
+  // NULL-company (Centralised) POs only widen into scope when they belong
+  // to THIS caller's own tenant (created_by one of their Entity's own
+  // creator/admin) — see servicePORepository.companyScope()'s doc comment
+  // and companyAccessControlService.resolveCentralisedOwnerCreatorIds().
+  // An unconditional `OR sp.company_id IS NULL` would leak every OTHER
+  // tenant's Centralised PO into this report too.
+  const centralisedOwnerIds = filters.centralisedOwnerIds;
+  let scopeCondition = 'sp.company_id IN (:companyIds)';
+  if (Array.isArray(centralisedOwnerIds) && centralisedOwnerIds.length > 0) {
+    scopeCondition += ' OR (sp.company_id IS NULL AND sp.is_centralised = true AND sp.created_by IN (:centralisedOwnerIds))';
+    replacements.centralisedOwnerIds = centralisedOwnerIds;
+  }
+  const conditions = [`(${scopeCondition})`];
 
   if (status && status !== 'all') {
     conditions.push('sp.status = :status');
@@ -1423,6 +1473,7 @@ async function getInvoicePOSummary(filters) {
       st.id                                                              AS service_type_id,
       st.service_type_name                                               AS service_type,
       COALESCE(prev.hours_delivered, 0)                                  AS hours_delivered_before_month,
+      COALESCE(curr.hours_delivered_current_month, 0)                    AS hours_delivered_current_month,
       COALESCE(rb.budgeted_hours, 0)                                     AS exp_hours,
       CASE
         WHEN sp.is_billable = true
@@ -1467,7 +1518,8 @@ async function getInvoicePOSummary(filters) {
     LEFT JOIN (
       SELECT
         t.service_po_id,
-        SUM(${hoursCol} * COALESCE(mc.total_cost, 0)) AS billable_amount
+        SUM(${hoursCol} * COALESCE(mc.total_cost, 0)) AS billable_amount,
+        SUM(${hoursCol})                              AS hours_delivered_current_month
       FROM timesheets t
       LEFT JOIN monthly_costs mc
              ON mc.employee_id = t.employee_id

@@ -55,7 +55,18 @@ function buildIncludes() {
 
 /**
  * Fetch a paginated, filtered list of an employee's work log entries.
- * @param {object} filters - { employeeId, startDate, endDate, companyId, status, poId, subProjectId }
+ *
+ * `companyId` is OPTIONAL — omit it (or pass null/undefined) to see every
+ * row for the filtered employee/date-range regardless of which BU its own
+ * `company_id` carries. Needed by replaceDailyEntries()'s "preserve existing
+ * time entries for this date" lookup: since a row's `company_id` now mirrors
+ * its own Service PO's owning BU (not the caller's active session — see
+ * employeeTimesheetService.js's write paths), a single date's lines can
+ * legitimately span more than one BU for a cross-BU-mapped employee, and a
+ * session-scoped lookup would silently miss the other BU's rows. Every OTHER
+ * caller (getEntries, managerSelfServiceService.getTimesheets) still passes
+ * a real companyId and keeps its existing BU-filtered behavior unchanged.
+ * @param {object} filters - { employeeId, startDate, endDate, companyId?, status, poId, subProjectId }
  * @param {object} pagination - { limit, offset }
  * @param {object} sort - { sortBy, sortOrder }
  * @returns {Promise<{ rows: EmployeeWorkLog[], count: number }>}
@@ -68,7 +79,8 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
   if (!ALLOWED_SORT_COLUMNS.has(sortBy)) sortBy = 'work_date';
   const order = (sortOrder || '').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
-  const where = { company_id: companyId };
+  const where = {};
+  if (companyId != null) where.company_id = companyId;
   if (employeeId) where.employee_id = parseInt(employeeId, 10);
   if (status) where.status = status;
   if (poId) where.service_po_id = parseInt(poId, 10);
@@ -110,14 +122,23 @@ const findById = async (id) => {
 /**
  * Fetch a single work log entry, scoped to one employee (ownership check
  * for update/delete — an employee may only touch their own entries).
+ *
+ * Deliberately NOT company/BU-scoped (companyId accepted but unused) — same
+ * reasoning as findById() above: a row's `company_id` mirrors its own
+ * Service PO's owning BU, which can legitimately differ from the caller's
+ * currently-active session BU for a cross-BU-mapped employee.
+ * employee_id + id is already the real, sufficient ownership boundary; a
+ * company filter here previously 404'd an employee's own edit/delete/
+ * resubmit on their own entry whenever they'd logged it against a PO owned
+ * by a different BU than the one currently selected.
  * @param {number} id
  * @param {number} employeeId
- * @param {number} companyId
+ * @param {number} [companyId] - unused, kept for call-site compatibility
  * @returns {Promise<EmployeeWorkLog|null>}
  */
 const findByIdForEmployee = async (id, employeeId, companyId) => {
   return EmployeeWorkLog.findOne({
-    where: { id, employee_id: employeeId, company_id: companyId },
+    where: { id, employee_id: employeeId },
     include: buildIncludes(),
   });
 };
@@ -129,13 +150,21 @@ const findByIdForEmployee = async (id, employeeId, companyId) => {
  * SAME date are distinct entries, not duplicates of each other — matches
  * the DB's uq_employee_work_logs functional unique index (see
  * database/migrations/20260807_hierarchy_node_id_unique_scope.sql), which
- * keys on COALESCE(hierarchy_node_id, 0) for the same reason.
+ * keys on COALESCE(hierarchy_node_id, 0) for the same reason — and does NOT
+ * include company_id, so this check doesn't either.
+ *
+ * Deliberately NOT company/BU-scoped (companyId accepted but unused) — same
+ * reasoning as findByIdForEmployee() above. A (employee, PO, hierarchy node,
+ * date) tuple must be unique regardless of which BU created it; scoping this
+ * by the caller's active session BU could let a real duplicate slip through
+ * whenever the existing row's company_id (its own PO's BU) differs from the
+ * session's.
  * @param {number} employeeId
  * @param {number} servicePOId
  * @param {number|null} hierarchyNodeId - null means "logged directly against the PO"
  * @param {string} date - "YYYY-MM-DD"
  * @param {number} [excludeId]
- * @param {number} companyId
+ * @param {number} [companyId] - unused, kept for call-site compatibility
  * @returns {Promise<EmployeeWorkLog|null>}
  */
 const checkDuplicate = async (employeeId, servicePOId, hierarchyNodeId, date, excludeId = null, companyId) => {
@@ -144,7 +173,6 @@ const checkDuplicate = async (employeeId, servicePOId, hierarchyNodeId, date, ex
     service_po_id: servicePOId,
     hierarchy_node_id: hierarchyNodeId || null,
     work_date: date,
-    company_id: companyId,
   };
   if (excludeId) where.id = { [Op.ne]: excludeId };
   return EmployeeWorkLog.findOne({ where });
@@ -181,57 +209,82 @@ const bulkCreate = async (rows, transaction) => {
  * same transaction as the bulkCreate() that reinserts the day's entries, so
  * a failure partway through leaves the employee's previous entries for that
  * date untouched rather than half-replaced.
+ *
+ * Deliberately NOT company/BU-scoped (companyId accepted but unused) — a
+ * single date's lines can legitimately span more than one BU for a
+ * cross-BU-mapped employee (each row's own company_id mirrors its Service
+ * PO's owning BU, not the caller's active session). Scoping this delete by
+ * the session's companyId would leave the other BU's old rows for this date
+ * un-deleted, and the reinsert below would then crash on
+ * uq_employee_work_logs re-inserting the same (employee, PO, node, date).
  * @param {number} employeeId
  * @param {string} date - "YYYY-MM-DD"
- * @param {number} companyId
+ * @param {number} [companyId] - unused, kept for call-site compatibility
  * @param {object} transaction
  * @returns {Promise<number>} rows deleted
  */
 const deleteByEmployeeAndDate = async (employeeId, date, companyId, transaction) => {
   return EmployeeWorkLog.destroy({
-    where: { employee_id: employeeId, work_date: date, company_id: companyId },
+    where: { employee_id: employeeId, work_date: date },
     transaction,
   });
 };
 
 /**
  * Update an existing work log entry by primary key.
+ *
+ * Deliberately NOT company/BU-scoped (companyId accepted but unused) — the
+ * caller always re-verifies ownership via findByIdForEmployee() (itself
+ * employee_id-scoped only, see its own doc comment) immediately before
+ * calling this, so `id` alone is already the real, sufficient boundary here.
  * @param {number} id
  * @param {object} data
- * @param {number} companyId
+ * @param {number} [companyId] - unused, kept for call-site compatibility
  * @param {object} [transaction] - passed through when the update needs to
  *   stay atomic with a time-entries replace (see updateEntry() in
  *   employeeTimesheetService.js)
  * @returns {Promise<EmployeeWorkLog|null>}
  */
 const update = async (id, data, companyId, transaction = null) => {
-  const entry = await EmployeeWorkLog.findOne({ where: { id, company_id: companyId }, transaction });
+  const entry = await EmployeeWorkLog.findOne({ where: { id }, transaction });
   if (!entry) return null;
   return entry.update(data, { transaction });
 };
 
 /**
  * Hard-delete a work log entry.
+ *
+ * Deliberately NOT company/BU-scoped (companyId accepted but unused) — same
+ * reasoning as update() above: the caller already re-verified ownership via
+ * findByIdForEmployee() before calling this.
  * @param {number} id
- * @param {number} companyId
+ * @param {number} [companyId] - unused, kept for call-site compatibility
  * @returns {Promise<number>} rows deleted
  */
 const deleteById = async (id, companyId) => {
-  return EmployeeWorkLog.destroy({ where: { id, company_id: companyId } });
+  return EmployeeWorkLog.destroy({ where: { id } });
 };
 
 /**
  * Total hours already logged by this employee on one date — the aggregate
  * behind the 12-hours/day cap. Single SQL SUM, no joins (mirrors
  * timesheetRepository.getMonthlyHours' shape/efficiency).
+ *
+ * Deliberately NOT company/BU-scoped (companyId accepted but unused) — the
+ * 12-hour/day cap is a per-employee, per-date invariant, not per-company: an
+ * employee's hours logged against a cross-BU Service PO still count toward
+ * their own daily total. Scoping this by the caller's active session BU
+ * would under-count whenever some of the day's rows carry a different BU
+ * than the one currently selected — same reasoning as
+ * resourceBudgetRepository.sumActiveHoursForEmployeeMonth's 176-hour cap fix.
  * @param {string} date - "YYYY-MM-DD"
  * @param {number} employeeId
  * @param {number} [excludeId] - exclude this row (Update only)
- * @param {number} companyId
+ * @param {number} [companyId] - unused, kept for call-site compatibility
  * @returns {Promise<number>}
  */
 const getDailyHours = async (date, employeeId, excludeId = null, companyId) => {
-  const where = { work_date: date, employee_id: employeeId, company_id: companyId };
+  const where = { work_date: date, employee_id: employeeId };
   if (excludeId) where.id = { [Op.ne]: excludeId };
 
   const result = await EmployeeWorkLog.findOne({
@@ -504,6 +557,46 @@ const revertSyncStatusByImportIds = async (importIds, transaction = null) => {
 };
 
 /**
+ * Revert the single work log row matching (employeeId, poId, date) back to
+ * 'approved' if — and only if — it's currently sitting at status='synced'.
+ * Called when an Admin deletes one official Timesheet row
+ * (timesheetService.deleteTimesheet): that row is the synced projection of
+ * this work log, so once it's gone the work log must not be left stuck
+ * showing status='synced' with a dangling timesheet_import_id.
+ *
+ * Reverts to 'approved', not 'pending' — unlike revertSyncStatusByImportIds
+ * (whole import batch gone, so re-sync is expected before re-approval would
+ * matter) a single deleted row leaves the rest of the sync intact, and the
+ * Manager's approval already happened; it must not be silently discarded.
+ * Guarded to status='synced' so a row already moved on (e.g. edited back to
+ * 'pending', or 'rejected') is never clobbered by a stale/duplicate delete.
+ *
+ * @param {number} companyId
+ * @param {number} employeeId
+ * @param {number} poId
+ * @param {string} date
+ * @param {object} [transaction]
+ * @returns {Promise<number>} rows reverted (0 or 1)
+ */
+const revertSyncStatusByTuple = async (companyId, employeeId, poId, date, transaction = null) => {
+  const [count] = await EmployeeWorkLog.update(
+    { status: 'approved', synced_at: null, timesheet_import_id: null },
+    {
+      where: {
+        company_id: companyId,
+        employee_id: employeeId,
+        service_po_id: poId,
+        work_date: date,
+        status: 'synced',
+      },
+      ...(transaction ? { transaction } : {}),
+    }
+  );
+
+  return count;
+};
+
+/**
  * Report rows for the Employee Reports module (Phase 4) — reads ONLY from
  * employee_work_logs, never from `timesheets` (Admin Reports keep reading
  * timesheets via reportRepository.js; the two data sources are never mixed).
@@ -757,8 +850,14 @@ const approveByEmployeeAndMonths = async (employeeId, months, transaction = null
  * never sit waiting for a Manager action they don't need. Deliberately a
  * separate, additive call made AFTER the creation transaction commits —
  * Draft creation itself always inserts status='pending' unchanged.
+ *
+ * Deliberately NOT company/BU-scoped (companyId accepted but unused) — `ids`
+ * are always the exact rows just inserted in the same request/transaction
+ * (some of which may legitimately carry a different BU's company_id than
+ * the caller's active session for a cross-BU-mapped employee), so `id IN
+ * (...)` alone is already the real, sufficient boundary.
  * @param {number[]} ids
- * @param {number} companyId
+ * @param {number} [companyId] - unused, kept for call-site compatibility
  * @param {object} [transaction]
  * @returns {Promise<number>} rows updated
  */
@@ -767,7 +866,7 @@ const markApprovedByIds = async (ids, companyId, transaction = null) => {
   const [count] = await EmployeeWorkLog.update(
     { status: 'approved' },
     {
-      where: { id: { [Op.in]: ids }, company_id: companyId },
+      where: { id: { [Op.in]: ids } },
       ...(transaction ? { transaction } : {}),
     }
   );
@@ -831,14 +930,18 @@ const rejectById = async (id, { remark, rejectedBy }) => {
  * is pending again (see EmployeeWorkLog.js's doc comment); it's only
  * overwritten by a subsequent rejection. The status='rejected' guard makes
  * this a no-op (0 rows) if the row isn't currently rejected.
+ *
+ * Deliberately NOT company/BU-scoped (companyId accepted but unused) — same
+ * reasoning as update()/deleteById() above: the caller already re-verified
+ * ownership via findByIdForEmployee() before calling this.
  * @param {number} id
- * @param {number} companyId
+ * @param {number} [companyId] - unused, kept for call-site compatibility
  * @returns {Promise<EmployeeWorkLog|null>} the updated row, or null if it wasn't rejected
  */
 const resubmitById = async (id, companyId) => {
   const [count] = await EmployeeWorkLog.update(
     { status: 'pending' },
-    { where: { id, company_id: companyId, status: 'rejected' } }
+    { where: { id, status: 'rejected' } }
   );
   if (count === 0) return null;
   return findById(id);
@@ -905,10 +1008,15 @@ const existsForHierarchyNodes = async (hierarchyNodeIds, companyId) => {
  * a single call clears both any existing Daily entries for the month and
  * any previous Monthly entry, before the new Monthly rows are inserted in
  * the same transaction.
+ * Deliberately NOT company/BU-scoped (companyId accepted but unused) — same
+ * reasoning as deleteByEmployeeAndDate() above: a month's lines can span
+ * more than one BU for a cross-BU-mapped employee, and this must clear
+ * EVERY existing row for the month regardless of which BU it carries, or
+ * the reinsert below would collide with an un-deleted cross-BU leftover.
  * @param {number} employeeId
  * @param {string} startDate - "YYYY-MM-DD"
  * @param {string} endDate - "YYYY-MM-DD"
- * @param {number} companyId
+ * @param {number} [companyId] - unused, kept for call-site compatibility
  * @param {object} transaction
  * @returns {Promise<number>} rows deleted
  */
@@ -917,7 +1025,6 @@ const deleteByEmployeeAndDateRange = async (employeeId, startDate, endDate, comp
     where: {
       employee_id: employeeId,
       work_date: { [Op.gte]: startDate, [Op.lte]: endDate },
-      company_id: companyId,
     },
     transaction,
   });
@@ -928,10 +1035,19 @@ const deleteByEmployeeAndDateRange = async (employeeId, startDate, endDate, comp
  * a date range — backs the Daily-side guard
  * (employeeTimesheetService.assertNoMonthlyLogForDate) that blocks Daily
  * create/update for a month that already has a Monthly entry.
+ *
+ * Deliberately NOT company/BU-scoped (companyId accepted but unused) — the
+ * Daily/Monthly mutual-exclusivity rule is a per-employee, per-month
+ * invariant, not per-company, same reasoning as this function's sibling
+ * getMonthEntryModeSummary() below (already fixed for exactly this reason —
+ * this one was missed in that same pass). A Monthly entry created under a
+ * different BU-selector session (or against a cross-BU Service PO) must
+ * still block a new Daily entry for that month, or the rule could be
+ * silently bypassed by mixing BU sessions.
  * @param {number} employeeId
  * @param {string} startDate - "YYYY-MM-DD"
  * @param {string} endDate - "YYYY-MM-DD"
- * @param {number} companyId
+ * @param {number} [companyId] - unused, kept for call-site compatibility
  * @returns {Promise<boolean>}
  */
 const hasMonthlyEntry = async (employeeId, startDate, endDate, companyId) => {
@@ -939,7 +1055,6 @@ const hasMonthlyEntry = async (employeeId, startDate, endDate, companyId) => {
     where: {
       employee_id: employeeId,
       work_date: { [Op.gte]: startDate, [Op.lte]: endDate },
-      company_id: companyId,
       log_type: 'monthly',
     },
     attributes: ['id'],
@@ -1032,6 +1147,7 @@ module.exports = {
   findForSync,
   markSyncedByTuples,
   revertSyncStatusByImportIds,
+  revertSyncStatusByTuple,
   getReportRows,
   getWorkLogTimeReportRows,
   findForApprovalSummary,

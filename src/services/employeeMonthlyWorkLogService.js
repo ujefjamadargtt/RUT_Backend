@@ -154,7 +154,7 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data) => {
     await employeeWorkLogRepository.deleteByEmployeeAndDateRange(employeeId, startDate, endDate, companyId, transaction);
 
     return employeeWorkLogRepository.bulkCreate(
-      resolvedLines.map(({ line }) => ({
+      resolvedLines.map(({ line, po }) => ({
         employee_id: employeeId,
         service_po_id: line.service_po_id,
         sub_project_id: line.sub_project_id || null,
@@ -162,7 +162,12 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data) => {
         work_date: endDate,
         hours: line.hours,
         description: line.description,
-        company_id: companyId,
+        // The work log belongs to the Service PO's OWN owning BU, not
+        // necessarily the caller's active session BU (cross-BU resourcing) —
+        // see employeeTimesheetService.replaceDailyEntries' identical
+        // comment. Falls back to the session companyId only for a
+        // BU-less/Centralised PO (company_id: null).
+        company_id: po.company_id ?? companyId,
         status: 'pending',
         log_type: 'monthly',
         created_by: employeeId,

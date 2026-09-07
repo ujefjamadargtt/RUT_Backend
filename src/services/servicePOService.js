@@ -9,7 +9,7 @@ const servicePOHierarchyRepository = require('../repositories/servicePOHierarchy
 const timesheetRepository = require('../repositories/timesheetRepository');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
 const employeeServicePOMappingService = require('./employeeServicePOMappingService');
-const { resolveActorCompanyScope, resolveCreateCompanyIdForActor, resolveActorCompanyScopeForSelectedBU } = require('./companyAccessControlService');
+const { resolveActorCompanyScope, resolveCreateCompanyIdForActor, resolveActorCompanyScopeForSelectedBU, resolveCentralisedOwnerCreatorIds } = require('./companyAccessControlService');
 const { Employee, Company, sequelize } = require('../models');
 const { Op } = require('sequelize');
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
@@ -24,6 +24,26 @@ const aiInsightService = require('./aiInsight.service');
 
 // Valid status transitions when closing or updating
 const ALLOWED_CLOSE_FROM = ['active'];
+
+/**
+ * Resolve the `centralisedOwnerIds` a read/view/map call passes into
+ * servicePORepository's `includeCentralised`-widened calls (findAll/
+ * findById/getActivePOs) — the tenant boundary for a BU-less Centralised
+ * Service PO. `companyId` here is whatever resolveActorCompanyScope()/
+ * resolveActorCompanyScopeForSelectedBU() already resolved for this actor —
+ * a plain number OR an array (see servicePORepository.companyScope()'s doc
+ * comment on why both shapes occur in real traffic) — normalized to an
+ * array of the actor's own reachable Business Unit ids before being handed
+ * to resolveCentralisedOwnerCreatorIds(), which resolves it the rest of the
+ * way to actual employeeIds.
+ *
+ * @param {number|number[]|null} companyId
+ * @returns {Promise<number[]>}
+ */
+async function resolveCentralisedOwnerIds(companyId) {
+  const ownCompanyIds = Array.isArray(companyId) ? companyId : (companyId != null ? [companyId] : []);
+  return resolveCentralisedOwnerCreatorIds(ownCompanyIds);
+}
 
 /**
  * Confirm a Project belongs to the given Client — the cross-check the
@@ -159,6 +179,9 @@ const getAll = async (query = {}, authContext, headerCompanyId = null) => {
     // see servicePORepository.companyScope()'s doc comment. No-op for a
     // BU-scoped actor (companyId a plain number there, never an array).
     createdBy: authContext.employeeId,
+    // Widens the list to this actor's own tenant's Centralised POs
+    // (company_id NULL) — see resolveCentralisedOwnerIds()'s doc comment.
+    centralisedOwnerIds: await resolveCentralisedOwnerIds(companyId),
   };
 
   const sort = {
@@ -181,7 +204,12 @@ const getAll = async (query = {}, authContext, headerCompanyId = null) => {
  */
 const getById = async (id, authContext) => {
   const companyId = await resolveActorCompanyScope(authContext);
-  const po = await servicePORepository.findById(id, companyId, authContext.employeeId);
+  // A BU-scoped actor (BU Admin/Service PO Admin) must be able to VIEW a
+  // Centralised PO applicable to their own tenant, even though it never
+  // gets a BU of its own (company_id NULL). See
+  // servicePORepository.companyScope()'s doc comment.
+  const centralisedOwnerIds = await resolveCentralisedOwnerIds(companyId);
+  const po = await servicePORepository.findById(id, companyId, authContext.employeeId, centralisedOwnerIds);
 
   if (!po) {
     const err = new Error('Service PO not found.');
@@ -564,7 +592,11 @@ const allocateResources = async (poId, employeeIds, userId, req) => {
     employeeId: req.employeeId,
   });
 
-  const po = await servicePORepository.findById(poId, scope, req.employeeId);
+  // A BU-scoped actor must be able to map employees onto a Centralised PO
+  // applicable to their own tenant. See servicePORepository.companyScope()'s
+  // doc comment.
+  const centralisedOwnerIds = await resolveCentralisedOwnerIds(scope);
+  const po = await servicePORepository.findById(poId, scope, req.employeeId, centralisedOwnerIds);
   if (!po) {
     const err = new Error('Service PO not found.');
     err.statusCode = 404;
@@ -650,7 +682,11 @@ const deallocateResource = async (poId, employeeId, userId, req) => {
     employeeId: req.employeeId,
   });
 
-  const po = await servicePORepository.findById(poId, scope, req.employeeId);
+  // A BU-scoped actor must be able to unmap an employee from a Centralised
+  // PO applicable to their own tenant. See
+  // servicePORepository.companyScope()'s doc comment.
+  const centralisedOwnerIds = await resolveCentralisedOwnerIds(scope);
+  const po = await servicePORepository.findById(poId, scope, req.employeeId, centralisedOwnerIds);
   if (!po) {
     const err = new Error('Service PO not found.');
     err.statusCode = 404;
@@ -692,7 +728,11 @@ const deallocateResource = async (poId, employeeId, userId, req) => {
  */
 const getUtilisation = async (poId, authContext) => {
   const companyId = await resolveActorCompanyScope(authContext);
-  const po = await servicePORepository.findById(poId, companyId, authContext.employeeId);
+  // A BU-scoped actor must be able to view utilisation for a Centralised PO
+  // applicable to their own tenant. See servicePORepository.companyScope()'s
+  // doc comment.
+  const centralisedOwnerIds = await resolveCentralisedOwnerIds(companyId);
+  const po = await servicePORepository.findById(poId, companyId, authContext.employeeId, centralisedOwnerIds);
   if (!po) {
     const err = new Error('Service PO not found.');
     err.statusCode = 404;
@@ -726,7 +766,8 @@ const getUtilisation = async (poId, authContext) => {
  */
 const getActivePOs = async (authContext, headerCompanyId = null) => {
   const companyId = await resolveActorCompanyScopeForSelectedBU(authContext, headerCompanyId);
-  return servicePORepository.getActivePOs(companyId, authContext.employeeId);
+  const centralisedOwnerIds = await resolveCentralisedOwnerIds(companyId);
+  return servicePORepository.getActivePOs(companyId, authContext.employeeId, centralisedOwnerIds);
 };
 
 /**

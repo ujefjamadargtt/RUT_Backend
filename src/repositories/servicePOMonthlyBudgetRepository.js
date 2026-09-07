@@ -184,7 +184,11 @@ const findActiveServicePOsForDropdown = async (companyId, servicePOIds) => {
         attributes: ['id', 'client_code', 'client_name'],
       },
     ],
-    attributes: ['id', 'service_po_code', 'service_po_name', 'is_billable', 'status'],
+    // company_id: lets the frontend derive the exact Business Unit a chosen PO belongs to (the
+    // budget entry sheet's record-fetch/save need one concrete BU, unlike this dropdown listing
+    // itself, which may span every BU the caller reaches) instead of asking the caller to also
+    // pick a matching page-level BU filter.
+    attributes: ['id', 'service_po_code', 'service_po_name', 'is_billable', 'status', 'company_id'],
     order: [['service_po_name', 'ASC']],
   });
 };

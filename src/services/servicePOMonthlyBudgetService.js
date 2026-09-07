@@ -192,6 +192,10 @@ const listServicePOsForDropdown = async (companyId, userId, roleName, employeeId
     service_po_name: po.service_po_name,
     is_billable: po.is_billable,
     status: po.status,
+    // Lets the frontend scope the record-fetch/save to this PO's own Business Unit once picked,
+    // instead of requiring the page's own (possibly "All Business Units") filter to also resolve
+    // to a single BU.
+    company_id: po.company_id,
     client: po.client ? { id: po.client.id, client_code: po.client.client_code, client_name: po.client.client_name } : null,
   }));
 };

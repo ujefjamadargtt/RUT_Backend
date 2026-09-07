@@ -96,6 +96,50 @@ async function resolveCompanyIdsOwnedByCreator(creatorEmployeeId) {
 }
 
 /**
+ * The mirror of resolveCompanyIdsOwnedByCreator() above, from the VIEWER's
+ * side instead of the creator's: given the Companies a viewer can already
+ * see (their own reachable Business Units), resolve every employeeId who
+ * may legitimately be the `created_by` of a BU-less (company_id NULL)
+ * tenant-wide record — e.g. a Centralised Service PO — that viewer should
+ * be allowed to see. That's each of those Companies' own Entity's creating
+ * Admin (`entities.created_by`) and its assigned Entity Admin
+ * (`entities.entity_admin_employee_id`, if any).
+ *
+ * This is the tenant boundary for a BU-less Centralised Service PO: one
+ * Admin's Centralised PO must never leak into an unrelated Admin's own PO
+ * Master list just because both have `company_id: null` — see
+ * servicePORepository.companyScope()'s `centralisedOwnerIds` param, which
+ * this feeds directly as a `created_by IN (...)` filter.
+ *
+ * @param {number[]} companyIds - the viewer's own reachable Business Unit ids
+ * @returns {Promise<number[]>} possibly empty — means this viewer has no
+ *   Company at all to derive a tenant from, so no Centralised PO should
+ *   widen into their view either.
+ */
+async function resolveCentralisedOwnerCreatorIds(companyIds) {
+  if (!companyIds || companyIds.length === 0) return [];
+
+  const companies = await Company.findAll({
+    where: { id: { [Op.in]: companyIds }, is_deleted: false },
+    attributes: ['entity_id'],
+  });
+  const entityIds = [...new Set(companies.map((c) => c.entity_id).filter((id) => id != null))];
+  if (entityIds.length === 0) return [];
+
+  const entities = await Entity.findAll({
+    where: { id: { [Op.in]: entityIds }, is_deleted: false },
+    attributes: ['created_by', 'entity_admin_employee_id'],
+  });
+
+  const creatorIds = new Set();
+  entities.forEach((e) => {
+    if (e.created_by != null) creatorIds.add(e.created_by);
+    if (e.entity_admin_employee_id != null) creatorIds.add(e.entity_admin_employee_id);
+  });
+  return [...creatorIds];
+}
+
+/**
  * Resolve the effective Company scope for any company-scoped resource
  * (Client, ServiceType, ServiceCategory, ServicePO, ...): the actor's own
  * `req.companyId` if they have one, otherwise their RESOLVED list of owned
@@ -663,6 +707,7 @@ async function resolveCreateCompanyIdForActor(req, bodyCompanyId, { required = t
 module.exports = {
   resolveOwnedCompanyIds,
   resolveCompanyIdsOwnedByCreator,
+  resolveCentralisedOwnerCreatorIds,
   resolveActorCompanyScope,
   resolveActorRecordAccessScope,
   resolveCreateCompanyId,

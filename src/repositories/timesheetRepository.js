@@ -406,8 +406,11 @@ const publishByImportId = async (importId, transaction = null, companyId) => {
  * @param {number} companyId
  * @returns {Promise<number>} 1 if deleted, 0 if not found.
  */
-const deleteById = async (id, companyId) => {
-  return Timesheet.destroy({ where: { id, company_id: companyId } });
+const deleteById = async (id, companyId, transaction = null) => {
+  return Timesheet.destroy({
+    where: { id, company_id: companyId },
+    ...(transaction ? { transaction } : {}),
+  });
 };
 
 /**

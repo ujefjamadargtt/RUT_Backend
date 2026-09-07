@@ -5,6 +5,7 @@ const serviceCategoryRepo = require('../repositories/serviceCategoryRepository')
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
 const logger = require('../utils/logger');
 const dateHelper = require('../helpers/dateHelper');
+const { resolveCentralisedOwnerCreatorIds } = require('./companyAccessControlService');
 
 /**
  * Report Service
@@ -467,6 +468,15 @@ async function getOperationalCostBreakdown(query, companyIds) {
  * Employee Utilization Summary Report
  * Requires month and year filters.
  *
+ * Employee selection is scoped to the caller's own BU(s), but the hours
+ * summed per employee are NOT further scoped by company_id — this
+ * deliberately includes hours logged against a Service PO owned by a
+ * different BU (cross-BU resourcing), so a BU Admin/Manager sees their
+ * employee's true total workload, not just the slice billed to their own
+ * BU's POs. See reportRepository.getEmployeeUtilizationSummary's doc
+ * comment for the full reasoning — every OTHER report in this file is
+ * company_id-scoped on purpose; this one intentionally is not.
+ *
  * @param {object} query - req.query
  * @returns {Promise<{ data: object[], meta: object, summary: object }>}
  */
@@ -567,6 +577,12 @@ async function getServicePOSummary(query, companyIds) {
 
   logger.info('Report: getServicePOSummary', { filters, page, limit });
 
+  // Widens the NULL-company (Centralised) fallback below to only this
+  // caller's own tenant — see servicePORepository.companyScope()'s doc
+  // comment. Without this, a Centralised PO created under ANY tenant leaks
+  // into every other tenant's report just because both share company_id: null.
+  const centralisedOwnerIds = await resolveCentralisedOwnerCreatorIds(companyIds);
+
   const { rows, count } = await reportRepo.getServicePOSummary({
     month:      filters.month,
     year:       filters.year,
@@ -586,6 +602,7 @@ async function getServicePOSummary(query, companyIds) {
     hoursSource: filters.hoursSource,
     roleId: filters.roleId,
     companyIds,
+    centralisedOwnerIds,
   });
 
   const meta = getPaginationMeta(count, page, limit);
@@ -658,6 +675,12 @@ async function getInvoicePOSummary(query, companyIds) {
 
   logger.info('Report: getInvoicePOSummary', { filters, page, limit });
 
+  // Widens the NULL-company (Centralised) fallback below to only this
+  // caller's own tenant — see servicePORepository.companyScope()'s doc
+  // comment. Without this, a Centralised PO created under ANY tenant leaks
+  // into every other tenant's report just because both share company_id: null.
+  const centralisedOwnerIds = await resolveCentralisedOwnerCreatorIds(companyIds);
+
   const { rows, count } = await reportRepo.getInvoicePOSummary({
     month:      filters.month,
     year:       filters.year,
@@ -677,6 +700,7 @@ async function getInvoicePOSummary(query, companyIds) {
     hoursSource: filters.hoursSource,
     roleId: filters.roleId,
     companyIds,
+    centralisedOwnerIds,
   });
 
   const meta = getPaginationMeta(count, page, limit);
@@ -687,6 +711,7 @@ async function getInvoicePOSummary(query, companyIds) {
     (acc, row) => {
       acc.total_po_value                += round2(row.po_value);
       acc.total_hours_delivered         += round2(row.hours_delivered_before_month);
+      acc.total_hours_delivered_current_month += round2(row.hours_delivered_current_month);
       acc.total_exp_hours               += round2(row.exp_hours);
       acc.total_monthly_billable_amount += round2(row.monthly_billable_amount);
       acc.total_invoiced_amount         += round2(row.invoiced_amount);
@@ -697,6 +722,7 @@ async function getInvoicePOSummary(query, companyIds) {
     {
       total_po_value: 0,
       total_hours_delivered: 0,
+      total_hours_delivered_current_month: 0,
       total_exp_hours: 0,
       total_monthly_billable_amount: 0,
       total_invoiced_amount: 0,
@@ -711,6 +737,7 @@ async function getInvoicePOSummary(query, companyIds) {
     summary: {
       total_po_value:                     round2(pageTotals.total_po_value),
       total_hours_delivered_before_month: round2(pageTotals.total_hours_delivered),
+      total_hours_delivered_current_month: round2(pageTotals.total_hours_delivered_current_month),
       total_exp_hours:                    round2(pageTotals.total_exp_hours),
       total_monthly_billable_amount:      round2(pageTotals.total_monthly_billable_amount),
       total_invoiced_amount:              round2(pageTotals.total_invoiced_amount),

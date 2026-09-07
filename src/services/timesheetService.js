@@ -2003,14 +2003,38 @@ const publishImport = async (timesheetImportId, companyId) => {
 
 /**
  * Delete a timesheet entry.
+ *
+ * If this timesheet row came from a Sync (i.e. the source Employee Work Log
+ * is sitting at status='synced'), that work log must not be left stuck
+ * showing "synced" once the official Timesheet record it pointed to is
+ * gone — see employeeWorkLogRepository.revertSyncStatusByTuple. It reverts
+ * to 'approved' (not 'pending'): a Manager's approval already happened and
+ * must not be re-requested just because the synced copy was deleted.
+ *
  * @param {number} id
  * @returns {Promise<void>}
  */
 const deleteTimesheet = async (id, companyId) => {
-  const rows = await timesheetRepository.deleteById(id, companyId);
-  if (rows === 0) {
+  const timesheet = await timesheetRepository.findById(id, companyId);
+  if (!timesheet) {
     const err = new Error(`Timesheet #${id} not found.`);
     err.statusCode = 404;
+    throw err;
+  }
+
+  const t = await sequelize.transaction();
+  try {
+    await employeeWorkLogRepository.revertSyncStatusByTuple(
+      companyId,
+      timesheet.employee_id,
+      timesheet.service_po_id,
+      timesheet.timesheet_date,
+      t
+    );
+    await timesheetRepository.deleteById(id, companyId, t);
+    await t.commit();
+  } catch (err) {
+    await t.rollback();
     throw err;
   }
 };

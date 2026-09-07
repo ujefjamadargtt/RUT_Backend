@@ -432,6 +432,11 @@ router.get(
  *       service_types.service_type_name (keyword matching with priority order —
  *       leaves → team_management → lnd → internal_support → others).
  *       Monthly capacity defaults to 176 hrs. Total utilization excludes leave hours.
+ *       Employees are scoped to the caller's own Business Unit(s), but each
+ *       employee's hour totals are NOT further BU-scoped — an employee
+ *       resourced onto a different BU's Service PO has those hours included
+ *       here too, so this reflects their true total workload rather than
+ *       only the portion billed to the caller's own BU.
  *     tags: [Reports]
  *     security:
  *       - bearerAuth: []

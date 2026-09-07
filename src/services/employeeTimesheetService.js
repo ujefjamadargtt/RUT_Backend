@@ -453,9 +453,15 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
   // for why this is necessary (GET /daily can't expose enough for the
   // caller to do this itself). No-op for a line that supplies its own
   // time_entries, or one whose key has no existing TIME_BASED row.
+  //
+  // companyId deliberately omitted here (not the session's) — this date's
+  // existing rows can legitimately span more than one BU for a cross-BU-
+  // mapped employee (each row's own company_id mirrors its Service PO's
+  // owning BU, not the active session), so the lookup must see all of them
+  // regardless of BU. See employeeWorkLogRepository.findAll's doc comment.
   const existingRowsForDate = mergedLines.length > 0
     ? (await employeeWorkLogRepository.findAll(
-        { employeeId, startDate: dateStr, endDate: dateStr, companyId },
+        { employeeId, startDate: dateStr, endDate: dateStr },
         { limit: 1000 }
       )).rows
     : [];
@@ -526,7 +532,7 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
     await employeeWorkLogRepository.deleteByEmployeeAndDate(employeeId, dateStr, companyId, transaction);
 
     const rows = await employeeWorkLogRepository.bulkCreate(
-      resolvedLines.map(({ line }, i) => ({
+      resolvedLines.map(({ line, po }, i) => ({
         employee_id: employeeId,
         service_po_id: line.service_po_id,
         sub_project_id: line.sub_project_id || null,
@@ -537,7 +543,12 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
         // undefined) for a TIME_BASED line, which the DB's NOT NULL column
         // still needs a real value for — default to blank, never a crash.
         description: line.description || '',
-        company_id: companyId,
+        // The work log belongs to the Service PO's OWN owning BU, not
+        // necessarily the caller's active session BU (cross-BU resourcing —
+        // see assertProjectMapped's doc comment). Falls back to the session
+        // companyId only for a BU-less/Centralised PO (company_id: null),
+        // which has no owning BU of its own to anchor to.
+        company_id: po.company_id ?? companyId,
         status: 'pending',
         created_by: employeeId,
         updated_by: employeeId,
@@ -680,6 +691,11 @@ const updateEntry = async (employeeId, companyId, id, data) => {
       work_date: dateStr,
       hours,
       description: effectiveDescription,
+      // Re-anchored to the (possibly changed) Service PO's own owning BU —
+      // see replaceDailyEntries' identical comment on why this isn't the
+      // session's companyId. Matters here specifically when this edit
+      // changes service_po_id to a PO owned by a different BU.
+      company_id: po.company_id ?? companyId,
       updated_by: employeeId,
       // Any edit invalidates a prior sync snapshot — revert unconditionally
       // to 'pending' (a no-op if it was already 'pending') EXCEPT when the
@@ -827,7 +843,9 @@ const addTimeEntries = async (employeeId, companyId, data) => {
         work_date: dateStr,
         hours: newTotalHours,
         description: effectiveDescription,
-        company_id: companyId,
+        // See replaceDailyEntries' identical comment — anchored to the
+        // Service PO's own owning BU, not the caller's active session.
+        company_id: po.company_id ?? companyId,
         status: 'pending',
         created_by: employeeId,
         updated_by: employeeId,

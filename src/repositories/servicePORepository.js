@@ -37,21 +37,57 @@ const {
  * from their own list/detail/update/close/delete calls forever. Same fix
  * already applied to Project (projectRepository.companyScope).
  *
+ * `centralisedOwnerIds`, when a non-empty array, additionally matches a
+ * Centralised Service PO with no Business Unit at all (`company_id IS NULL
+ * AND is_centralised = true AND created_by IN (centralisedOwnerIds)`) —
+ * such a PO is visible to every Business Unit it was auto-mapped into (see
+ * getActiveCentralisedPOIds()'s doc comment), so a strict company_id match
+ * alone would wrongly hide it from PO Master's list/detail/allocate/
+ * dropdown paths for a BU-scoped actor (BU Admin/Service PO Admin). The
+ * `created_by IN (...)` guard is the TENANT boundary — callers must resolve
+ * `centralisedOwnerIds` via companyAccessControlService.
+ * resolveCentralisedOwnerCreatorIds(), the Admin(s)/Entity Admin who
+ * actually administer the CALLER's own Business Unit(s), never every
+ * Centralised PO on the platform — without it, one Admin's Centralised PO
+ * would leak into an unrelated Admin's own PO Master list just because both
+ * happen to be `company_id: null`.
+ *
+ * Applies to BOTH the plain-number form (a BU-scoped actor authenticated
+ * via the `authenticate` chain — req.companyId) AND the ARRAY form — a
+ * BU-scoped actor reaches list/detail/active-list/utilisation via the
+ * `authenticateReadMultiBU` chain instead (see servicePO.routes.js), which
+ * resolves their scope as `req.companyIds`, ALWAYS an array even for a
+ * single mapped Business Unit (resolveReportCompanyScope() always returns
+ * one), so the array form is by far the more common shape these callers
+ * actually see in real traffic, not the exception. Only widens read/view/
+ * map access — never opted into by update()/close()/softDelete(), so a
+ * BU-scoped actor can still never edit, close, or delete a Centralised PO.
+ * No effect when `centralisedOwnerIds` is omitted/empty (the default).
+ *
  * @param {number|number[]|null} companyId
  * @param {number|null} [createdBy]
+ * @param {number[]|null} [centralisedOwnerIds]
  * @returns {object}
  */
-function companyScope(companyId, createdBy = null) {
+function companyScope(companyId, createdBy = null, centralisedOwnerIds = null) {
+  const includeCentralised = Array.isArray(centralisedOwnerIds) && centralisedOwnerIds.length > 0;
   if (Array.isArray(companyId)) {
+    const clauses = [{ company_id: { [Op.in]: companyId } }];
     if (createdBy != null) {
-      return {
-        [Op.or]: [
-          { company_id: { [Op.in]: companyId } },
-          { company_id: null, created_by: createdBy },
-        ],
-      };
+      clauses.push({ company_id: null, created_by: createdBy });
     }
-    return { company_id: { [Op.in]: companyId } };
+    if (includeCentralised) {
+      clauses.push({ company_id: null, is_centralised: true, created_by: { [Op.in]: centralisedOwnerIds } });
+    }
+    return clauses.length === 1 ? clauses[0] : { [Op.or]: clauses };
+  }
+  if (includeCentralised && typeof companyId === 'number') {
+    return {
+      [Op.or]: [
+        { company_id: companyId },
+        { company_id: null, is_centralised: true, created_by: { [Op.in]: centralisedOwnerIds } },
+      ],
+    };
   }
   return { company_id: companyId };
 }
@@ -66,7 +102,7 @@ function companyScope(companyId, createdBy = null) {
  * @returns {Promise<{ rows: ServicePO[], count: number }>}
  */
 const findAll = async (filters = {}, pagination = {}, sort = {}) => {
-  const { search, status, client_id, project_id, service_category_id, service_type_id, service_po_id, is_billable, start_date_from, start_date_to, companyId, createdBy } = filters;
+  const { search, status, client_id, project_id, service_category_id, service_type_id, service_po_id, is_billable, start_date_from, start_date_to, companyId, createdBy, centralisedOwnerIds } = filters;
   const { limit = 10, offset = 0 } = pagination;
   const { sortBy = 'created_at', sortOrder = 'DESC' } = sort;
 
@@ -75,7 +111,12 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
   // its own [Op.and] entry so the search filter below (which needs its own,
   // unrelated Op.or) can never collide with and overwrite it under the same
   // object key — same fix as projectRepository.findAll().
-  const where = { is_deleted: false, [Op.and]: [companyScope(companyId, createdBy)] };
+  //
+  // centralisedOwnerIds — PO Master's list must show a BU-scoped actor's
+  // applicable Centralised POs alongside their own BU's POs, not just the
+  // latter, but only the ones administered by THEIR OWN tenant. See
+  // companyScope()'s doc comment.
+  const where = { is_deleted: false, [Op.and]: [companyScope(companyId, createdBy, centralisedOwnerIds)] };
 
   if (status && status !== 'all') {
     where.status = status;
@@ -176,11 +217,14 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
  * @param {number} id
  * @param {number|number[]|null} companyId
  * @param {number|null} [createdBy] - see companyScope()'s doc comment
+ * @param {number[]|null} [centralisedOwnerIds] - see companyScope()'s doc
+ *   comment; omit/empty so a plain lookup stays strictly BU-scoped (update()/
+ *   close()/deleteServicePO() rely on this default).
  * @returns {Promise<ServicePO|null>}
  */
-const findById = async (id, companyId, createdBy = null) => {
+const findById = async (id, companyId, createdBy = null, centralisedOwnerIds = null) => {
   return ServicePO.findOne({
-    where: { id, is_deleted: false, ...companyScope(companyId, createdBy) },
+    where: { id, is_deleted: false, ...companyScope(companyId, createdBy, centralisedOwnerIds) },
     include: [
       {
         model: Client,
@@ -380,11 +424,12 @@ const getUtilisation = async (poId, companyId) => {
  *
  * @param {number|number[]|null} companyId
  * @param {number|null} [createdBy] - see companyScope()'s doc comment
+ * @param {number[]|null} [centralisedOwnerIds] - see companyScope()'s doc comment
  * @returns {Promise<ServicePO[]>}
  */
-const getActivePOs = async (companyId, createdBy = null) => {
+const getActivePOs = async (companyId, createdBy = null, centralisedOwnerIds = null) => {
   return ServicePO.findAll({
-    where: { status: { [Op.in]: ['in-progress', 'on-hold', 'pending'] }, is_deleted: false, ...companyScope(companyId, createdBy) },
+    where: { status: { [Op.in]: ['in-progress', 'on-hold', 'pending'] }, is_deleted: false, ...companyScope(companyId, createdBy, centralisedOwnerIds) },
     include: [
       {
         model: Client,
