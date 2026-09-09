@@ -5,7 +5,7 @@ const serviceCategoryRepo = require('../repositories/serviceCategoryRepository')
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
 const logger = require('../utils/logger');
 const dateHelper = require('../helpers/dateHelper');
-const { resolveCentralisedOwnerCreatorIds } = require('./companyAccessControlService');
+const { resolveCentralisedOwnerCreatorIds, intersectCompanyIdsWithEntity } = require('./companyAccessControlService');
 
 /**
  * Report Service
@@ -34,6 +34,11 @@ function parseCommonFilters(query) {
     status: query.status || undefined,
     hoursSource: query.hoursSource,
     roleId: query.roleId,
+    // Optional further narrowing on top of the caller's BU/role scope — see
+    // companyAccessControlService.intersectCompanyIdsWithEntity(). Never
+    // widens access: an entityId the caller has no Companies under simply
+    // yields no data.
+    entityId: query.entityId ? parseInt(query.entityId, 10) : undefined,
   };
 }
 
@@ -64,6 +69,7 @@ function parseIdList(value) {
 async function getEmployeeHourlyRate(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
 
   if (!filters.month || !filters.year) {
     const err = new Error('month and year query parameters are required for this report.');
@@ -101,6 +107,7 @@ async function getEmployeeHourlyRate(query, companyIds) {
 async function getMonthlyCostSummary(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
 
   logger.info('Report: getMonthlyCostSummary', { filters, page, limit });
 
@@ -149,6 +156,7 @@ async function getMonthlyCostSummary(query, companyIds) {
 async function getTimesheetSummary(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
 
   logger.info('Report: getTimesheetSummary', { filters, page, limit });
 
@@ -190,6 +198,7 @@ async function getTimesheetSummary(query, companyIds) {
 async function getServicePOUtilisation(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
 
   logger.info('Report: getServicePOUtilisation', { filters, page, limit });
 
@@ -216,6 +225,7 @@ async function getServicePOUtilisation(query, companyIds) {
 async function getSubProjectHours(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
 
   logger.info('Report: getSubProjectHours', { filters, page, limit });
 
@@ -333,6 +343,15 @@ function buildPivotResponse(rawColumns, rawRows, count, page, limit) {
     const total_hours       = billable_total + non_billable_total;
     const total_utilization = total_hours - leaves_hours;
 
+    // Monthly Resource Utilization report carries `monthly_capacity` on every
+    // employee row (currently a fixed 176); other pivot reports (e.g. plain
+    // Resource Utilization) don't select it, so this comes back null there
+    // and the frontend should hide the column rather than show a bogus %.
+    const monthlyCapacity = parseFloat(emp.monthly_capacity) || 0;
+    const utilization_percentage = monthlyCapacity > 0
+      ? round2((total_utilization / monthlyCapacity) * 100)
+      : null;
+
     return {
       ...emp,
       billable_total:     round2(billable_total),
@@ -340,6 +359,7 @@ function buildPivotResponse(rawColumns, rawRows, count, page, limit) {
       total_hours:        round2(total_hours),
       leaves_hours:       round2(leaves_hours),
       total_utilization:  round2(total_utilization),
+      utilization_percentage,
     };
   });
 
@@ -352,9 +372,10 @@ function buildPivotResponse(rawColumns, rawRows, count, page, limit) {
       acc.total_hours        += r.total_hours;
       acc.leaves_hours       += r.leaves_hours;
       acc.total_utilization  += r.total_utilization;
+      acc.monthly_capacity   += parseFloat(r.monthly_capacity) || 0;
       return acc;
     },
-    { billable_total: 0, non_billable_total: 0, total_hours: 0, leaves_hours: 0, total_utilization: 0 }
+    { billable_total: 0, non_billable_total: 0, total_hours: 0, leaves_hours: 0, total_utilization: 0, monthly_capacity: 0 }
   );
 
   return {
@@ -367,6 +388,9 @@ function buildPivotResponse(rawColumns, rawRows, count, page, limit) {
       total_hours:        round2(pageSummary.total_hours),
       leaves_hours:       round2(pageSummary.leaves_hours),
       total_utilization:  round2(pageSummary.total_utilization),
+      utilization_percentage: pageSummary.monthly_capacity > 0
+        ? round2((pageSummary.total_utilization / pageSummary.monthly_capacity) * 100)
+        : null,
     },
   };
 }
@@ -380,6 +404,7 @@ function buildPivotResponse(rawColumns, rawRows, count, page, limit) {
 async function getResourceAllocation(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
 
   const isBillable = query.isBillable !== undefined
     ? query.isBillable === 'true' || query.isBillable === true
@@ -424,6 +449,7 @@ async function getResourceAllocation(query, companyIds) {
 async function getOperationalCostBreakdown(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
 
   logger.info('Report: getOperationalCostBreakdown', { filters, page, limit });
 
@@ -483,6 +509,7 @@ async function getOperationalCostBreakdown(query, companyIds) {
 async function getEmployeeUtilizationSummary(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
 
   if (!filters.month || !filters.year) {
     const err = new Error('month and year query parameters are required for this report.');
@@ -554,6 +581,7 @@ async function getEmployeeUtilizationSummary(query, companyIds) {
 async function getServicePOSummary(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
 
   if (!filters.month || !filters.year) {
     const err = new Error('month and year query parameters are required for this report.');
@@ -652,6 +680,7 @@ async function getServicePOSummary(query, companyIds) {
 async function getInvoicePOSummary(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
 
   if (!filters.month || !filters.year) {
     const err = new Error('month and year query parameters are required for this report.');
@@ -756,6 +785,7 @@ async function getInvoicePOSummary(query, companyIds) {
  */
 async function getResourceUtilization(query, companyIds) {
   const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
 
   if (!filters.month || !filters.year) {
     const err = new Error('month and year query parameters are required for this report.');
@@ -800,6 +830,7 @@ async function getResourceUtilization(query, companyIds) {
  */
 async function getMonthlyResourceUtilization(query, companyIds) {
   const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
 
   if (!filters.month || !filters.year) {
     const err = new Error('month and year query parameters are required for this report.');
@@ -843,6 +874,9 @@ async function getResourseProjectUtilizationReport(query, companyIds) {
     err.statusCode = 422;
     throw err;
   }
+
+  const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, entityId);
 
   const filters = {
     month,
@@ -1009,6 +1043,9 @@ function resolveClientServicePODateRange(query) {
 async function getClientServicePOHoursReport(query, companyIds) {
   const { startDate, endDate } = resolveClientServicePODateRange(query);
 
+  const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, entityId);
+
   const filters = {
     companyIds,
     startDate,
@@ -1118,6 +1155,8 @@ function isBenchServiceTypeReport(servicePOName) {
  */
 async function getClientCostAnalytics(query, companyIds) {
   const hoursSource = query.hoursSource;
+  const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, entityId);
 
   const [hoursRows, costRows, categories, matrixRows] = await Promise.all([
     reportRepo.getClientCostAnalyticsHours({ companyIds, hoursSource }),
@@ -1203,6 +1242,9 @@ async function getClientCostAnalytics(query, companyIds) {
  */
 async function getClientWiseAnalyticsReport(query, companyIds) {
   const { startDate, endDate } = resolveClientServicePODateRange(query);
+
+  const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, entityId);
 
   const filters = {
     companyIds,
@@ -1295,6 +1337,9 @@ async function getClientWiseAnalyticsReport(query, companyIds) {
  */
 async function getMonthlyHoursTrend(query, companyIds) {
   const { startDate, endDate } = resolveClientServicePODateRange(query);
+
+  const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, entityId);
 
   const filters = {
     companyIds,
@@ -1403,6 +1448,9 @@ async function getMonthlyHoursTrend(query, companyIds) {
 async function getEmployeeBenchPercentage(query, companyIds) {
   const { startDate, endDate } = resolveClientServicePODateRange(query);
 
+  const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, entityId);
+
   const filters = {
     companyIds,
     startDate,
@@ -1475,6 +1523,9 @@ async function getEmployeeBenchPercentage(query, companyIds) {
  */
 async function getBudgetVsBilledReport(query, companyIds) {
   const { startDate, endDate } = resolveClientServicePODateRange(query);
+
+  const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, entityId);
 
   const filters = {
     companyIds,
@@ -1582,6 +1633,9 @@ async function getBudgetVsBilledReport(query, companyIds) {
 async function getResourceUtilizationTrendReport(query, companyIds) {
   const { startDate, endDate } = resolveClientServicePODateRange(query);
 
+  const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, entityId);
+
   const filters = {
     companyIds,
     startDate,
@@ -1650,6 +1704,9 @@ async function getResourceUtilizationTrendReport(query, companyIds) {
  */
 async function getServicePOHoursBudgetReport(query, companyIds) {
   const { startDate, endDate } = resolveClientServicePODateRange(query);
+
+  const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, entityId);
 
   const filters = {
     companyIds,

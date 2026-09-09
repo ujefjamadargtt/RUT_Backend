@@ -1,7 +1,7 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { Employee, ServicePOResource, ServicePO, EmployeeBusinessUnit } = require('../models');
+const { Employee, ServicePOResource, ServicePO, EmployeeBusinessUnit, EmployeeRole } = require('../models');
 
 /**
  * Employee Repository
@@ -83,23 +83,26 @@ async function employeeScope(companyId) {
 /**
  * Fetch a paginated, filtered, sorted list of employees.
  *
- * `businessUnitId`, when given, narrows the result down to employees
- * mapped to (or, for a legacy row, carrying the company_id of) that ONE
- * Business Unit — combined via a separate `Op.and` key so it stacks on top
- * of whatever `accessWhere`/`companyId` already restricted the query to,
- * rather than replacing it; it can only further narrow the caller's own
- * access scope, never widen it. Uses employeeScope() (not a bare
+ * `businessUnitId`/`roleId`, when given, narrow the result down to
+ * employees mapped to that ONE Business Unit / currently holding that ONE
+ * Role — each combined via the SAME `Op.and` array (both apply together,
+ * never overwriting each other) so they stack on top of whatever
+ * `accessWhere`/`companyId` already restricted the query to, rather than
+ * replacing it; they can only further narrow the caller's own access scope,
+ * never widen it. `businessUnitId` uses employeeScope() (not a bare
  * `company_id` match) for the same reason accessWhere already does — an
  * Employee created after the Employee-Business-Unit redesign never gets
- * its own `company_id` populated.
+ * its own `company_id` populated. Both are applied server-side, inside the
+ * SAME `where` this query's LIMIT/OFFSET run against, so pagination is
+ * always computed against the already-filtered set, never the pre-filter one.
  *
- * @param {object} filters    - { search, status, designation, businessUnitId }
+ * @param {object} filters    - { search, status, designation, businessUnitId, roleId }
  * @param {object} pagination - { limit, offset }
  * @param {object} sort       - { sortBy, sortOrder }
  * @returns {Promise<{ rows: Employee[], count: number }>}
  */
 const findAll = async (filters = {}, pagination = {}, sort = {}) => {
-  const { search, status, designation, companyId, accessWhere, businessUnitId } = filters;
+  const { search, status, designation, companyId, accessWhere, businessUnitId, roleId } = filters;
   const { limit = 20, offset = 0 } = pagination;
   const { sortBy: requestedSortBy = 'created_at', sortOrder = 'DESC' } = sort;
   // Defense-in-depth allowlist matching employeeValidation.js's sort_by enum
@@ -140,9 +143,12 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
     ];
   }
 
-  // Business Unit filter — see this function's doc comment. `Op.and` is not
-  // used anywhere else in this function, so this never collides with the
-  // `Op.or` key search may have just set above.
+  // Business Unit / Role filters — see this function's doc comment. `Op.and`
+  // is not used anywhere else in this function, so collecting both into one
+  // array here never collides with the `Op.or` key search may have just set
+  // above.
+  const andConditions = [];
+
   if (businessUnitId) {
     // The explicit list filter must follow the mapping table, not the
     // legacy employees.company_id column. This is the exact table updated by
@@ -152,7 +158,20 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
       attributes: ['employee_id'],
       raw: true,
     });
-    where[Op.and] = [{ id: { [Op.in]: buRows.map((row) => row.employee_id) } }];
+    andConditions.push({ id: { [Op.in]: buRows.map((row) => row.employee_id) } });
+  }
+
+  if (roleId) {
+    const roleRows = await EmployeeRole.findAll({
+      where: { role_id: roleId, status: 'active' },
+      attributes: ['employee_id'],
+      raw: true,
+    });
+    andConditions.push({ id: { [Op.in]: roleRows.map((row) => row.employee_id) } });
+  }
+
+  if (andConditions.length > 0) {
+    where[Op.and] = andConditions;
   }
 
   return Employee.findAndCountAll({

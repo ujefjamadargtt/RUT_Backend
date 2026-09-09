@@ -46,14 +46,35 @@ test('getMyEmployees returns every mapped employee and enriches each with BU ids
   }
 });
 
-test('getMyEmployees filters by the selected Business Unit while retaining all mapped BU ids in the response', async () => {
+test('getMyEmployees filters by an EXPLICITLY selected Business Unit while retaining all mapped BU ids in the response', async () => {
   try {
     stubTeam();
-    const employees = await managerSelfServiceService.getMyEmployees(99, [2]);
+    const employees = await managerSelfServiceService.getMyEmployees(99, [1, 2, 3], null, 2);
 
     assert.deepEqual(employees, [
       { id: 11, employee_code: 'EMP-0001', full_name: 'John Doe', designation: 'Software Engineer', status: 'active', business_unit_ids: [1, 2], business_units: [{ id: 1, name: 'Alpha' }, { id: 2, name: 'Beta' }], mapping_type: 'PRIMARY' },
     ]);
+  } finally {
+    restore();
+  }
+});
+
+// Regression test for a real bug report: a Manager was mapped (via
+// manager_employee_mappings) to an Employee who belongs to a Business Unit
+// the Manager does NOT personally belong to. That Employee never appeared
+// in "My Employees" — getMyEmployees was filtering the mapped-employee list
+// down to the Manager's OWN reachable Business Units (companyIds) even when
+// no Business Unit was explicitly selected, silently dropping any mapped
+// Employee outside that set. The mapping row itself is the access grant;
+// Business Unit must only narrow the list when explicitly requested.
+test('getMyEmployees: a mapped Employee in a Business Unit the Manager does not personally belong to still appears when no Business Unit is explicitly selected', async () => {
+  try {
+    stubTeam(); // employee 12 (Jane Doe) is only in BU 3
+    // The Manager's own reachable Business Units are [1, 2] — disjoint from
+    // Jane Doe's BU 3 — and no explicit filter (4th arg) is given.
+    const employees = await managerSelfServiceService.getMyEmployees(99, [1, 2], null, null);
+
+    assert.deepEqual(employees.map((e) => e.id).sort(), [11, 12]);
   } finally {
     restore();
   }

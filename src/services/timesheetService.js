@@ -768,6 +768,43 @@ const validateRows = async (rows, companyId) => {
   const validRows = [];
   const errorRows = [];
 
+  // Cross-BU resourcing also runs in the OPPOSITE direction from the
+  // mappedPoIds fix below: an Employee whose own company_id/BU membership
+  // is entirely elsewhere can still hold an active employee_servicepo_mapping
+  // to a Service PO that DOES belong to this sync's own `companyId` (e.g. a
+  // Delivery Head/Service PO Admin-style cross-BU resourcing assignment).
+  // Without admitting them here, such an Employee never even enters
+  // `allEmployees` below, so every row for them fails with a false "was not
+  // found in the system" — confirmed live via the Sync Employee Work Logs
+  // flow (an Employee mapped to a foreign-BU PO, no BU mapping of their own
+  // for that PO's company).
+  //
+  // Also ORs in `company_id: null` — a BU-less/Centralised Service PO (see
+  // findEligibleServicePOById's identical fallback, and
+  // employeeMonthlyWorkLogService.submitMonthlyWorkLog, which stamps such a
+  // PO's employee_work_logs rows with the CREATING actor's own companyId
+  // since the PO itself has none to anchor to). An Employee mapped only to
+  // a company_id:null PO, whose hours against it got anchored to THIS
+  // sync's companyId that way (e.g. a Manager filling it in for them while
+  // acting under this Business Unit), must resolve here too — without this,
+  // every such row also false-fails "was not found in the system," exactly
+  // like the specific-foreign-BU case above. Safe to OR in unconditionally:
+  // this only widens which Employees can be MATCHED against rows that
+  // findForSync() already scoped to `companyId`, never widens which rows
+  // are pulled in the first place.
+  const foreignEmployeeMappings = await EmployeeServicePOMapping.findAll({
+    where: { status: 'active' },
+    include: [{
+      model: ServicePO,
+      as: 'servicePO',
+      attributes: [],
+      where: { [Op.or]: [{ company_id: companyId }, { company_id: null }], is_deleted: false },
+      required: true,
+    }],
+    attributes: ['employee_id'],
+  });
+  const foreignEmployeeIds = foreignEmployeeMappings.map((m) => m.employee_id);
+
   // Pre-fetch all active employees and POs, scoped to this company, to
   // minimise N+1 queries. Without the company_id filter, an employee_code
   // or service_po_name valid in another company would silently resolve
@@ -776,12 +813,17 @@ const validateRows = async (rows, companyId) => {
   // employee_business_units membership for this company — an Employee
   // whose legacy company_id is null but who holds a real BU grant here
   // (common for an Admin-created Employee) must still resolve, or every
-  // row for them fails with a false "not found in the system".
+  // row for them fails with a false "not found in the system". Also ORs in
+  // foreignEmployeeIds (see comment above) for the reverse cross-BU case.
   const allEmployees = await Employee.findAll({
     where: {
       status: 'active',
       is_deleted: false,
-      [Op.or]: [{ company_id: companyId }, { '$businessUnits.id$': companyId }],
+      [Op.or]: [
+        { company_id: companyId },
+        { '$businessUnits.id$': companyId },
+        { id: { [Op.in]: foreignEmployeeIds } },
+      ],
     },
     attributes: ['id', 'full_name', 'employee_code', 'status'],
     include: [{ model: Company, as: 'businessUnits', attributes: [], through: { attributes: [] } }],
@@ -1636,17 +1678,26 @@ const validateImportHoursLimit = async ({ employeeId, timesheetImportId, hoursRe
  *
  * @param {object} data - { employee_id, service_po_id, sub_project_id?, client_id?, service_type_id?, service_category_id? }
  * @param {number|number[]} companyId
- * @param {{ skipPOCompanyScope?: boolean }} [options] - set skipPOCompanyScope
- *   when the caller (employeeTimesheetService/employeeMonthlyWorkLogService)
- *   has already confirmed an active employee_servicepo_mapping row for this
- *   exact employee+PO pair (assertProjectMapped) — see
- *   timesheetRepository.findEligibleServicePOById()'s doc comment for why
- *   that mapping is sufficient authorization even across Business Units.
+ * @param {{ skipPOCompanyScope?: boolean, skipEmployeeCompanyScope?: boolean }} [options] -
+ *   set skipPOCompanyScope/skipEmployeeCompanyScope when the caller
+ *   (employeeTimesheetService/employeeMonthlyWorkLogService, including the
+ *   Manager-fills-this-in-on-an-Employee's-behalf path in
+ *   managerMonthlyWorkLogService.js) has already confirmed an active
+ *   employee_servicepo_mapping row for this exact employee+PO pair
+ *   (assertProjectMapped) — see timesheetRepository.findEligibleServicePOById()/
+ *   findEligibleEmployeeById()'s doc comments for why that mapping is
+ *   sufficient authorization even across Business Units, independent of
+ *   which Business Unit `companyId` (the CALLER's own active one) happens
+ *   to be.
  * @returns {Promise<{ employee: object, po: object }>} the resolved records
  * @throws {Error} statusCode 422 — mirrors the wording/status validateRows() uses for the same failures
  */
 const resolveManualEntryReferences = async (data, companyId, options = {}) => {
-  const employee = await timesheetRepository.findEligibleEmployeeById(data.employee_id, companyId);
+  const employee = await timesheetRepository.findEligibleEmployeeById(
+    data.employee_id,
+    companyId,
+    { skipCompanyScope: options.skipEmployeeCompanyScope }
+  );
   if (!employee) {
     const err = new Error(`Employee #${data.employee_id} was not found or is not active.`);
     err.statusCode = 422;

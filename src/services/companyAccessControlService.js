@@ -482,6 +482,34 @@ async function resolveReportCompanyScope(authContext, requestedCompanyId) {
 }
 
 /**
+ * Narrows an already-resolved companyIds[] (BU/role reach, e.g. from
+ * resolveReportCompanyScope) down to just the Companies that also belong to
+ * a given Entity — backs the Reports module's optional `entityId` query
+ * param, which is meant to further restrict the caller's existing BU scope,
+ * never to replace or widen it.
+ *
+ * Returns companyIds unchanged when entityId is null/undefined. An entityId
+ * outside the caller's own reach isn't an error — the intersection simply
+ * yields [], same "no data" convention managementReportService's
+ * getBUPerformanceScorecard already uses for an empty entity/company set.
+ *
+ * @param {number[]} companyIds - the caller's already-authorized BU reach
+ * @param {number|null} [entityId]
+ * @returns {Promise<number[]>}
+ */
+async function intersectCompanyIdsWithEntity(companyIds, entityId) {
+  if (entityId == null) return companyIds;
+
+  const companies = await Company.findAll({
+    where: { entity_id: entityId, is_deleted: false },
+    attributes: ['id'],
+  });
+  const entityCompanyIds = new Set(companies.map((c) => c.id));
+
+  return (companyIds || []).filter((id) => entityCompanyIds.has(id));
+}
+
+/**
  * Resolve + validate the single explicit Business Unit id a WRITE/import
  * flow must stamp its rows with (Monthly Costs Excel import) — unlike
  * resolveActorCompanyScopeForSelectedBU()/resolveReportCompanyScope() (which
@@ -716,6 +744,7 @@ module.exports = {
   resolveSingleCompanyIdForCompanyLessActor,
   resolveActorCompanyScopeForSelectedBU,
   resolveReportCompanyScope,
+  intersectCompanyIdsWithEntity,
   resolveImportBusinessUnitId,
   resolveOwningAdminIdForCompany,
   resolveAdminOwnershipForBusinessUnits,

@@ -355,6 +355,11 @@ const getDailyHierarchyBreakdown = async ({ employeeId, date, companyId }) => {
       'service_po_id',
       'hierarchy_node_id',
       [fn('SUM', col('hours')), 'total_hours'],
+      // A single (employee, service_po, hierarchy_node, date) is unique
+      // (uq_employee_work_logs), so this GROUP BY never actually collapses
+      // more than one row — MAX is just how Postgres allows a non-aggregated
+      // column to sit alongside a SUM without also adding it to GROUP BY.
+      [fn('MAX', col('description')), 'description'],
     ],
     where: {
       work_date: date,
@@ -389,6 +394,10 @@ const getMonthlyHierarchyBreakdown = async ({ employeeId, month, year, companyId
       'service_po_id',
       'hierarchy_node_id',
       [fn('SUM', col('hours')), 'total_hours'],
+      // Same reasoning as getDailyHierarchyBreakdown's MAX(description) —
+      // (employee, service_po, hierarchy_node, work_date) is already unique,
+      // so grouping by date too never actually collapses more than one row.
+      [fn('MAX', col('description')), 'description'],
     ],
     where: {
       [Op.and]: [
@@ -429,6 +438,16 @@ const getHierarchyBreakdownForRange = async ({ employeeId, startDate, endDate })
       'service_po_id',
       'hierarchy_node_id',
       [fn('SUM', col('hours')), 'total_hours'],
+      // Unlike the daily/monthly breakdowns above, a range CAN legitimately
+      // span more than one row per (service_po_id, hierarchy_node_id) — e.g.
+      // several Daily entries against the same PO on different dates — in
+      // which case MAX(description) picks one of them (not necessarily the
+      // most recent), same ambiguity as SUM(hours) already collapsing their
+      // individual dates. Unambiguous for the common case this feeds
+      // (employeeMonthlyWorkLogService.buildMonthlyWorkLogDTO reading back a
+      // real Monthly Work Log submission), where exactly one row exists per
+      // node for the whole range.
+      [fn('MAX', col('description')), 'description'],
     ],
     where: {
       employee_id: parseInt(employeeId, 10),

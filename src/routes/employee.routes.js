@@ -223,7 +223,20 @@ router.get(
  *       - in: query
  *         name: business_unit_id
  *         schema: { type: integer }
- *         description: Narrows the list to employees mapped to this ONE Business Unit — stacks on top of (never widens) the caller's own access scope.
+ *         description: >
+ *           Narrows the list to employees mapped to this ONE Business Unit —
+ *           stacks on top of (never widens) the caller's own access scope.
+ *           This is the ONLY Business Unit filter for this endpoint —
+ *           X-Company-Id is not read as a filter here (unlike most other
+ *           list endpoints); it only resolves what a BU-scoped caller is
+ *           authorized to see at all. Omitted -> every Business Unit the
+ *           caller's role can reach (Admin/Entity Admin/Platform Admin see
+ *           every BU they own; a BU-scoped caller sees their own currently
+ *           active BU).
+ *       - in: query
+ *         name: role_id
+ *         schema: { type: integer }
+ *         description: Narrows the list to employees CURRENTLY holding this ONE Role — composes with business_unit_id, status, and search exactly as they already do.
  *       - in: query
  *         name: service_po_id
  *         schema: { type: integer }

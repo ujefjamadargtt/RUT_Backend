@@ -46,21 +46,27 @@ function buildEmployeeAuthContext(req) {
 
 /**
  * GET /api/v1/employees
+ *
+ * X-Company-Id (via resolveCompany, composed into authenticate()) is NOT a
+ * filter here — same as every other route, it only resolves
+ * buildEmployeeAuthContext's `companyId`, which decides what a BU-scoped
+ * caller (BU Admin and below) is AUTHORIZED to see at all (an Admin/Entity
+ * Admin/Platform Admin's authorized scope is their full owned set, header
+ * notwithstanding — see employeeAccessControlService.resolveEmployeeAccessWhere).
+ * The ONE explicit, documented way to narrow the returned list down to a
+ * single Business Unit (for any caller whose authorized scope spans more
+ * than one) is the `?business_unit_id=` query param, handled entirely
+ * inside employeeService.getAll — deliberately not also read from the
+ * header here, so there's exactly one BU-narrowing mechanism, not two
+ * competing ones.
+ *
  * @param {import('express').Request}  req
  * @param {import('express').Response} res
  * @param {import('express').NextFunction} next
  */
 const getAll = async (req, res, next) => {
   try {
-    const headerBusinessUnitId = parseInt(req.headers['x-company-id'], 10);
-    // The explicit query filter wins. Otherwise make X-Company-Id behave as
-    // the selected BU filter as well as the request-scope selector.
-    const queryBusinessUnitId = parseInt(req.query.business_unit_id, 10);
-    const hasQueryBusinessUnitId = Number.isInteger(queryBusinessUnitId) && queryBusinessUnitId > 0;
-    const query = hasQueryBusinessUnitId || !Number.isInteger(headerBusinessUnitId) || headerBusinessUnitId <= 0
-      ? req.query
-      : { ...req.query, business_unit_id: headerBusinessUnitId };
-    const { data, meta } = await employeeService.getAll(query, buildEmployeeAuthContext(req));
+    const { data, meta } = await employeeService.getAll(req.query, buildEmployeeAuthContext(req));
     return sendPaginated(res, data, meta, 'Employees fetched successfully.');
   } catch (err) {
     if (err.statusCode === 404) {

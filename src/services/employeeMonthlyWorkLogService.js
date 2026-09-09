@@ -87,9 +87,23 @@ const getMonthlyWorkLog = async (employeeId, companyId, month, year) => {
  * @param {number} employeeId
  * @param {number} companyId
  * @param {object} data - { month, year, entries: [{ service_po_id, sub_project_id?, hierarchy_node_id?, hours, description }] }
+ * @param {object} [options]
+ * @param {number} [options.creatorId] - who to record in created_by/updated_by
+ *   (defaults to employeeId, i.e. the employee submitted it themselves). A
+ *   Manager filling this in on an Employee's behalf passes their own id here
+ *   — see managerMonthlyWorkLogService.js.
+ * @param {boolean} [options.forceApproved] - insert every row directly as
+ *   'approved' (skipping the is_timesheet_approval_required lookup below
+ *   entirely) — used by the Manager path, whose entries are approved by
+ *   definition (a Manager typed them in, there's nothing left to approve).
+ * @param {boolean} [options.allowHierarchyNode] - when false, reject any
+ *   line carrying hierarchy_node_id ("Main PO" only — the Manager path
+ *   can't yet drill into a Parent/Child hierarchy node; may be lifted
+ *   later). Defaults to true (Employee self-service is unrestricted).
  * @returns {Promise<object>} same shape as getMonthlyWorkLog
  */
-const submitMonthlyWorkLog = async (employeeId, companyId, data) => {
+const submitMonthlyWorkLog = async (employeeId, companyId, data, options = {}) => {
+  const { creatorId = employeeId, forceApproved = false, allowHierarchyNode = true } = options;
   const month = parseInt(data.month, 10);
   const year = parseInt(data.year, 10);
   const lines = data.entries || [];
@@ -98,6 +112,15 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data) => {
     throw validationError(
       'Monthly Work Log is only allowed for a month that has already ended, or on that month\'s last calendar day.'
     );
+  }
+
+  if (!allowHierarchyNode) {
+    const hierarchyLine = lines.find((line) => line.hierarchy_node_id);
+    if (hierarchyLine) {
+      throw badRequestError(
+        `Service PO #${hierarchyLine.service_po_id}: hierarchy node selection is not supported here — log against the Main PO only.`
+      );
+    }
   }
 
   const { endDate, startDate } = dateHelper.getMonthBounds(month, year);
@@ -142,7 +165,7 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data) => {
     const { po } = await timesheetService.resolveManualEntryReferences(
       { employee_id: employeeId, service_po_id: line.service_po_id, sub_project_id: line.sub_project_id },
       companyId,
-      { skipPOCompanyScope: true }
+      { skipPOCompanyScope: true, skipEmployeeCompanyScope: true }
     );
 
     const hierarchyNode = await employeeTimesheetService.resolveHierarchyNode(line.hierarchy_node_id, line.service_po_id);
@@ -161,17 +184,23 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data) => {
         hierarchy_node_id: line.hierarchy_node_id || null,
         work_date: endDate,
         hours: line.hours,
-        description: line.description,
+        // Never undefined — Employee self-service's Joi schema requires a
+        // non-empty description, but the Manager path (allowHierarchyNode:
+        // false callers) treats it as optional, so a genuinely blank/absent
+        // value must still resolve to '', never left unset against this
+        // NOT NULL column (same fallback pattern as
+        // employeeTimesheetService.withFallbackDescription).
+        description: line.description || '',
         // The work log belongs to the Service PO's OWN owning BU, not
         // necessarily the caller's active session BU (cross-BU resourcing) —
         // see employeeTimesheetService.replaceDailyEntries' identical
         // comment. Falls back to the session companyId only for a
         // BU-less/Centralised PO (company_id: null).
         company_id: po.company_id ?? companyId,
-        status: 'pending',
+        status: forceApproved ? 'approved' : 'pending',
         log_type: 'monthly',
-        created_by: employeeId,
-        updated_by: employeeId,
+        created_by: creatorId,
+        updated_by: creatorId,
       })),
       transaction
     );
@@ -179,14 +208,17 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data) => {
 
   // Approval happens BEFORE Sync — see the matching comment in
   // employeeTimesheetService.replaceDailyEntries. Same additive
-  // post-creation step, not a change to creation itself.
-  const employee = await employeeRepository.findById(employeeId, companyId);
-  if (employee && !employee.is_timesheet_approval_required && insertedRows.length > 0) {
-    await employeeWorkLogRepository.markApprovedByIds(insertedRows.map((row) => row.id), companyId);
+  // post-creation step, not a change to creation itself. Skipped entirely
+  // when forceApproved already inserted every row as 'approved' above.
+  if (!forceApproved) {
+    const employee = await employeeRepository.findById(employeeId, companyId);
+    if (employee && !employee.is_timesheet_approval_required && insertedRows.length > 0) {
+      await employeeWorkLogRepository.markApprovedByIds(insertedRows.map((row) => row.id), companyId);
+    }
   }
 
   logger.info('Employee monthly work log submitted', {
-    employeeId, companyId, month, year, workDate: endDate, entryCount: resolvedLines.length,
+    employeeId, companyId, month, year, workDate: endDate, entryCount: resolvedLines.length, creatorId, forceApproved,
   });
 
   return buildMonthlyWorkLogDTO(employeeId, companyId, month, year);

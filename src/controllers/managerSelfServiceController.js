@@ -25,7 +25,7 @@ function callerBuIds(req) {
 
 const getMyEmployees = async (req, res) => {
   try {
-    const employees = await managerSelfServiceService.getMyEmployees(req.userId, req.companyIds, req.hierarchyRank);
+    const employees = await managerSelfServiceService.getMyEmployees(req.userId, req.companyIds, req.hierarchyRank, req.explicitBusinessUnitId);
     return sendSuccess(res, employees, 'My Employees fetched successfully.');
   } catch (error) {
     logger.error('getMyEmployees error', { error: error.message, userId: req.userId });

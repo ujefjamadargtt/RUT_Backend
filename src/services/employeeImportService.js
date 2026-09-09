@@ -43,6 +43,12 @@ const HEADER_MAP = {
   'description': 'resource_description',
   'resource description': 'resource_description',
   'resource_description': 'resource_description',
+  'payroll entity': 'payroll_entity',
+  'payroll_entity': 'payroll_entity',
+  'location': 'location',
+  'sub location': 'sub_location',
+  'sub_location': 'sub_location',
+  'sublocation': 'sub_location',
   'date of joining': 'date_of_joining',
   'joining date': 'date_of_joining',
   'doj': 'date_of_joining',
@@ -253,6 +259,27 @@ function validateRow(raw, existingCodes, seenCodes, existingEmails, seenEmails) 
     const desc = String(raw.resource_description).trim();
     if (desc.length > 2000) errors.push('Resource description cannot exceed 2000 characters.');
     else if (desc) data.resource_description = desc;
+  }
+
+  // ── payroll_entity (optional) ───────────────────────────────────────────────
+  if (!isBlank(raw.payroll_entity)) {
+    const payrollEntity = String(raw.payroll_entity).trim();
+    if (payrollEntity.length > 64) errors.push('Payroll entity cannot exceed 64 characters.');
+    else if (payrollEntity) data.payroll_entity = payrollEntity;
+  }
+
+  // ── location (optional) ─────────────────────────────────────────────────────
+  if (!isBlank(raw.location)) {
+    const location = String(raw.location).trim();
+    if (location.length > 256) errors.push('Location cannot exceed 256 characters.');
+    else if (location) data.location = location;
+  }
+
+  // ── sub_location (optional) ─────────────────────────────────────────────────
+  if (!isBlank(raw.sub_location)) {
+    const subLocation = String(raw.sub_location).trim();
+    if (subLocation.length > 256) errors.push('Sub location cannot exceed 256 characters.');
+    else if (subLocation) data.sub_location = subLocation;
   }
 
   // ── date_of_joining (optional) ──────────────────────────────────────────────
@@ -481,8 +508,16 @@ async function importEmployees(filePath, userId, req) {
       });
       importedCount++;
     } catch (dbErr) {
-      logger.error('Employee import DB error', { code: row.employee_code, error: dbErr.message });
-      dbErrors.push({ row: null, errors: [`DB error for "${row.employee_code}": ${dbErr.message}`] });
+      // Sequelize collapses both plain validation failures AND unique-
+      // constraint conflicts to the same generic "Validation error"
+      // message — the actual per-field reason only lives in `.errors[]`.
+      // Surface it here so the import UI shows what actually failed
+      // instead of that uninformative default.
+      const detail = Array.isArray(dbErr.errors) && dbErr.errors.length
+        ? dbErr.errors.map((e) => e.message).join('; ')
+        : dbErr.message;
+      logger.error('Employee import DB error', { code: row.employee_code, error: detail });
+      dbErrors.push({ row: null, errors: [`DB error for "${row.employee_code}": ${detail}`] });
     }
   }
 

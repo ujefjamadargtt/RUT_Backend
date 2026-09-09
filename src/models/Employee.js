@@ -105,6 +105,20 @@ module.exports = (sequelize) => {
         type: DataTypes.TEXT,
         allowNull: true,
       },
+      // Employee Master — payroll/location fields, see database/migrations/
+      // 20260893_add_employee_payroll_location_columns.sql.
+      payroll_entity: {
+        type: DataTypes.STRING(64),
+        allowNull: true,
+      },
+      location: {
+        type: DataTypes.STRING(256),
+        allowNull: true,
+      },
+      sub_location: {
+        type: DataTypes.STRING(256),
+        allowNull: true,
+      },
       date_of_joining: {
         type: DataTypes.DATEONLY,
         allowNull: true,

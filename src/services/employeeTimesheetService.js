@@ -520,7 +520,7 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
     const { po } = await timesheetService.resolveManualEntryReferences(
       { employee_id: employeeId, service_po_id: line.service_po_id, sub_project_id: line.sub_project_id },
       companyId,
-      { skipPOCompanyScope: true }
+      { skipPOCompanyScope: true, skipEmployeeCompanyScope: true }
     );
 
     const hierarchyNode = await resolveHierarchyNode(line.hierarchy_node_id, line.service_po_id);
@@ -1098,13 +1098,16 @@ const loadMappedPOsWithHierarchy = async (employeeId, companyId) => {
 };
 
 /**
- * Group flat (service_po_id, hierarchy_node_id, total_hours) breakdown rows
- * — for ONE date — into servicePOId -> Map(nodeKey -> hours), where nodeKey
- * is 'po' for hours logged directly against the Service PO itself (no
- * hierarchy_node_id) or the hierarchy node's own id otherwise.
+ * Group flat (service_po_id, hierarchy_node_id, total_hours, description)
+ * breakdown rows — for ONE date — into servicePOId -> Map(nodeKey -> {hours,
+ * description}), where nodeKey is 'po' for hours logged directly against the
+ * Service PO itself (no hierarchy_node_id) or the hierarchy node's own id
+ * otherwise. `description` is absent on rows collapseRowsAcrossDates
+ * produced (a multi-date rollup has no single description to show) and
+ * simply defaults to blank there.
  *
- * @param {Array<{ service_po_id, hierarchy_node_id, total_hours }>} rows
- * @returns {Map<string, Map<string, number>>}
+ * @param {Array<{ service_po_id, hierarchy_node_id, total_hours, description? }>} rows
+ * @returns {Map<string, Map<string, { hours: number, description: string }>>}
  */
 const groupHoursByServicePO = (rows) => {
   const hoursByPOId = new Map();
@@ -1112,9 +1115,10 @@ const groupHoursByServicePO = (rows) => {
     const poKey = String(row.service_po_id);
     const nodeKey = row.hierarchy_node_id ? String(row.hierarchy_node_id) : 'po';
     const hours = parseFloat(row.total_hours) || 0;
+    const description = row.description || '';
 
     if (!hoursByPOId.has(poKey)) hoursByPOId.set(poKey, new Map());
-    hoursByPOId.get(poKey).set(nodeKey, hours);
+    hoursByPOId.get(poKey).set(nodeKey, { hours, description });
   }
   return hoursByPOId;
 };
@@ -1129,36 +1133,42 @@ const groupHoursByServicePO = (rows) => {
  * po_total_hrs = hours logged directly against the Service PO itself +
  * every Parent's hours + every Child's hours, for that date.
  *
+ * `description` (on the PO itself and on every Parent/Child node — see
+ * servicePOHierarchyDTO.toHierarchyTreeWithHours) is the same entry's saved
+ * description, blank when nothing was logged against that node at all.
+ *
  * @param {Array<object>} mappedPOs
  * @param {Map<string, ServicePOHierarchy[]>} hierarchyRowsByPOId
- * @param {Map<string, Map<string, number>>} hoursByPOId - this date's hours only
+ * @param {Map<string, Map<string, { hours: number, description: string }>>} hoursByPOId - this date's data only
  * @returns {Array<object>}
  */
 const buildServicePOsForDate = (mappedPOs, hierarchyRowsByPOId, hoursByPOId) => {
   const round2 = (n) => Math.round(n * 100) / 100;
+  const EMPTY = { hours: 0, description: '' };
 
   return mappedPOs.map((po) => {
     const poHours = hoursByPOId.get(String(po.id));
-    const directHours = poHours ? (poHours.get('po') || 0) : 0;
+    const direct = poHours ? (poHours.get('po') || EMPTY) : EMPTY;
 
-    const nodeHoursMap = new Map();
+    const nodeDataMap = new Map();
     if (poHours) {
-      for (const [key, hrs] of poHours) {
-        if (key !== 'po') nodeHoursMap.set(key, hrs);
+      for (const [key, data] of poHours) {
+        if (key !== 'po') nodeDataMap.set(key, data);
       }
     }
 
     const children = servicePOHierarchyDTO.toHierarchyTreeWithHours(
       hierarchyRowsByPOId.get(String(po.id)) || [],
-      nodeHoursMap
+      nodeDataMap
     );
     const hierarchyHours = servicePOHierarchyDTO.sumHierarchyHours(children);
 
     return {
       service_po_id: po.id,
       service_po_name: po.service_po_name,
-      hours: round2(directHours),
-      po_total_hrs: round2(directHours + hierarchyHours),
+      hours: round2(direct.hours),
+      description: direct.description,
+      po_total_hrs: round2(direct.hours + hierarchyHours),
       children,
     };
   });

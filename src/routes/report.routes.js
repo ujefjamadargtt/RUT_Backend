@@ -91,6 +91,13 @@ router.get(
  *       - in: query
  *         name: limit
  *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200:
  *         description: Paginated employee hourly rate records
@@ -134,6 +141,13 @@ router.get(
  *       - in: query
  *         name: limit
  *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200:
  *         description: Paginated monthly cost summary with page-level totals
@@ -185,6 +199,13 @@ router.get(
  *       - in: query
  *         name: limit
  *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200:
  *         description: Paginated timesheet records
@@ -235,6 +256,13 @@ router.get(
  *       - in: query
  *         name: limit
  *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200:
  *         description: Paginated PO utilisation data with status classification
@@ -285,6 +313,13 @@ router.get(
  *       - in: query
  *         name: limit
  *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200:
  *         description: Paginated sub-project hours
@@ -358,6 +393,13 @@ router.get(
  *       - in: query
  *         name: limit
  *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200:
  *         description: >
@@ -407,6 +449,13 @@ router.get(
  *       - in: query
  *         name: limit
  *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200:
  *         description: Paginated cost breakdown with page-level totals
@@ -484,6 +533,13 @@ router.get(
  *       - in: query
  *         name: limit
  *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200:
  *         description: >
@@ -593,6 +649,13 @@ router.get(
  *       - in: query
  *         name: limit
  *         schema: { type: integer, minimum: 1, maximum: 200 }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200:
  *         description: >
@@ -710,6 +773,13 @@ router.get(
  *       - in: query
  *         name: limit
  *         schema: { type: integer, minimum: 1, maximum: 200 }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200:
  *         description: >
@@ -772,6 +842,13 @@ router.get(
  *       - in: query
  *         name: limit
  *         schema: { type: integer, minimum: 1, maximum: 200 }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200:
  *         description: >
@@ -804,7 +881,9 @@ router.get(
  *       monthly_capacity (160), monthly_billing_capacity (160), clients.
  *       Dynamic columns (service category → service types) hold decimal hours.
  *       Computed totals per row: billable_total, non_billable_total, leaves_hours,
- *       total_utilization (total_hours - leaves_hours).
+ *       total_utilization (total_hours - leaves_hours),
+ *       utilization_percentage (total_utilization / monthly_capacity * 100, rounded
+ *       to 2 decimals; null if monthly_capacity is unavailable).
  *       Only active employees with timesheet entries in the period appear.
  *     tags: [Reports]
  *     security:
@@ -833,6 +912,13 @@ router.get(
  *       - in: query
  *         name: limit
  *         schema: { type: integer, minimum: 1, maximum: 200 }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200:
  *         description: >
@@ -841,8 +927,9 @@ router.get(
  *           company_experience, resource_description, monthly_capacity (160),
  *           monthly_billing_capacity (160), clients (comma-separated string),
  *           hours { [service_type_id]: decimal_hours },
- *           billable_total, non_billable_total, leaves_hours, total_utilization.
- *           summary: page-level totals.
+ *           billable_total, non_billable_total, leaves_hours, total_utilization,
+ *           utilization_percentage (null if monthly_capacity is unavailable).
+ *           summary: page-level totals, incl. utilization_percentage.
  *       401:
  *         description: Unauthorized
  *       403:
@@ -949,6 +1036,13 @@ router.get(
  *       - in: query
  *         name: limit
  *         schema: { type: integer, minimum: 1, maximum: 200 }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200:
  *         description: >
@@ -1016,6 +1110,13 @@ router.get(
  *       - in: query
  *         name: status
  *         schema: { type: string, enum: [in-progress, completed, on-hold, pending, cancelled, closed, all] }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200:
  *         description: >
@@ -1059,6 +1160,13 @@ router.get(
  *         name: limit
  *         schema: { type: integer, minimum: 1, maximum: 100 }
  *         description: Page size for the top_clients ranking only. Defaults to 15.
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200:
  *         description: "{ clients: [...], top_clients: { data, pagination }, category_matrix: [...] }"
@@ -1123,6 +1231,13 @@ router.get(
  *       - in: query
  *         name: limit
  *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200:
  *         description: Paginated client wise analytics
@@ -1181,6 +1296,13 @@ router.get(
  *       - in: query
  *         name: hoursSource
  *         schema: { type: string, enum: [O, M] }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200:
  *         description: "{ monthly_hours_by_category, monthly_cost_by_category, monthly_utilization, leave_hours_trend, no_work_trend }"
@@ -1242,6 +1364,13 @@ router.get(
  *       - in: query
  *         name: limit
  *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200:
  *         description: Paginated employee bench percentage
@@ -1306,6 +1435,13 @@ router.get(
  *         name: limit
  *         schema: { type: integer, minimum: 1, maximum: 100 }
  *         description: Applies to by_service_po only.
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200:
  *         description: "{ monthly, by_service_po: { data, meta }, summary, over_budget_service_pos, under_budget_service_pos }"
@@ -1373,6 +1509,13 @@ router.get(
  *       - in: query
  *         name: limit
  *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200:
  *         description: Paginated resource utilization trend (Month + Resource rows)
@@ -1443,6 +1586,13 @@ router.get(
  *       - in: query
  *         name: limit
  *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200:
  *         description: Paginated Service PO hours & cost budget (Month + Service PO rows)

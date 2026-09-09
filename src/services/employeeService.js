@@ -170,12 +170,11 @@ function toPlain(employee) {
  * as plain id arrays (`role_ids`/`business_unit_ids`, for the Role & BU
  * Mapping form's multi-select value binding) and as `{id, name}` objects
  * (`roles`/`business_units`, for display) — batched: one query for roles
- * and one for BUs across every employee given, not N+1 per employee.
- *
- * Deliberately only used by the single-employee detail response
- * (getByIdWithEmail/update) and NOT the list endpoint (getAll) — the list
- * screen doesn't need this, and joining employee_roles/employee_business_units
- * for every row on a paginated list would be a needless cost there.
+ * and one for BUs across every employee given (both `employee_id IN (...)`),
+ * not N+1 per employee. Used by both the single-employee detail response
+ * (getByIdWithEmail/update) and the list endpoint (getAll) — the list is
+ * capped at 200 rows/page (listEmployeesQuerySchema), so this stays two
+ * bounded queries per page, never one per row.
  *
  * @param {object[]} employees - plain objects, each with an `id`
  * @returns {Promise<object[]>}
@@ -260,12 +259,17 @@ async function attachBusinessUnitInfo(employees) {
  * resolveEmployeeAccessWhere()'s per-role "own team" scope entirely in
  * favor of the caller's FULL Admin/company/tenant scope, reusing
  * employeeServicePOMappingService.resolveEmployeeMappingScope() rather than
- * duplicating it. `business_unit_id`/`search`/`status`/pagination all keep
- * working exactly as before, applied ON TOP of this broadened scope. An
- * unknown/out-of-tenant-scope `service_po_id` 404s, matching
+ * duplicating it. `business_unit_id`/`role_id`/`search`/`status`/pagination
+ * all keep working exactly as before, applied ON TOP of this broadened
+ * scope. An unknown/out-of-tenant-scope `service_po_id` 404s, matching
  * getActiveEmployees()'s same choice not to silently fall back.
  *
- * @param {object} query - Express req.query (page, limit, search, status, designation, business_unit_id, service_po_id, sort_by, sort_order)
+ * `role_id`, when given, narrows to employees CURRENTLY holding that one
+ * Role (an active employee_roles row) — applied server-side in
+ * employeeRepository.findAll, alongside `business_unit_id`, `status` and
+ * `search`, all inside the same paginated query (never a post-fetch scan).
+ *
+ * @param {object} query - Express req.query (page, limit, search, status, designation, business_unit_id, role_id, service_po_id, sort_by, sort_order)
  * @param {object} authContext - { userId, employeeId, companyId, hierarchyRank, roleNames, employeeBusinessUnits } — see controller
  * @returns {Promise<{ data: Employee[], meta: object }>}
  * @throws {{ statusCode: 404 }} service_po_id given but not found in the caller's tenant scope
@@ -317,6 +321,13 @@ const getAll = async (query = {}, authContext) => {
     ? parsedBusinessUnitId
     : null;
 
+  // Role list-filter (the "Role" dropdown on the Employee Master filter
+  // bar) — same parsing/permissive-on-invalid treatment as businessUnitId
+  // above (this endpoint's query validation isn't wired to the route — see
+  // that filter's comment).
+  const parsedRoleId = Number(query.role_id);
+  const roleId = Number.isInteger(parsedRoleId) && parsedRoleId > 0 ? parsedRoleId : null;
+
   const filters = {
     search: query.search || '',
     status: query.status || 'active',
@@ -324,6 +335,7 @@ const getAll = async (query = {}, authContext) => {
     companyId,
     accessWhere,
     businessUnitId,
+    roleId,
   };
 
   const sort = {
@@ -334,7 +346,11 @@ const getAll = async (query = {}, authContext) => {
   const { rows, count } = await employeeRepository.findAll(filters, { limit, offset }, sort);
   const meta = getPaginationMeta(count, page, limit);
 
-  const data = await attachBusinessUnitInfo(await attachManagers(rows.map(toPlain)));
+  // attachRoleAndBusinessUnitInfo (not the lighter attachBusinessUnitInfo)
+  // so each row also carries `role_ids`/`roles: [{id, name}]` — the Role
+  // filter/column the Employee Master list screen needs; still one batched
+  // query for the whole page (IN employee_id), never per-row.
+  const data = await attachRoleAndBusinessUnitInfo(await attachManagers(rows.map(toPlain)));
 
   return { data, meta };
 };

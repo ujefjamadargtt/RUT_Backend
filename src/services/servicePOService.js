@@ -5,6 +5,8 @@ const clientRepository = require('../repositories/clientRepository');
 const projectRepository = require('../repositories/projectRepository');
 const employeeRepository = require('../repositories/employeeRepository');
 const employeeBusinessUnitRepository = require('../repositories/employeeBusinessUnitRepository');
+const employeeRoleRepository = require('../repositories/employeeRoleRepository');
+const employeeServicePOMappingRepository = require('../repositories/employeeServicePOMappingRepository');
 const servicePOHierarchyRepository = require('../repositories/servicePOHierarchyRepository');
 const timesheetRepository = require('../repositories/timesheetRepository');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
@@ -143,6 +145,37 @@ async function assertValidDeliveryHead(employeeId, companyId) {
 }
 
 /**
+ * Service PO Admin / Delivery Head see ONLY Service POs individually mapped
+ * to them (employee_servicepo_mapping, an active row) — NOT every PO in
+ * their own mapped Business Unit(s). A PO mapped to them shows even when its
+ * own BU isn't one of theirs; just as importantly, a PO in their own mapped
+ * BU that ISN'T individually mapped to them stays hidden — visibility is
+ * driven entirely by the mapping, never by BU membership, for these two
+ * roles. Every other role stays strictly BU-scoped, completely unaffected —
+ * role is always re-fetched from the database (employeeRoleRepository),
+ * never trusted from the request, same as
+ * employeeServicePOMappingService.resolveMappingEligibilityInputs().
+ *
+ * @param {number} employeeId
+ * @returns {Promise<number[]|null>} service_po ids (possibly empty — the
+ *   role qualifies but has no active mappings yet, so it sees NO Service
+ *   POs at all) when the role qualifies; `null` when it doesn't, meaning
+ *   "not applicable, use the normal BU scope" (see
+ *   servicePORepository.companyScope()'s doc comment for how the two are
+ *   told apart downstream).
+ */
+async function resolveIndividuallyMappedServicePOIds(employeeId) {
+  const roles = await employeeRoleRepository.findRolesByEmployeeId(employeeId);
+  const qualifies = employeeServicePOMappingService.hasUnrestrictedServicePOVisibility(
+    roles.map((role) => role.role_name)
+  );
+  if (!qualifies) return null;
+
+  const mappings = await employeeServicePOMappingRepository.findAllByEmployee(employeeId, 'active');
+  return mappings.map((mapping) => mapping.service_po_id);
+}
+
+/**
  * Return a paginated list of Service POs.
  *
  * Respects an OPTIONALLY selected Global Business Unit (X-Company-Id
@@ -154,6 +187,12 @@ async function assertValidDeliveryHead(employeeId, companyId) {
  * selected, unchanged from before. A BU-scoped actor is unaffected either
  * way (already limited to their own single active BU).
  *
+ * A Service PO Admin/Delivery Head is scoped ENTIRELY differently: instead
+ * of the BU-based `companyId`/`centralisedOwnerIds` scoping above, they see
+ * ONLY their individually-mapped Service POs (companyScope() overrides,
+ * never unions, when `mappedServicePOIds` is non-null) — see
+ * resolveIndividuallyMappedServicePOIds()'s doc comment.
+ *
  * @param {object} query - req.query
  * @param {object} authContext - { companyId, hierarchyRank, employeeId }
  * @param {number|null} [headerCompanyId] - parsed X-Company-Id header, if any
@@ -162,6 +201,7 @@ async function assertValidDeliveryHead(employeeId, companyId) {
 const getAll = async (query = {}, authContext, headerCompanyId = null) => {
   const companyId = await resolveActorCompanyScopeForSelectedBU(authContext, headerCompanyId);
   const { page, limit, offset } = getPaginationParams(query);
+  const mappedServicePOIds = await resolveIndividuallyMappedServicePOIds(authContext.employeeId);
 
   const filters = {
     search: query.search || null,
@@ -182,6 +222,11 @@ const getAll = async (query = {}, authContext, headerCompanyId = null) => {
     // Widens the list to this actor's own tenant's Centralised POs
     // (company_id NULL) — see resolveCentralisedOwnerIds()'s doc comment.
     centralisedOwnerIds: await resolveCentralisedOwnerIds(companyId),
+    // For a Service PO Admin/Delivery Head, REPLACES companyId/
+    // centralisedOwnerIds above entirely with this actor's own individually-
+    // mapped POs (see resolveIndividuallyMappedServicePOIds()'s doc
+    // comment) — `null` (every other role) leaves them in full effect.
+    mappedServicePOIds,
   };
 
   const sort = {
@@ -198,6 +243,13 @@ const getAll = async (query = {}, authContext, headerCompanyId = null) => {
 /**
  * Return the full details for a single Service PO, including resources.
  *
+ * A Service PO Admin/Delivery Head reaches this ONLY for a Service PO
+ * individually mapped to them (never merely because it's in their own
+ * mapped BU) — same override rule getAll() applies, so a row it lists never
+ * 404s the moment it's opened, and a same-BU-but-unmapped PO 404s here just
+ * as it's already excluded from that list. See
+ * resolveIndividuallyMappedServicePOIds()'s doc comment.
+ *
  * @param {number} id
  * @param {object} authContext - { companyId, hierarchyRank, employeeId }
  * @returns {Promise<ServicePO>}
@@ -209,7 +261,8 @@ const getById = async (id, authContext) => {
   // gets a BU of its own (company_id NULL). See
   // servicePORepository.companyScope()'s doc comment.
   const centralisedOwnerIds = await resolveCentralisedOwnerIds(companyId);
-  const po = await servicePORepository.findById(id, companyId, authContext.employeeId, centralisedOwnerIds);
+  const mappedServicePOIds = await resolveIndividuallyMappedServicePOIds(authContext.employeeId);
+  const po = await servicePORepository.findById(id, companyId, authContext.employeeId, centralisedOwnerIds, mappedServicePOIds);
 
   if (!po) {
     const err = new Error('Service PO not found.');

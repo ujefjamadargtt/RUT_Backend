@@ -19,6 +19,8 @@ const authenticate = require('../middlewares/auth');
 const resolveMyTeamBusinessUnitScope = require('../middlewares/resolveMyTeamBusinessUnitScope');
 const authorize = require('../middlewares/authorize');
 const { validate } = require('../middlewares/validateRequest');
+const { handleManagerWorkLogUpload } = require('../middlewares/upload');
+const { importLimiter } = require('../middlewares/rateLimiters');
 const {
   assignServicePOSchema,
   mapEmployeeSchema,
@@ -28,7 +30,12 @@ const {
   bulkApproveTimesheetsSchema,
   rejectWorkLogSchema,
 } = require('../validations/managerSelfServiceValidation');
+const {
+  submitManagerMonthlyWorkLogSchema,
+  monthYearQuerySchema,
+} = require('../validations/managerMonthlyWorkLogValidation');
 const controller = require('../controllers/managerSelfServiceController');
+const monthlyWorkLogController = require('../controllers/managerMonthlyWorkLogController');
 
 /**
  * @swagger
@@ -412,6 +419,221 @@ router.delete(
   authenticate,
   authorize('manager.map_servicepos'),
   controller.removeServicePO
+);
+
+/**
+ * @swagger
+ * /my-team/monthly-worklog/bulk-upload:
+ *   post:
+ *     summary: >
+ *       Bulk-upload the Monthly Work Log for several Employees at once from
+ *       an Excel/CSV file, for one month. Columns: Employee Code, Employee
+ *       Name, Service PO Name, Hours, Description (optional) — all but
+ *       Description are required. Validated in two GLOBAL gates across the
+ *       whole file before anything is inserted: (1) every row's Employee
+ *       Code must belong to an active Employee this Manager is the PRIMARY
+ *       Manager of — stricter than the manual form, which also allows
+ *       Secondary; (2) every row's Service PO Name must be one of that
+ *       Employee's actively-mapped Service POs (Main PO only, same as the
+ *       manual form). If ANY row fails a gate, the ENTIRE file is rejected
+ *       and nothing is written — this is not a partial "skip bad rows"
+ *       import. Once both gates pass for every row, rows are grouped by
+ *       Employee and REPLACE-SAVEd (176-hour cap enforced per Employee),
+ *       auto-approved, exactly like the manual form.
+ *     tags: [My Team]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required: [file, month, year]
+ *             properties:
+ *               file: { type: string, format: binary }
+ *               month: { type: integer }
+ *               year: { type: integer }
+ *     responses:
+ *       200:
+ *         description: >
+ *           { month, year, employees_processed, total_rows, results: [{
+ *           employee_id, employee_code, entry_count }] } — every row
+ *           inserted directly as 'approved'.
+ *       400:
+ *         description: No file attached, unreadable file, or no data rows
+ *       422:
+ *         description: >
+ *           { success: false, message, phase: 'format'|'ownership'|'service_po',
+ *           errors: [{ row, errors: string[] }] } — the whole file was
+ *           rejected; nothing was written.
+ */
+router.post(
+  '/monthly-worklog/bulk-upload',
+  authenticate,
+  authorize('manager.fill_worklog'),
+  importLimiter,
+  handleManagerWorkLogUpload,
+  monthlyWorkLogController.bulkUpload
+);
+
+/**
+ * @swagger
+ * /my-team/employees/{employeeId}/monthly-worklog:
+ *   get:
+ *     summary: >
+ *       Fetch the Monthly Work Log for one of my own mapped Employees, for
+ *       one month, plus eligibility. Same shape as Employee self-service's
+ *       GET /employee-timesheets/monthly.
+ *     tags: [My Team]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: employeeId
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: month
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: year
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: >
+ *           { month, year, work_date, eligible, service_pos: [...] } — same
+ *           Service PO hierarchy shape Daily/Monthly use elsewhere.
+ *       403:
+ *         description: Not one of my mapped Employees
+ */
+router.get(
+  '/employees/:employeeId/monthly-worklog',
+  authenticate,
+  authorize('manager.fill_worklog'),
+  validate(monthYearQuerySchema, 'query'),
+  monthlyWorkLogController.getMonthly
+);
+
+/**
+ * @swagger
+ * /my-team/employees/{employeeId}/monthly-worklog:
+ *   post:
+ *     summary: >
+ *       Fill in (create) the Monthly Work Log for one of my own mapped
+ *       Employees, for one month. Every entry is inserted directly as
+ *       'approved' — a Manager-filled entry never goes through the
+ *       pending/approve workflow. Restricted to the Employee's Main PO only
+ *       (hierarchy_node_id is not accepted here — may be supported in a
+ *       future release). Deletes every existing entry (Daily or Monthly)
+ *       for that month before inserting, same REPLACE-SAVE semantics as
+ *       Employee self-service's Monthly Work Log.
+ *     tags: [My Team]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: employeeId
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [month, year, entries]
+ *             properties:
+ *               month: { type: integer }
+ *               year: { type: integer }
+ *               entries:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [service_po_id, hours, description]
+ *                   properties:
+ *                     service_po_id: { type: integer }
+ *                     sub_project_id: { type: integer }
+ *                     hours: { type: number }
+ *                     description: { type: string }
+ *     responses:
+ *       200:
+ *         description: The month's Monthly Work Log after the save, already approved
+ *       400:
+ *         description: 176-hour cap exceeded, duplicate service_po_id in the same request, or a hierarchy_node_id was supplied
+ *       403:
+ *         description: Not one of my mapped Employees, or a Service PO in the payload is not mapped to this Employee
+ *       422:
+ *         description: Selected month is not yet eligible for Monthly Work Log
+ */
+router.post(
+  '/employees/:employeeId/monthly-worklog',
+  authenticate,
+  authorize('manager.fill_worklog'),
+  validate(submitManagerMonthlyWorkLogSchema),
+  monthlyWorkLogController.submitMonthly
+);
+
+/**
+ * @swagger
+ * /my-team/employees/{employeeId}/monthly-worklog:
+ *   put:
+ *     summary: Edit the existing Monthly Work Log I filled in for this Employee (same as POST — upsert)
+ *     tags: [My Team]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: employeeId
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: The month's Monthly Work Log after the save, already approved
+ */
+router.put(
+  '/employees/:employeeId/monthly-worklog',
+  authenticate,
+  authorize('manager.fill_worklog'),
+  validate(submitManagerMonthlyWorkLogSchema),
+  monthlyWorkLogController.submitMonthly
+);
+
+/**
+ * @swagger
+ * /my-team/employees/{employeeId}/monthly-worklog:
+ *   delete:
+ *     summary: Delete the Monthly Work Log I filled in for this Employee, for one month
+ *     tags: [My Team]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: employeeId
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: month
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: year
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Monthly work log deleted
+ *       403:
+ *         description: Not one of my mapped Employees
+ */
+router.delete(
+  '/employees/:employeeId/monthly-worklog',
+  authenticate,
+  authorize('manager.fill_worklog'),
+  validate(monthYearQuerySchema, 'query'),
+  monthlyWorkLogController.deleteMonthly
 );
 
 /**

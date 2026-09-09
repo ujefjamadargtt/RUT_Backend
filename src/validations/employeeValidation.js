@@ -106,6 +106,33 @@ const createEmployeeSchema = Joi.object({
       'string.max': 'Resource description cannot exceed 2000 characters.',
     }),
 
+  payroll_entity: Joi.string()
+    .trim()
+    .max(64)
+    .optional()
+    .allow('', null)
+    .messages({
+      'string.max': 'Payroll entity cannot exceed 64 characters.',
+    }),
+
+  location: Joi.string()
+    .trim()
+    .max(256)
+    .optional()
+    .allow('', null)
+    .messages({
+      'string.max': 'Location cannot exceed 256 characters.',
+    }),
+
+  sub_location: Joi.string()
+    .trim()
+    .max(256)
+    .optional()
+    .allow('', null)
+    .messages({
+      'string.max': 'Sub location cannot exceed 256 characters.',
+    }),
+
   date_of_joining: Joi.date()
     .iso()
     .max('now')
@@ -220,6 +247,33 @@ const updateEmployeeSchema = Joi.object({
     .max(2000)
     .optional()
     .allow('', null),
+
+  payroll_entity: Joi.string()
+    .trim()
+    .max(64)
+    .optional()
+    .allow('', null)
+    .messages({
+      'string.max': 'Payroll entity cannot exceed 64 characters.',
+    }),
+
+  location: Joi.string()
+    .trim()
+    .max(256)
+    .optional()
+    .allow('', null)
+    .messages({
+      'string.max': 'Location cannot exceed 256 characters.',
+    }),
+
+  sub_location: Joi.string()
+    .trim()
+    .max(256)
+    .optional()
+    .allow('', null)
+    .messages({
+      'string.max': 'Sub location cannot exceed 256 characters.',
+    }),
 
   date_of_joining: Joi.date()
     .iso()

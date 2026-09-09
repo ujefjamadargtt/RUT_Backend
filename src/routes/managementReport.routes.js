@@ -76,6 +76,13 @@ router.use(heavyReportLimiter);
  *       - in: query
  *         name: limit
  *         schema: { type: integer }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200: { description: Paginated PO profitability records with page-level totals }
  *       401: { description: Unauthorized }
@@ -117,6 +124,13 @@ router.get('/service-po-profitability', authenticateMultiBU, managementReportCon
  *       - in: query
  *         name: limit
  *         schema: { type: integer }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200: { description: Paginated forecast records — empty until future budgets are entered for the period }
  *       401: { description: Unauthorized }
@@ -159,6 +173,13 @@ router.get('/budgeted-margin-forecast', authenticateMultiBU, managementReportCon
  *       - in: query
  *         name: limit
  *         schema: { type: integer }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200: { description: Paginated planned-vs-actual hour records }
  *       401: { description: Unauthorized }
@@ -191,6 +212,13 @@ router.get('/resource-staffing-plan-accuracy', authenticateMultiBU, managementRe
  *       - in: query
  *         name: limit
  *         schema: { type: integer }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200: { description: Paginated client profitability + concentration records }
  *       401: { description: Unauthorized }
@@ -273,6 +301,13 @@ router.get('/bu-performance-scorecard', authenticateBase, requireEntityAdminOrAd
  *       - in: query
  *         name: limit
  *         schema: { type: integer }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200: { description: Paginated employee capacity records }
  *       401: { description: Unauthorized }
@@ -310,6 +345,13 @@ router.get('/employee-capacity-forecast', authenticateMultiBU, managementReportC
  *       - in: query
  *         name: limit
  *         schema: { type: integer }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200: { description: Paginated timeline/budget risk records }
  *       401: { description: Unauthorized }
@@ -344,6 +386,13 @@ router.get('/service-po-timeline-risk', authenticateMultiBU, managementReportCon
  *       - in: query
  *         name: limit
  *         schema: { type: integer }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200: { description: Paginated delivery head performance records }
  *       401: { description: Unauthorized }
@@ -393,6 +442,13 @@ router.get('/delivery-head-performance', authenticateMultiBU, managementReportCo
  *       - in: query
  *         name: limit
  *         schema: { type: integer }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200: { description: Paginated invoice realization trend records }
  *       401: { description: Unauthorized }
@@ -429,6 +485,13 @@ router.get('/invoice-realization-trend', authenticateMultiBU, managementReportCo
  *       - in: query
  *         name: compareYear
  *         schema: { type: integer }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
  *     responses:
  *       200: { description: Un-paginated business-mix records (one row per category x type) }
  *       401: { description: Unauthorized }

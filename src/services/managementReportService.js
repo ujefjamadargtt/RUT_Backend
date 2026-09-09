@@ -4,6 +4,7 @@ const managementReportRepo = require('../repositories/managementReportRepository
 const { Company } = require('../models');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
 const logger = require('../utils/logger');
+const { intersectCompanyIdsWithEntity } = require('./companyAccessControlService');
 
 /**
  * Management Report Service
@@ -62,6 +63,10 @@ function parseCommonFilters(query) {
     status: query.status || undefined,
     hoursSource: query.hoursSource,
     roleId: query.roleId,
+    // Optional further narrowing on top of the caller's BU/role scope — see
+    // companyAccessControlService.intersectCompanyIdsWithEntity(). Not used
+    // by getBUPerformanceScorecard, which already scopes by req.entityIds.
+    entityId: query.entityId ? parseInt(query.entityId, 10) : undefined,
   };
 }
 
@@ -71,6 +76,7 @@ function parseCommonFilters(query) {
 async function getServicePOProfitability(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
   requireMonthYear(filters);
 
   const isBillable = query.isBillable !== undefined
@@ -111,6 +117,7 @@ async function getServicePOProfitability(query, companyIds) {
 async function getBudgetedMarginForecast(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
   requireMonthYear(filters);
 
   logger.info('ManagementReport: getBudgetedMarginForecast', { filters, page, limit });
@@ -146,6 +153,7 @@ async function getBudgetedMarginForecast(query, companyIds) {
 async function getResourceStaffingPlanAccuracy(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
   requireMonthYear(filters);
 
   const employeeId = query.employeeId ? parseInt(query.employeeId, 10) : undefined;
@@ -202,6 +210,7 @@ async function getResourceStaffingPlanAccuracy(query, companyIds) {
 async function getClientProfitabilityConcentration(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
   requireMonthYear(filters);
 
   logger.info('ManagementReport: getClientProfitabilityConcentration', { filters, page, limit });
@@ -279,6 +288,7 @@ async function getBUPerformanceScorecard(query, req) {
 async function getEmployeeCapacityForecast(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
   requireMonthYear(filters);
 
   const employeeId = query.employeeId ? parseInt(query.employeeId, 10) : undefined;
@@ -342,6 +352,7 @@ function computeTimelineRisk(row, asOfDate) {
 async function getServicePOTimelineRisk(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
 
   // This report's own 5 documented filters (asOfDate/status/clientId/poId/
   // search) were read with exact-case `query.X` lookups — silently
@@ -391,6 +402,7 @@ async function getServicePOTimelineRisk(query, companyIds) {
 async function getDeliveryHeadPerformance(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
   requireMonthYear(filters);
 
   const deliveryHeadEmployeeId = query.deliveryHeadEmployeeId ? parseInt(query.deliveryHeadEmployeeId, 10) : undefined;
@@ -426,6 +438,7 @@ async function getDeliveryHeadPerformance(query, companyIds) {
 async function getInvoiceRealizationTrend(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
 
   let { startMonth, startYear, endMonth, endYear } = query;
   if (!startMonth && filters.month && filters.year) {
@@ -477,6 +490,7 @@ async function getInvoiceRealizationTrend(query, companyIds) {
 // ---------------------------------------------------------------------------
 async function getServiceLineBusinessMix(query, companyIds) {
   const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
   requireMonthYear(filters);
 
   const serviceCategoryId = query.serviceCategoryId ? parseInt(query.serviceCategoryId, 10) : undefined;

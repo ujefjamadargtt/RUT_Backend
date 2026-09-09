@@ -103,27 +103,31 @@ const round2 = (n) => Math.round(n * 100) / 100;
 
 /**
  * Nest a flat list of hierarchy rows for ONE Service PO into a tree, each
- * node carrying `hours` for a single date — the shape
- * employeeTimesheetService.getMonthlySummary returns per Service PO per day.
- * Every PARENT and CHILD row is included even when `hoursByNodeId` has no
- * entry for it (hours default to 0), per the "return every node, logged or
- * not" rule. A CHILD node never carries a `children` key (max depth 2).
+ * node carrying `hours` (and its entry's `description`) for a single date —
+ * the shape employeeTimesheetService.getMonthlySummary returns per Service
+ * PO per day. Every PARENT and CHILD row is included even when
+ * `dataByNodeId` has no entry for it (hours/description default to 0/''),
+ * per the "return every node, logged or not" rule. A CHILD node never
+ * carries a `children` key (max depth 2).
  *
  * @param {ServicePOHierarchy[]} rows - all nodes (PARENT + CHILD) for one Service PO
- * @param {Map<string, number>} hoursByNodeId - node id (string) -> hours logged on the date in question
+ * @param {Map<string, { hours: number, description: string }>} dataByNodeId - node id (string) -> hours/description logged on the date in question
  * @returns {Array<object>}
  */
-const toHierarchyTreeWithHours = (rows, hoursByNodeId) => {
+const toHierarchyTreeWithHours = (rows, dataByNodeId) => {
   const nodeById = new Map();
   const parents = [];
+  const EMPTY = { hours: 0, description: '' };
 
   for (const row of rows) {
     if (row.node_type === 'PARENT') {
+      const data = dataByNodeId.get(String(row.id)) || EMPTY;
       const node = {
         hierarchy_id: row.id,
         name: row.node_name,
         type: row.node_type,
-        hours: round2(hoursByNodeId.get(String(row.id)) || 0),
+        hours: round2(data.hours || 0),
+        description: data.description || '',
         children: [],
       };
       nodeById.set(String(row.id), node);
@@ -132,11 +136,13 @@ const toHierarchyTreeWithHours = (rows, hoursByNodeId) => {
   }
   for (const row of rows) {
     if (row.node_type === 'CHILD') {
+      const data = dataByNodeId.get(String(row.id)) || EMPTY;
       const childNode = {
         hierarchy_id: row.id,
         name: row.node_name,
         type: row.node_type,
-        hours: round2(hoursByNodeId.get(String(row.id)) || 0),
+        hours: round2(data.hours || 0),
+        description: data.description || '',
       };
       const parentNode = nodeById.get(String(row.parent_hierarchy_id));
       // A CHILD whose PARENT is missing (shouldn't happen — FK-enforced —

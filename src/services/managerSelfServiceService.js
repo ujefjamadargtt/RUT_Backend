@@ -52,11 +52,16 @@ function conflictError(message) {
  * Admin-tier caller's authorized Business Unit scope.
  *
  * @param {number} managerUserId
- * @param {number[]} companyIds - every accessible BU, or the selected BU
+ * @param {number[]} companyIds - every accessible BU, or the selected BU —
+ *   for Admin/BU Admin tier ONLY (see below); ignored for the Manager tier.
  * @param {number|null} hierarchyRank
+ * @param {number|null} [explicitBusinessUnitId] - the Business Unit the
+ *   caller explicitly selected (business_unit_id query param / X-Company-Id),
+ *   or null when none was given — see the Manager-tier branch below for why
+ *   this must be a separate signal from companyIds.
  * @returns {Promise<Array>}
  */
-const getMyEmployees = async (managerUserId, companyIds, hierarchyRank) => {
+const getMyEmployees = async (managerUserId, companyIds, hierarchyRank, explicitBusinessUnitId = null) => {
   // BU Admin (rank 4) has full access to all employees in their BUs —
   // same as Admin tier but scoped to their own BUs (enforced by the
   // companyIds filter at the bottom rather than by a mapping check).
@@ -85,7 +90,6 @@ const getMyEmployees = async (managerUserId, companyIds, hierarchyRank) => {
     }],
   });
 
-  const selectedBusinessUnits = new Set(companyIds || []);
   const mappingByEmployeeId = new Map();
   for (const mapping of mappings) {
     // An Employee normally has at most one mapping for a Manager. Prefer the
@@ -96,25 +100,49 @@ const getMyEmployees = async (managerUserId, companyIds, hierarchyRank) => {
     }
   }
 
-  return employees
-    .map((employee) => {
-      const businessUnits = (employee.businessUnits || []).map((businessUnit) => ({
-        id: businessUnit.id,
-        name: businessUnit.company_name,
-      }));
-      const businessUnitIds = businessUnits.map((businessUnit) => businessUnit.id);
-      return {
-        id: employee.id,
-        employee_code: employee.employee_code,
-        full_name: employee.full_name,
-        designation: employee.designation,
-        status: employee.status,
-        business_unit_ids: businessUnitIds,
-        business_units: businessUnits,
-        mapping_type: mappingByEmployeeId.get(employee.id)?.mapping_type || null,
-      };
-    })
-    .filter((employee) => employee.business_unit_ids.some((id) => selectedBusinessUnits.has(id)));
+  const withMeta = employees.map((employee) => {
+    const businessUnits = (employee.businessUnits || []).map((businessUnit) => ({
+      id: businessUnit.id,
+      name: businessUnit.company_name,
+    }));
+    const businessUnitIds = businessUnits.map((businessUnit) => businessUnit.id);
+    return {
+      id: employee.id,
+      employee_code: employee.employee_code,
+      full_name: employee.full_name,
+      designation: employee.designation,
+      status: employee.status,
+      business_unit_ids: businessUnitIds,
+      business_units: businessUnits,
+      mapping_type: mappingByEmployeeId.get(employee.id)?.mapping_type || null,
+    };
+  });
+
+  if (isAdminOrBuAdminTier) {
+    // Admin/BU Admin tier: companyIds IS the security boundary here (the
+    // query above had no mapping-based restriction at all) — always filter
+    // by it, selected BU or not, exactly as before.
+    const selectedBusinessUnits = new Set(companyIds || []);
+    return withMeta.filter((employee) => employee.business_unit_ids.some((id) => selectedBusinessUnits.has(id)));
+  }
+
+  // Manager tier: manager_employee_mappings is ALREADY the security
+  // boundary — employeeWhere above scoped the query to exactly this
+  // Manager's mapped Employees, active-mapping-row by active-mapping-row.
+  // Business Unit is a pure narrowing convenience here, applied ONLY when
+  // the caller explicitly selected one. A mapped Employee whose own
+  // Business Unit differs from every Business Unit the MANAGER personally
+  // belongs to must still appear by default — the mapping row is what
+  // grants access, not shared BU membership. Filtering this list by
+  // `companyIds` (the Manager's own reachable BUs) unconditionally used to
+  // silently hide such an Employee even though HR/the Manager had
+  // deliberately mapped them — see the bug report this fixed: a Manager
+  // mapped to an Employee outside their own Business Unit never saw that
+  // Employee in "My Employees" at all.
+  if (explicitBusinessUnitId != null) {
+    return withMeta.filter((employee) => employee.business_unit_ids.includes(explicitBusinessUnitId));
+  }
+  return withMeta;
 };
 
 /**
@@ -703,4 +731,5 @@ module.exports = {
   removeServicePOFromEmployee,
   mapEmployeeToSelf,
   unmapEmployeeFromSelf,
+  assertOwnEmployee,
 };

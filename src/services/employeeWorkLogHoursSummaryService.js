@@ -4,6 +4,7 @@ const { Op } = require('sequelize');
 const { Employee } = require('../models');
 const employeeRepository = require('../repositories/employeeRepository');
 const employeeAccessControlService = require('./employeeAccessControlService');
+const { intersectCompanyIdsWithEntity } = require('./companyAccessControlService');
 const summaryRepository = require('../repositories/employeeWorkLogHoursSummaryRepository');
 const dateHelper = require('../helpers/dateHelper');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
@@ -44,6 +45,8 @@ async function resolveAuthorizedEmployeeIds(authContext, companyIds) {
 
 async function getSummary(query, authContext, companyIds) {
   const { startDate, endDate, period } = resolvePeriod(query);
+  const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, entityId);
   let employeeIds = await resolveAuthorizedEmployeeIds(authContext, companyIds);
 
   if (query.employeeId) {
@@ -71,6 +74,8 @@ async function getSummary(query, authContext, companyIds) {
 
 async function getDetails(employeeId, query, authContext, companyIds) {
   const { startDate, endDate, period } = resolvePeriod(query);
+  const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, entityId);
   const employeeIds = await resolveAuthorizedEmployeeIds(authContext, companyIds);
   if (!employeeIds.includes(employeeId)) {
     const err = new Error('Employee not found.');

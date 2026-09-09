@@ -64,12 +64,35 @@ const {
  * BU-scoped actor can still never edit, close, or delete a Centralised PO.
  * No effect when `centralisedOwnerIds` is omitted/empty (the default).
  *
+ * `mappedServicePOIds` — for a Service PO Admin/Delivery Head, whose
+ * visibility is driven ENTIRELY by individual mapping
+ * (employee_servicepo_mapping, an active row) rather than Business Unit
+ * membership: a PO mapped to them shows regardless of whether its own BU is
+ * one of theirs, and — just as importantly — a PO in their own mapped BU
+ * that ISN'T individually mapped to them stays hidden. So passing an ARRAY
+ * here (even an empty one — "this actor qualifies, but has zero mappings
+ * right now") REPLACES the `company_id`/`centralisedOwnerIds` matching
+ * entirely with `id IN (mappedServicePOIds)`, rather than adding to it.
+ * `null` (the default) means "not applicable for this actor" — every other
+ * role keeps its normal BU/Centralised scoping, completely unaffected.
+ * Callers resolve this via servicePOService.resolveIndividuallyMappedServicePOIds(),
+ * which returns `null` for every role except Service PO Admin/Delivery Head.
+ * Read/view only, same as `centralisedOwnerIds` — never opted into by
+ * update()/close()/softDelete().
+ *
  * @param {number|number[]|null} companyId
  * @param {number|null} [createdBy]
  * @param {number[]|null} [centralisedOwnerIds]
+ * @param {number[]|null} [mappedServicePOIds] - non-null (possibly empty)
+ *   overrides companyId/centralisedOwnerIds entirely; null/omitted leaves
+ *   them in full effect.
  * @returns {object}
  */
-function companyScope(companyId, createdBy = null, centralisedOwnerIds = null) {
+function companyScope(companyId, createdBy = null, centralisedOwnerIds = null, mappedServicePOIds = null) {
+  if (Array.isArray(mappedServicePOIds)) {
+    return { id: { [Op.in]: mappedServicePOIds } };
+  }
+
   const includeCentralised = Array.isArray(centralisedOwnerIds) && centralisedOwnerIds.length > 0;
   if (Array.isArray(companyId)) {
     const clauses = [{ company_id: { [Op.in]: companyId } }];
@@ -102,7 +125,7 @@ function companyScope(companyId, createdBy = null, centralisedOwnerIds = null) {
  * @returns {Promise<{ rows: ServicePO[], count: number }>}
  */
 const findAll = async (filters = {}, pagination = {}, sort = {}) => {
-  const { search, status, client_id, project_id, service_category_id, service_type_id, service_po_id, is_billable, start_date_from, start_date_to, companyId, createdBy, centralisedOwnerIds } = filters;
+  const { search, status, client_id, project_id, service_category_id, service_type_id, service_po_id, is_billable, start_date_from, start_date_to, companyId, createdBy, centralisedOwnerIds, mappedServicePOIds } = filters;
   const { limit = 10, offset = 0 } = pagination;
   const { sortBy = 'created_at', sortOrder = 'DESC' } = sort;
 
@@ -116,7 +139,12 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
   // applicable Centralised POs alongside their own BU's POs, not just the
   // latter, but only the ones administered by THEIR OWN tenant. See
   // companyScope()'s doc comment.
-  const where = { is_deleted: false, [Op.and]: [companyScope(companyId, createdBy, centralisedOwnerIds)] };
+  //
+  // mappedServicePOIds — for a Service PO Admin/Delivery Head, REPLACES the
+  // BU/Centralised scoping above with exactly their individually-mapped
+  // POs, even outside their own BU(s) — never a union. See companyScope()'s
+  // doc comment.
+  const where = { is_deleted: false, [Op.and]: [companyScope(companyId, createdBy, centralisedOwnerIds, mappedServicePOIds)] };
 
   if (status && status !== 'all') {
     where.status = status;
@@ -220,11 +248,19 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
  * @param {number[]|null} [centralisedOwnerIds] - see companyScope()'s doc
  *   comment; omit/empty so a plain lookup stays strictly BU-scoped (update()/
  *   close()/deleteServicePO() rely on this default).
+ * @param {number[]|null} [mappedServicePOIds] - see companyScope()'s doc
+ *   comment; omit/empty so a plain lookup stays strictly BU-scoped (same
+ *   default rule as centralisedOwnerIds above).
  * @returns {Promise<ServicePO|null>}
  */
-const findById = async (id, companyId, createdBy = null, centralisedOwnerIds = null) => {
+const findById = async (id, companyId, createdBy = null, centralisedOwnerIds = null, mappedServicePOIds = null) => {
   return ServicePO.findOne({
-    where: { id, is_deleted: false, ...companyScope(companyId, createdBy, centralisedOwnerIds) },
+    // Op.and, not object spread: when mappedServicePOIds is given,
+    // companyScope() itself returns an `id` key (see its doc comment) —
+    // spreading it here would silently overwrite the requested `id` above
+    // instead of narrowing by it, matching ANY individually-mapped PO rather
+    // than specifically this one.
+    where: { id, is_deleted: false, [Op.and]: [companyScope(companyId, createdBy, centralisedOwnerIds, mappedServicePOIds)] },
     include: [
       {
         model: Client,

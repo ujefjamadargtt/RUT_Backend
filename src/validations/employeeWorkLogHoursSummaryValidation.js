@@ -27,6 +27,9 @@ const employeeWorkLogHoursSummaryQuerySchema = Joi.object({
   ...periodFields,
   company_id: Joi.number().integer().positive().optional(),
   employeeId: Joi.number().integer().positive().optional(),
+  // Optional further narrowing on top of the caller's BU/role scope — see
+  // companyAccessControlService.intersectCompanyIdsWithEntity().
+  entityId: Joi.number().integer().positive().optional(),
   search: Joi.string().trim().max(100).allow('').optional(),
   sortBy: Joi.string().valid('employee_name', 'employee_code', 'total_hours').default('employee_name'),
   sortOrder: Joi.string().valid('ASC', 'DESC').default('ASC'),
@@ -37,6 +40,7 @@ const employeeWorkLogHoursSummaryQuerySchema = Joi.object({
 const employeeWorkLogHoursSummaryDetailQuerySchema = Joi.object({
   ...periodFields,
   company_id: Joi.number().integer().positive().optional(),
+  entityId: Joi.number().integer().positive().optional(),
   page: Joi.number().integer().min(1).default(1),
   limit: Joi.number().integer().min(1).max(100).default(20),
 }).custom(requireDateOrMonth, 'date-or-month-period');

@@ -64,18 +64,34 @@ function companyScope(companyId) {
  * resolve here — without this OR, a brand-new Employee could never log a
  * work log or timesheet entry against their own assigned Business Unit.
  *
+ * `skipCompanyScope: true` drops the company filter entirely (still
+ * enforcing status/is_deleted) — same rationale and same callers as
+ * findEligibleServicePOById()'s identical option below: used ONLY
+ * immediately after employeeTimesheetService.assertProjectMapped() has
+ * already confirmed an ACTIVE employee_servicepo_mapping row for this
+ * employee+PO pair, which is itself sufficient authorization regardless of
+ * which Business Unit the CALLER's own companyId happens to be — including
+ * a Manager filling this in on a mapped Employee's behalf, whose own active
+ * Business Unit (companyId) may legitimately differ from the target
+ * Employee's (see managerMonthlyWorkLogService.js). The Admin manual-entry
+ * path (timesheetService.createTimesheet) never sets this flag.
+ *
  * @param {number} id
- * @param {number} companyId
+ * @param {number|number[]} companyId
+ * @param {{ skipCompanyScope?: boolean }} [options]
  * @returns {Promise<Employee|null>}
  */
-const findEligibleEmployeeById = async (id, companyId) => {
+const findEligibleEmployeeById = async (id, companyId, { skipCompanyScope = false } = {}) => {
+  const where = {
+    id,
+    status: 'active',
+    is_deleted: false,
+  };
+  if (!skipCompanyScope) {
+    where[Op.or] = [{ company_id: companyId }, { '$businessUnits.id$': companyId }];
+  }
   return Employee.findOne({
-    where: {
-      id,
-      status: 'active',
-      is_deleted: false,
-      [Op.or]: [{ company_id: companyId }, { '$businessUnits.id$': companyId }],
-    },
+    where,
     include: [{ model: Company, as: 'businessUnits', attributes: [], through: { attributes: [] } }],
   });
 };
