@@ -206,17 +206,17 @@ test('Manager scope is data-driven from manager_employee_mappings, unioned with 
   restore();
 });
 
-test('A caller whose ROLE is Service PO Admin but who ALSO holds a direct manager_employee_mappings row (a Secondary Manager mapping, unrelated to their role name) is granted that Employee too — access is data-driven, never role-name-gated', async () => {
+test('A caller whose ROLE is Project Manager (renamed from Service PO Admin) but who ALSO holds a direct manager_employee_mappings row (a Secondary Manager mapping, unrelated to their role name) is granted that Employee too — access is data-driven, never role-name-gated', async () => {
   stubEmployeeScopeAsLegacyOnly();
   managerEmployeeMappingRepository.findByManager = async (managerEmployeeId) => {
     assert.equal(managerEmployeeId, 438);
-    return [{ employee_id: 450 }]; // Secondary Manager mapping, despite the Service PO Admin role
+    return [{ employee_id: 450 }]; // Secondary Manager mapping, despite the Project Manager role
   };
   managerEmployeeMappingRepository.findByManagerEmployeeIds = async () => [];
   teamMappingRepository.findByServicePOAdmin = async () => [];
 
   const where = await resolveEmployeeAccessWhere({
-    userId: 128, employeeId: 438, companyId: 54, hierarchyRank: 6, roleNames: ['Service PO Admin'],
+    userId: 128, employeeId: 438, companyId: 54, hierarchyRank: 6, roleNames: ['Project Manager'],
   });
 
   const opIn = Object.getOwnPropertySymbols(where.id)[0];
@@ -224,7 +224,7 @@ test('A caller whose ROLE is Service PO Admin but who ALSO holds a direct manage
   restore();
 });
 
-test('Service PO Admin scope includes every Employee mapped to a Manager on their team_mappings roster', async () => {
+test('Project Manager (renamed from Service PO Admin) scope includes every Employee mapped to a Manager on their team_mappings roster', async () => {
   stubEmployeeScopeAsLegacyOnly();
   managerEmployeeMappingRepository.findByManager = async () => [];
   teamMappingRepository.findByServicePOAdmin = async (servicePOAdminEmployeeId, companyId) => {
@@ -239,7 +239,7 @@ test('Service PO Admin scope includes every Employee mapped to a Manager on thei
   };
 
   const where = await resolveEmployeeAccessWhere({
-    userId: 52, employeeId: 414, companyId: 46, hierarchyRank: 6, roleNames: ['Service PO Admin'],
+    userId: 52, employeeId: 414, companyId: 46, hierarchyRank: 6, roleNames: ['Project Manager'],
   });
 
   const opIn = Object.getOwnPropertySymbols(where.id)[0];

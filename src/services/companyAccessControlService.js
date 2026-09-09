@@ -602,7 +602,7 @@ async function resolveOwningAdminIdForCompany(companyId) {
 
 /**
  * Resolve BOTH the owning Admin id(s) AND the FULL Company scope for a BU
- * Admin/Service PO Admin/Delivery Head (or any other non-Admin/Entity-
+ * Admin/Project Manager/Delivery Head (or any other non-Admin/Entity-
  * Admin actor) — "operating under the Admin's scope," per the Service PO ->
  * Employee Mapping requirement: these roles must see EVERY Company/
  * employee their owning Admin sees, not just the Business Unit(s) they

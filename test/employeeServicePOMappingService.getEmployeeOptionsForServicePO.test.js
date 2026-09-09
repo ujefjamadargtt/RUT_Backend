@@ -172,13 +172,13 @@ test('TEST 6: a search term is passed straight through to the (already cross-BU)
   restore();
 });
 
-// TEST 8 — Service PO Admin gets the same broad access.
-test('TEST 8: Service PO Admin is authorized and gets the same cross-BU Employee scope', async () => {
+// TEST 8 — Project Manager (renamed from Service PO Admin) gets the same broad access.
+test('TEST 8: Project Manager is authorized and gets the same cross-BU Employee scope', async () => {
   stubHappyPath();
   const { getFilters } = stubEmployeeFindAllCapture([]);
 
   const result = await employeeServicePOMappingService.getEmployeeOptionsForServicePO(378, {
-    companyId: 1, hierarchyRank: 6, employeeId: 900, roleNames: ['Service PO Admin'], employeeBusinessUnits: [1, 2],
+    companyId: 1, hierarchyRank: 6, employeeId: 900, roleNames: ['Project Manager'], employeeBusinessUnits: [1, 2],
   });
 
   assert.deepEqual(getFilters().companyId, [1, 2]);
@@ -186,17 +186,19 @@ test('TEST 8: Service PO Admin is authorized and gets the same cross-BU Employee
   restore();
 });
 
-// TEST 9 — Delivery Head gets the same broad access (role-name substring
-// match, same technique as hasUnrestrictedServicePOVisibility).
-test('TEST 9: Delivery Head is authorized and gets the same cross-BU Employee scope', async () => {
+// TEST 9 — the retired "Service PO Admin"/"Delivery Head" names no longer
+// grant authority now that the role has been renamed to "Project Manager"
+// (see database/migrations/20260896_rename_service_po_admin_role_to_project_manager.sql).
+test('TEST 9: the retired "Service PO Admin" role name is no longer authorized (403)', async () => {
   stubHappyPath();
-  const { getFilters } = stubEmployeeFindAllCapture([]);
+  stubEmployeeFindAllCapture([]);
 
-  await employeeServicePOMappingService.getEmployeeOptionsForServicePO(378, {
-    companyId: 1, hierarchyRank: 6, employeeId: 900, roleNames: ['Delivery Head'], employeeBusinessUnits: [1, 2],
-  });
-
-  assert.deepEqual(getFilters().companyId, [1, 2]);
+  await assert.rejects(
+    () => employeeServicePOMappingService.getEmployeeOptionsForServicePO(378, {
+      companyId: 1, hierarchyRank: 6, employeeId: 900, roleNames: ['Service PO Admin'], employeeBusinessUnits: [1, 2],
+    }),
+    { statusCode: 403 }
+  );
   restore();
 });
 
@@ -241,11 +243,13 @@ test('TEST 11: a non-numeric business_unit_id is ignored (no filter applied)', a
   restore();
 });
 
-test('hasServicePOMappingAuthority(): matches BU Admin, Service PO Admin, and Delivery Head case-insensitively', () => {
+test('hasServicePOMappingAuthority(): matches BU Admin and Project Manager (renamed from Service PO Admin) case-insensitively', () => {
   assert.equal(employeeServicePOMappingService.hasServicePOMappingAuthority(['BU Admin']), true);
   assert.equal(employeeServicePOMappingService.hasServicePOMappingAuthority(['bu admin']), true);
-  assert.equal(employeeServicePOMappingService.hasServicePOMappingAuthority(['Service PO Admin']), true);
-  assert.equal(employeeServicePOMappingService.hasServicePOMappingAuthority(['Delivery Head']), true);
+  assert.equal(employeeServicePOMappingService.hasServicePOMappingAuthority(['Project Manager']), true);
+  assert.equal(employeeServicePOMappingService.hasServicePOMappingAuthority(['project manager']), true);
+  assert.equal(employeeServicePOMappingService.hasServicePOMappingAuthority(['Service PO Admin']), false);
+  assert.equal(employeeServicePOMappingService.hasServicePOMappingAuthority(['Delivery Head']), false);
   assert.equal(employeeServicePOMappingService.hasServicePOMappingAuthority(['Manager']), false);
   assert.equal(employeeServicePOMappingService.hasServicePOMappingAuthority(['Employee']), false);
   assert.equal(employeeServicePOMappingService.hasServicePOMappingAuthority([]), false);

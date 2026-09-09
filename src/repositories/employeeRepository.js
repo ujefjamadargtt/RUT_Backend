@@ -215,7 +215,7 @@ const findById = async (id, companyId) => {
  */
 const findByIdWithEmail = async (id, companyId, accessWhere = null) => {
   // Op.and, not object spread: accessWhere may itself carry an `id` key
-  // (the Manager/Service PO Admin/Employee scope is an id-in-list filter) —
+  // (the Manager/Project Manager/Employee scope is an id-in-list filter) —
   // spreading it after `{ id }` would silently overwrite the requested id
   // with the scope's list instead of ANDing the two together.
   return Employee.findOne({
@@ -576,6 +576,63 @@ const findByIdWithRoleAndCreator = async (id, roleId, createdBy) => {
   });
 };
 
+/**
+ * Fetch a paginated, filtered, sorted list of EVERY Employee holding one
+ * role, system-wide — Platform Admin's "Total Admins" tab data source.
+ * Unlike findByRoleAndCreator (scoped to one Platform Admin's own
+ * created_by), this is intentionally unscoped: Platform Admin sits above
+ * every Admin/Entity in the system, so "Total Admins" means every Admin on
+ * the platform, not just the ones the calling Platform Admin happens to have
+ * created themselves.
+ *
+ * @param {number} roleId
+ * @param {object} filters - { search, status }
+ * @param {object} pagination - { limit, offset }
+ * @param {object} sort - { sortBy, sortOrder }
+ * @returns {Promise<{ rows: Employee[], count: number }>}
+ */
+const findAllByRoleName = async (roleId, filters = {}, pagination = {}, sort = {}) => {
+  const { Role } = require('../models');
+  const { search, status } = filters;
+  const { limit = 20, offset = 0 } = pagination;
+  const { sortBy: requestedSortBy = 'created_at', sortOrder = 'DESC' } = sort;
+  const allowedSortColumns = ['email', 'created_at', 'full_name', 'employee_code'];
+  const sortBy = allowedSortColumns.includes(requestedSortBy) ? requestedSortBy : 'created_at';
+  const safeSortOrder = ['ASC', 'DESC'].includes((sortOrder || '').toUpperCase())
+    ? sortOrder.toUpperCase()
+    : 'DESC';
+
+  const where = { is_deleted: false };
+  if (status && status !== 'all') {
+    where.status = status;
+  }
+  if (search && search.trim()) {
+    const term = `%${search.trim()}%`;
+    where[Op.or] = [
+      { email: { [Op.iLike]: term } },
+      { full_name: { [Op.iLike]: term } },
+      { employee_code: { [Op.iLike]: term } },
+    ];
+  }
+
+  return Employee.findAndCountAll({
+    where,
+    attributes: ['id', 'employee_code', 'full_name', 'email', 'status', 'created_by', 'created_at'],
+    include: [{
+      model: Role,
+      as: 'roles',
+      attributes: ['id', 'role_name'],
+      where: { id: roleId },
+      through: { attributes: [] },
+      required: true,
+    }],
+    limit,
+    offset,
+    order: [[sortBy, safeSortOrder]],
+    distinct: true,
+  });
+};
+
 module.exports = {
   employeeScope,
   findAll,
@@ -586,6 +643,7 @@ module.exports = {
   updatePassword,
   findByRoleAndCreator,
   findByIdWithRoleAndCreator,
+  findAllByRoleName,
   create,
   update,
   softDelete,

@@ -22,7 +22,7 @@ const AMBIGUOUS_EMPLOYEE = Symbol('AMBIGUOUS_EMPLOYEE');
 // API's check in servicePOService.js), which has no role requirement at all
 // — a manually-created/edited Service PO may set ANY active employee as
 // Delivery Head. Import enforces this extra role gate on top.
-const DELIVERY_HEAD_ALLOWED_ROLES = ['Manager', 'Service PO Admin', 'Project Admin', 'BU Admin'];
+const DELIVERY_HEAD_ALLOWED_ROLES = ['Manager', 'Project Manager', 'Project Admin', 'BU Admin'];
 
 // Flexible column-header → field mapping (matched after normalising to lowercase + collapsed spaces)
 // NOTE: Service PO Code is intentionally NOT mapped here — it is always auto-generated

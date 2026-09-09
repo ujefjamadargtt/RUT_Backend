@@ -93,7 +93,7 @@ router.get(
  *       mappings — data source for the "Manage Service PO Mapping" action on
  *       Employee Master.
  *     description: >
- *       If the Employee holds Service PO Admin or Delivery Head (checked
+ *       If the Employee holds Project Manager or Delivery Head (checked
  *       server-side), every eligible Service PO in the caller's authorized
  *       company/tenant scope is returned, regardless of the Employee's own
  *       Business Unit. Every other role stays restricted to their own
@@ -170,7 +170,7 @@ router.put(
  *     summary: Get every Employee mapped to one Service PO
  *     description: |
  *       Uses identity-only authentication (no mandatory X-Company-Id) — a
- *       BU Admin / Service PO Admin / Delivery Head mapped to MULTIPLE
+ *       BU Admin / Project Manager / Delivery Head mapped to MULTIPLE
  *       Business Units can open ANY Service PO within their own managed
  *       set without first selecting that exact BU via the Global BU
  *       selector; company/tenant authorization is still fully enforced
@@ -210,7 +210,7 @@ router.get(
  *       .../employee/{employeeId}/options above).
  *     description: >
  *       Restricted to callers who hold Service PO mapping authority (BU
- *       Admin / Service PO Admin / Delivery Head, or Admin/Entity Admin) —
+ *       Admin / Project Manager / Delivery Head, or Admin/Entity Admin) —
  *       checked server-side from the caller's own verified role, never a
  *       role/mode the request could assert. For those callers, the
  *       returned Employee list spans their ENTIRE authorized Admin/company
@@ -259,7 +259,7 @@ router.get(
  *       "Map Employees" screen's own Entity → BU filter bar.
  *     description: >
  *       Same authorization and scope as GET .../service-po/{id}/options
- *       above (BU Admin / Service PO Admin / Delivery Head get their owning
+ *       above (BU Admin / Project Manager / Delivery Head get their owning
  *       Admin's full scope; Admin/Entity Admin get their own owned scope) —
  *       not scoped to one Service PO, since that scope is identical across
  *       every Service PO the caller can open this screen for.

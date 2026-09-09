@@ -3,17 +3,21 @@
 const { Model, DataTypes } = require('sequelize');
 
 /**
- * Team Mapping — Service PO Admin's own roster of Managers (self-service:
- * the Service PO Admin IS the actor, not a third party assigning on their
- * behalf). Replaces the old head_manager_mappings table (BU Admin ->
- * Head Manager -> Manager, one hop longer) now that the "Head Manager"
- * role is retired — see database/migrations/
- * 20260844_rename_head_manager_mappings_to_team_mappings.sql, which
- * renamed the table and its head_manager_user_id column in place.
+ * Team Mapping — Project Manager's own roster of Managers (self-service:
+ * the Project Manager IS the actor, not a third party assigning on their
+ * behalf). "Project Manager" is the renamed "Service PO Admin" role (see
+ * database/migrations/20260896_rename_service_po_admin_role_to_project_manager.sql)
+ * — the service_po_admin_employee_id column/servicePOAdmin association alias
+ * below keep their original names (a separate, bigger schema/API-shape
+ * change, not part of the display-name rename). Replaces the old
+ * head_manager_mappings table (BU Admin -> Head Manager -> Manager, one hop
+ * longer) now that the "Head Manager" role is retired — see
+ * database/migrations/20260844_rename_head_manager_mappings_to_team_mappings.sql,
+ * which renamed the table and its head_manager_user_id column in place.
  *
- * A Manager belongs to exactly ONE Service PO Admin's team at a time
- * (unique index on manager_user_id alone — same cardinality the table had
- * before the rename).
+ * A Manager belongs to exactly ONE Project Manager's team at a time (unique
+ * index on manager_user_id alone — same cardinality the table had before
+ * the rename).
  */
 module.exports = (sequelize) => {
   class TeamMapping extends Model {
@@ -52,7 +56,7 @@ module.exports = (sequelize) => {
           key: 'id',
         },
         validate: {
-          notNull: { msg: 'Service PO Admin employee is required.' },
+          notNull: { msg: 'Project Manager employee is required.' },
         },
       },
       manager_employee_id: {

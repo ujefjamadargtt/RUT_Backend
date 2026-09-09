@@ -49,6 +49,8 @@ const HEADER_MAP = {
   'sub location': 'sub_location',
   'sub_location': 'sub_location',
   'sublocation': 'sub_location',
+  'original entity': 'original_entity',
+  'original_entity': 'original_entity',
   'date of joining': 'date_of_joining',
   'joining date': 'date_of_joining',
   'doj': 'date_of_joining',
@@ -280,6 +282,13 @@ function validateRow(raw, existingCodes, seenCodes, existingEmails, seenEmails) 
     const subLocation = String(raw.sub_location).trim();
     if (subLocation.length > 256) errors.push('Sub location cannot exceed 256 characters.');
     else if (subLocation) data.sub_location = subLocation;
+  }
+
+  // ── original_entity (optional) ──────────────────────────────────────────────
+  if (!isBlank(raw.original_entity)) {
+    const originalEntity = String(raw.original_entity).trim();
+    if (originalEntity.length > 512) errors.push('Original entity cannot exceed 512 characters.');
+    else if (originalEntity) data.original_entity = originalEntity;
   }
 
   // ── date_of_joining (optional) ──────────────────────────────────────────────

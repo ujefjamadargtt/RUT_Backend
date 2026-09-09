@@ -93,7 +93,7 @@ const findByEmployeeIds = async (employeeIds) => {
 
 /**
  * Every active mapping row owned by ANY of the given Manager user IDs — the
- * Service PO Admin employee-scope lookup (a Service PO Admin's authorized
+ * Project Manager employee-scope lookup (a Project Manager's authorized
  * Employees are the union of every Employee mapped to a Manager on their
  * team; see teamMappingRepository.findByServicePOAdmin and
  * employeeAccessControlService.js). Same batching rationale as

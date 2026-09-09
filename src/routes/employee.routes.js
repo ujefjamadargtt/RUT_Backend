@@ -14,6 +14,35 @@ const {
 const employeeController = require('../controllers/employeeController');
 const { handleEmployeeUpload } = require('../middlewares/upload');
 const { importLimiter } = require('../middlewares/rateLimiters');
+const { isReadOnlyBuAdminPeer } = require('../services/employeeAccessControlService');
+
+/**
+ * Blocks a "view only" BU Admin peer role (roles.permission = 'Read' — e.g.
+ * "Delivery Operation Team Members") from every Employee Master write path.
+ * Such a role's read SCOPE was widened to match BU Admin's own Company-wide
+ * view (see employeeAccessControlService.resolveEmployeeAccessWhere /
+ * isBuAdminPeerRole) precisely so it sees everyone BU Admin sees — without
+ * this gate, that same widened scope would let it write every one of those
+ * records too, since POST/PUT/DELETE below have no other capability check
+ * that a NULL-hierarchy_rank, zero-capability role like this one would fail.
+ * Every OTHER role (Manager, Project Manager, HR, BU Head, BU Admin itself)
+ * is unaffected — see isReadOnlyBuAdminPeer's own doc comment.
+ */
+function blockIfReadOnlyBuAdminPeer(req, res, next) {
+  const isReadOnly = isReadOnlyBuAdminPeer({
+    hierarchyRank: req.hierarchyRank,
+    roleNames: req.userRoles || [],
+    rolePermission: req.rolePermission,
+  });
+  if (isReadOnly) {
+    return res.status(403).json({
+      success: false,
+      message: 'Access denied: your role has read-only access to Employee Master.',
+      code: 'READ_ONLY_ROLE',
+    });
+  }
+  return next();
+}
 
 /**
  * @swagger
@@ -137,6 +166,7 @@ const { importLimiter } = require('../middlewares/rateLimiters');
 router.post(
   '/import',
   authenticate,
+  blockIfReadOnlyBuAdminPeer,
   importLimiter,
   handleEmployeeUpload,
   employeeController.importEmployees
@@ -177,7 +207,7 @@ router.get(
  *     summary: Get employees eligible for Primary/Secondary Manager selection
  *     description: >
  *       Active employees in the caller's scope holding a role capable of
- *       managing Employees (Manager, Service PO Admin, Project Admin, or
+ *       managing Employees (Manager, Project Manager, Project Admin, or
  *       anything with manager.view_mapped_employees in its effective
  *       capability set) — the same eligibility rule enforced when the
  *       Employee Create/Edit form actually saves a Primary/Secondary
@@ -422,6 +452,7 @@ router.post(
 router.put(
   '/:id',
   authenticate,
+  blockIfReadOnlyBuAdminPeer,
   validate(updateEmployeeSchema),
   employeeController.update
 );
@@ -450,6 +481,7 @@ router.put(
 router.delete(
   '/:id',
   authenticate,
+  blockIfReadOnlyBuAdminPeer,
   employeeController.delete
 );
 

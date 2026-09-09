@@ -58,7 +58,7 @@ function forbiddenError(message) {
 /**
  * Confirm a candidate manager: exists, active, same company as the
  * Employee, and holds a role capable of managing Employees (Manager,
- * Service PO Admin, or Project Admin — anything with
+ * Project Manager, or Project Admin — anything with
  * 'manager.view_mapped_employees' in its effective capability set, direct
  * or inherited — see roleHierarchyService.js). Reused by both create() and
  * update() rather than duplicating the check.
@@ -247,7 +247,7 @@ async function attachBusinessUnitInfo(employees) {
  * Return a paginated, filtered, sorted employee list — scoped to whatever
  * Employees `authContext`'s caller is authorized to see (see
  * employeeAccessControlService.resolveEmployeeAccessWhere): an Employee
- * gets only their own record, a Manager/Service PO Admin gets their own
+ * gets only their own record, a Manager/Project Manager gets their own
  * record plus whoever is actually mapped to them, everyone else is bounded
  * by Company/Entity. Fixes the same object-level authorization gap as
  * getByIdWithEmail() below — this list endpoint previously returned every
@@ -285,7 +285,7 @@ const getAll = async (query = {}, authContext) => {
 
   if (servicePOId) {
     // resolveEmployeeMappingScope() (not resolveActorCompanyScope()) — a
-    // multi-BU BU Admin/Service PO Admin/Delivery Head must be able to
+    // multi-BU BU Admin/Project Manager/Delivery Head must be able to
     // reach a Service PO in ANY of their managed BUs, not just whichever
     // one is currently selected.
     const tenantScope = await employeeServicePOMappingService.resolveEmployeeMappingScope(authContext);
@@ -1007,7 +1007,7 @@ const deleteEmployee = async (id, userId, ipAddress = null, authContext) => {
  *
  * `servicePOId`, when given, switches this into the Service PO -> Map
  * Employees screen's data source: instead of resolveEmployeeAccessWhere()'s
- * per-role scope (which, for a Service PO Admin/Manager/etc, is a narrow
+ * per-role scope (which, for a Project Manager/Manager/etc, is a narrow
  * "my own team" data-driven scope — appropriate for Employee Master, wrong
  * for a mapping picker), this returns every active Employee across the
  * caller's ENTIRE authorized Admin/company/tenant scope — the same
@@ -1044,7 +1044,7 @@ const getActiveEmployees = async (authContext, servicePOId, businessUnitId = nul
   }
 
   // resolveEmployeeMappingScope() (not resolveActorCompanyScope()) — a
-  // multi-BU BU Admin/Service PO Admin/Delivery Head must be able to reach
+  // multi-BU BU Admin/Project Manager/Delivery Head must be able to reach
   // a Service PO in ANY of their managed BUs, not just whichever one is
   // currently selected.
   const tenantScope = await employeeServicePOMappingService.resolveEmployeeMappingScope(authContext);

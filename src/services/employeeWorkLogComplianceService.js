@@ -34,7 +34,7 @@ const logger = require('../utils/logger');
  *
  *   Admin        → all employees under the Admin's tenant/company hierarchy.
  *   BU Admin     → all employees belonging to mapped Business Unit(s).
- *   Service PO Admin → employees belonging to their authorized BUs.
+ *   Project Manager → employees belonging to their authorized BUs.
  *   Delivery Head    → employees belonging to their authorized BUs.
  *   Manager      → ONLY employees mapped to that Manager
  *                  (manager_employee_mappings + team_mappings).

@@ -43,17 +43,14 @@ const AUTH_CONTEXT = { companyId: 10, hierarchyRank: 4, employeeId: 900 }; // BU
 
 // --- hasUnrestrictedServicePOVisibility() -----------------------------
 
-test('hasUnrestrictedServicePOVisibility(): matches "Service PO Admin" case-insensitively', () => {
-  assert.equal(employeeServicePOMappingService.hasUnrestrictedServicePOVisibility(['Service PO Admin']), true);
-  assert.equal(employeeServicePOMappingService.hasUnrestrictedServicePOVisibility(['service po admin']), true);
+test('hasUnrestrictedServicePOVisibility(): matches "Project Manager" case-insensitively (renamed from "Service PO Admin")', () => {
+  assert.equal(employeeServicePOMappingService.hasUnrestrictedServicePOVisibility(['Project Manager']), true);
+  assert.equal(employeeServicePOMappingService.hasUnrestrictedServicePOVisibility(['project manager']), true);
 });
 
-test('hasUnrestrictedServicePOVisibility(): matches a role renamed to "Service PO Admin/Delivery Head"', () => {
-  assert.equal(employeeServicePOMappingService.hasUnrestrictedServicePOVisibility(['Service PO Admin/Delivery Head']), true);
-});
-
-test('hasUnrestrictedServicePOVisibility(): matches a standalone "Delivery Head" role too', () => {
-  assert.equal(employeeServicePOMappingService.hasUnrestrictedServicePOVisibility(['Delivery Head']), true);
+test('hasUnrestrictedServicePOVisibility(): false for the retired "Service PO Admin"/"Delivery Head" names — only the current role name matches', () => {
+  assert.equal(employeeServicePOMappingService.hasUnrestrictedServicePOVisibility(['Service PO Admin']), false);
+  assert.equal(employeeServicePOMappingService.hasUnrestrictedServicePOVisibility(['Delivery Head']), false);
 });
 
 test('hasUnrestrictedServicePOVisibility(): false for Manager/Employee/BU Admin and other unrelated roles', () => {
@@ -65,10 +62,10 @@ test('hasUnrestrictedServicePOVisibility(): false for Manager/Employee/BU Admin 
 
 // --- getServicePOOptionsForEmployee() ----------------------------------
 
-test('TEST 1/2 — Service PO Admin (or Delivery Head): eligible query is called unrestricted=true, ignoring the employee\'s own BU', async () => {
+test('TEST 1/2 — Project Manager (renamed from Service PO Admin): eligible query is called unrestricted=true, ignoring the employee\'s own BU', async () => {
   employeeRepository.findById = async () => ({ id: 1, company_id: 1, status: 'active' }); // employee's home BU = 1
   employeeBusinessUnitRepository.findBusinessUnitsByEmployeeId = async () => [{ id: 1 }];
-  employeeRoleRepository.findRolesByEmployeeId = async () => [{ role_name: 'Service PO Admin' }];
+  employeeRoleRepository.findRolesByEmployeeId = async () => [{ role_name: 'Project Manager' }];
   employeeServicePOMappingRepository.findByEmployee = async () => [];
 
   let captured;

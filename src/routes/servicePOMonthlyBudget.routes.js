@@ -44,7 +44,7 @@ const {
  *       (defaulted to 0/null when nothing has been filled in yet).
  *       Role-scoped from the authenticated JWT identity, never a request
  *       parameter: Manager sees only Service POs granted to them; every
- *       other role (e.g. BU Admin, Service PO Admin) sees every active
+ *       other role (e.g. BU Admin, Project Manager) sees every active
  *       Service PO in their own company/BU. Always further scoped to the
  *       caller's own company — never another company's Service POs.
  *     tags: [ServicePOMonthlyBudgets]
@@ -116,7 +116,7 @@ router.get(
  *       passing a service_po_id outside their own mapped scope gets 404,
  *       identical to a genuinely missing or another company's PO — this
  *       never reveals whether the PO exists outside their scope. Other
- *       roles (e.g. BU Admin, Service PO Admin) are unrestricted beyond
+ *       roles (e.g. BU Admin, Project Manager) are unrestricted beyond
  *       their own company/BU. When service_po_id is omitted, the list is
  *       narrowed the same way (Manager: only their mapped POs' records).
  *     tags: [ServicePOMonthlyBudgets]

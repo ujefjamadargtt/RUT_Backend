@@ -150,10 +150,15 @@ function parseDate(raw) {
   return null;
 }
 
-// Rounding rule: if minutes > 20 → round up to next whole hour, else floor.
-// e.g. 73:21:00 → 74, 73:20:00 → 73, 73:00:00 → 73, 73:41:00 → 74
-function roundHours(hours, minutes) {
-  return minutes > 20 ? hours + 1 : hours;
+// Converts a whole-hours + minutes pair into decimal hours. Minutes are
+// divided by 60 — never treated as a raw decimal/percentage (a bug this
+// once had: "1 hour 50 minutes" coming out as 1.50 instead of 1.83) — and
+// any minutes >= 60 are carried into whole hours FIRST, e.g. (1, 75) ->
+// (2, 15) -> 2.25, not 1.75. Rounded to 2 decimal places to match
+// hours_logged's DECIMAL(5,2) column.
+function toDecimalHours(hours, minutes) {
+  const totalMinutes = hours * 60 + minutes;
+  return Math.round((totalMinutes / 60) * 100) / 100;
 }
 
 function parseHours(raw) {
@@ -164,7 +169,7 @@ function parseHours(raw) {
     const decimal = raw * 24;
     const h = Math.floor(decimal);
     const m = (decimal - h) * 60;
-    return roundHours(h, m);
+    return toDecimalHours(h, m);
   }
 
   if (raw instanceof Date) {
@@ -173,7 +178,7 @@ function parseHours(raw) {
     // that reflect the spreadsheet cell in local time.
     const hours = raw.getHours();
     const minutes = raw.getMinutes();
-    return roundHours(hours, minutes);
+    return toDecimalHours(hours, minutes);
   }
 
   const value = String(raw).trim();
@@ -187,7 +192,7 @@ function parseHours(raw) {
     const hours = parseInt(durationMatch[1], 10);
     const minutes = parseInt(durationMatch[2], 10);
     if (Number.isFinite(hours) && Number.isFinite(minutes)) {
-      return roundHours(hours, minutes);
+      return toDecimalHours(hours, minutes);
     }
     return null;
   }
@@ -202,14 +207,14 @@ function parseHours(raw) {
       if (Number.isFinite(hoursDiff)) {
         const h = Math.floor(hoursDiff);
         const m = (hoursDiff - h) * 60;
-        return roundHours(h, m);
+        return toDecimalHours(h, m);
       }
     }
 
     const hours = isoTime.getHours();
     const minutes = isoTime.getMinutes();
     if (hours || minutes) {
-      return roundHours(hours, minutes);
+      return toDecimalHours(hours, minutes);
     }
   }
 
@@ -217,7 +222,7 @@ function parseHours(raw) {
   if (Number.isFinite(parsed)) {
     const h = Math.floor(parsed);
     const m = (parsed - h) * 60;
-    return roundHours(h, m);
+    return toDecimalHours(h, m);
   }
 
   return null;
@@ -772,7 +777,7 @@ const validateRows = async (rows, companyId) => {
   // mappedPoIds fix below: an Employee whose own company_id/BU membership
   // is entirely elsewhere can still hold an active employee_servicepo_mapping
   // to a Service PO that DOES belong to this sync's own `companyId` (e.g. a
-  // Delivery Head/Service PO Admin-style cross-BU resourcing assignment).
+  // Delivery Head/Project Manager-style cross-BU resourcing assignment).
   // Without admitting them here, such an Employee never even enters
   // `allEmployees` below, so every row for them fails with a false "was not
   // found in the system" — confirmed live via the Sync Employee Work Logs
@@ -2272,4 +2277,5 @@ module.exports = {
   resolveManualEntryReferences,
   validateMonthlyHoursLimit,
   validateImportHoursLimit,
+  parseHours,
 };

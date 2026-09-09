@@ -438,6 +438,16 @@ async function assertDailyCap(employeeId, dateStr, hoursRequested, companyId, ex
 const replaceDailyEntries = async (employeeId, companyId, data) => {
   const dateStr = assertNotFutureDate(data.timesheet_date);
 
+  // This date is about to be wiped (deleteByEmployeeAndDate below) and
+  // reinserted wholesale — must not silently discard a row that's already
+  // been synced to the official Timesheet (see EmployeeWorkLog.js's status
+  // doc comment: "Synced rows are read-only").
+  if (await employeeWorkLogRepository.hasSyncedEntriesInRange(employeeId, dateStr, dateStr)) {
+    throw conflictError(
+      `${dateStr} has already been synced to the official Timesheet and can no longer be edited.`
+    );
+  }
+
   // Two lines at the same (service_po_id, hierarchy_node_id) would collide
   // on insert (uq_employee_work_logs) — for a PLAIN hours-only line that's
   // still rejected up front, same as before. For TIME-BASED lines (each
@@ -602,13 +612,12 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
 
 /**
  * Update an existing work log entry. Employee may only edit their own
- * entries — INCLUDING already-synced ones: Employee Work Logs are the
- * source of truth, and Sync is an idempotent/overwrite operation that
- * always re-projects the CURRENT state of the month into `timesheets` (see
- * timesheetService.previewPmsImport). Editing a previously-synced entry
- * reverts it to status='pending' (clearing synced_at/timesheet_import_id)
- * to signal "this no longer matches what's in the official Timesheet —
- * re-sync to update it."
+ * entries — EXCLUDING already-synced ones: once a row has been included in
+ * a completed Sync run (status='synced'), the corresponding official record
+ * already lives in `timesheets` and the row becomes read-only (see
+ * EmployeeWorkLog.js's status doc comment). Attempting to edit a synced
+ * entry is rejected outright rather than silently reverting it to
+ * 'pending'.
  *
  * @param {number} employeeId
  * @param {number} companyId
@@ -620,6 +629,12 @@ const updateEntry = async (employeeId, companyId, id, data) => {
   const existing = await employeeWorkLogRepository.findByIdForEmployee(id, employeeId, companyId);
   if (!existing) {
     throw notFoundError(`Work log entry #${id} was not found.`);
+  }
+
+  if (existing.status === 'synced') {
+    throw conflictError(
+      `Work log entry #${id} has already been synced to the official Timesheet and can no longer be edited.`
+    );
   }
 
   const servicePOId = data.service_po_id ?? existing.service_po_id;
@@ -697,14 +712,14 @@ const updateEntry = async (employeeId, companyId, id, data) => {
       // changes service_po_id to a PO owned by a different BU.
       company_id: po.company_id ?? companyId,
       updated_by: employeeId,
-      // Any edit invalidates a prior sync snapshot — revert unconditionally
-      // to 'pending' (a no-op if it was already 'pending') EXCEPT when the
-      // entry is 'rejected': saving edits must NOT itself resubmit it — only
-      // the explicit Resubmit action (resubmitEntry) may move REJECTED ->
-      // PENDING (see EmployeeWorkLog.js's status doc comment). Editing a
-      // rejected entry corrects it while leaving the Resubmit click as a
-      // deliberate, separate step ("Edit -> Save Changes -> still REJECTED
-      // -> Resubmit -> PENDING").
+      // An edit to an 'approved' entry reverts it to 'pending' (re-requires
+      // approval) EXCEPT when the entry is 'rejected': saving edits must NOT
+      // itself resubmit it — only the explicit Resubmit action
+      // (resubmitEntry) may move REJECTED -> PENDING (see EmployeeWorkLog.js's
+      // status doc comment). Editing a rejected entry corrects it while
+      // leaving the Resubmit click as a deliberate, separate step ("Edit ->
+      // Save Changes -> still REJECTED -> Resubmit -> PENDING"). 'synced' is
+      // excluded from ever reaching here — see the status guard above.
       status: existing.status === 'rejected' ? 'rejected' : 'pending',
       synced_at: null,
       timesheet_import_id: null,
@@ -783,6 +798,12 @@ const addTimeEntries = async (employeeId, companyId, data) => {
     employeeId, data.service_po_id, data.hierarchy_node_id || null, dateStr, null, companyId
   );
   const existing = existingRef ? await employeeWorkLogRepository.findById(existingRef.id, companyId) : null;
+
+  if (existing && existing.status === 'synced') {
+    throw conflictError(
+      `Work log entry #${existing.id} has already been synced to the official Timesheet and can no longer be edited.`
+    );
+  }
 
   // This endpoint always produces a TIME_BASED row (time_entries is
   // required by its own schema) — must not conflict with an existing
@@ -1008,11 +1029,10 @@ const getEntries = async (employeeId, companyId, query) => {
 };
 
 /**
- * Delete an existing work log entry (own entries only — INCLUDING
- * already-synced ones; see updateEntry's doc). If the employee later
- * re-syncs this month, a deleted entry simply won't be part of the "latest
- * Employee Work Logs" the sync reads, so it drops out of `timesheets` too
- * on the next sync's overwrite.
+ * Delete an existing work log entry (own entries only — EXCLUDING
+ * already-synced ones; see updateEntry's doc). A synced row's official
+ * record already lives in `timesheets`, so it must stay read-only until the
+ * next Sync run re-projects a genuinely changed month.
  *
  * @param {number} employeeId
  * @param {number} companyId
@@ -1023,6 +1043,12 @@ const deleteEntry = async (employeeId, companyId, id) => {
   const existing = await employeeWorkLogRepository.findByIdForEmployee(id, employeeId, companyId);
   if (!existing) {
     throw notFoundError(`Work log entry #${id} was not found.`);
+  }
+
+  if (existing.status === 'synced') {
+    throw conflictError(
+      `Work log entry #${id} has already been synced to the official Timesheet and can no longer be deleted.`
+    );
   }
 
   await employeeWorkLogRepository.deleteById(id, companyId);

@@ -1,6 +1,13 @@
 'use strict';
 
+const { Employee } = require('../models');
 const platformAdminRepository = require('../repositories/platformAdminRepository');
+const employeeRepository = require('../repositories/employeeRepository');
+const roleRepository = require('../repositories/roleRepository');
+const dateHelper = require('../helpers/dateHelper');
+const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
+
+const asNumber = (value) => Number.parseFloat(value) || 0;
 
 /**
  * Platform Admin Organization Overview — assembles the three independent
@@ -118,6 +125,22 @@ function formatEntities(businessUnits) {
 }
 
 /**
+ * Same comma-separated collapsing as formatBusinessUnits/formatEntities, for
+ * an Employee's held Role(s) — an Employee can hold more than one active
+ * Role (see EmployeeRole), previously returned here as a bare array of
+ * `{id, name}` objects, inconsistent with `bu`/`entity`'s `{ids, name}`
+ * shape and easy for a consumer written against that shape (a plain
+ * `roles?.name` read) to silently render blank for a multi-role Employee.
+ */
+function formatRoles(roles) {
+  if (!roles || roles.length === 0) return null;
+  return {
+    ids: roles.map((role) => role.id),
+    name: roles.map((role) => role.role_name).join(', '),
+  };
+}
+
+/**
  * Maps one Employee (the sole login identity since the Employee-as-Identity
  * redesign — see platformAdminRepository.findAllEmployeesWithRolesAndBUs's
  * doc comment) into this endpoint's `users` array shape. Field names
@@ -131,9 +154,10 @@ function mapUser(employee) {
   return {
     user_id: employee.id,
     employee_id: employee.id,
+    employee_code: employee.employee_code,
     name: employee.full_name,
     email: employee.email,
-    roles: (employee.roles || []).map((role) => ({ id: role.id, name: role.role_name })),
+    roles: formatRoles(employee.roles),
     status: employee.status,
     bu: formatBusinessUnits(employee.businessUnits),
     entity: formatEntities(employee.businessUnits),
@@ -154,6 +178,143 @@ const getOrganizationOverview = async () => {
   };
 };
 
+async function resolveAdminRoleId() {
+  const role = await roleRepository.findByName('Admin');
+  if (!role) {
+    const err = new Error('The "Admin" role is not seeded.');
+    err.statusCode = 500;
+    throw err;
+  }
+  return role.id;
+}
+
+/**
+ * "Total Admins" tab — every Admin-role Employee on the whole platform, not
+ * just ones the calling Platform Admin created themselves (contrast with
+ * adminService.getAll's created_by-scoped "Admins I created" listing — see
+ * employeeRepository.findAllByRoleName's doc comment). Each row is enriched
+ * with a `created_by` summary (name/email of whichever actor created that
+ * Admin), resolved with one batched lookup rather than N+1 per row.
+ */
+const getTotalAdmins = async (query = {}) => {
+  const { page, limit, offset } = getPaginationParams(query);
+  const roleId = await resolveAdminRoleId();
+
+  const { rows, count } = await employeeRepository.findAllByRoleName(
+    roleId,
+    { search: query.search, status: query.status },
+    { limit, offset },
+    { sortBy: query.sort_by, sortOrder: query.sort_order }
+  );
+
+  const plainRows = rows.map((row) => (row.get ? row.get({ plain: true }) : row));
+  const creatorIds = [...new Set(plainRows.map((row) => row.created_by).filter((id) => id != null))];
+  const creators = creatorIds.length
+    ? await Employee.findAll({ where: { id: creatorIds }, attributes: ['id', 'full_name', 'email'], raw: true })
+    : [];
+  const creatorById = new Map(creators.map((creator) => [creator.id, creator]));
+
+  const data = plainRows.map((row) => {
+    const creator = row.created_by != null ? creatorById.get(row.created_by) : null;
+    return {
+      id: row.id,
+      employee_code: row.employee_code,
+      full_name: row.full_name,
+      email: row.email,
+      status: row.status,
+      created_at: row.created_at,
+      created_by: creator ? { id: creator.id, name: creator.full_name, email: creator.email } : null,
+    };
+  });
+
+  return { data, meta: getPaginationMeta(count, page, limit) };
+};
+
+const WORK_LOG_SYNCED_COLUMNS = [
+  { key: 'employee_code', label: 'Emp Code' },
+  { key: 'employee_name', label: 'Emp Name' },
+  { key: 'admin_name', label: 'Admin' },
+  { key: 'entity_name', label: 'Entity Name' },
+  { key: 'bu_name', label: 'BU Name' },
+  { key: 'total_hours', label: 'Total Hours (Synced)' },
+];
+
+function mapSyncedRow(row) {
+  return {
+    employee_id: row.employee_id,
+    employee_code: row.employee_code,
+    employee_name: row.employee_name,
+    admin_name: row.admin_name || null,
+    entity_name: row.entity_name || null,
+    bu_name: row.bu_name || null,
+    total_hours: asNumber(row.total_hours),
+  };
+}
+
+/**
+ * "Employee Work Log" tab — one row per Employee, system-wide, for the
+ * selected month, with ONLY synced hours counted (see
+ * platformAdminRepository.buildSyncedWorkLogQuery's doc comment). An
+ * Employee with no synced work log that month still appears, with
+ * total_hours: 0 — never dropped.
+ */
+const getEmployeeWorkLogSynced = async (query = {}) => {
+  const { month, year } = query;
+  const { startDate, endDate } = dateHelper.getMonthBounds(month, year);
+  const { page, limit, offset } = getPaginationParams(query);
+
+  const { rows, count } = await platformAdminRepository.getEmployeeWorkLogSyncedPage({
+    startDate,
+    endDate,
+    search: query.search || undefined,
+    status: query.status,
+    sortBy: query.sortBy,
+    sortOrder: query.sortOrder,
+    limit,
+    offset,
+  });
+
+  return {
+    period: { month, year, startDate, endDate },
+    data: rows.map(mapSyncedRow),
+    meta: getPaginationMeta(count, page, limit),
+  };
+};
+
+/**
+ * Excel export for the "Employee Work Log" tab — one workbook, 2 sheets,
+ * split by whether the Employee has ANY synced hours in the selected month:
+ * "Hours > 0" (filled) and "Hours = 0" (not filled). Unpaginated — pulls
+ * every matching row so both sheets are complete. See
+ * reportExporter.toMultiSheetExcelBuffer, consumed by the controller exactly
+ * like tenantExportController.js's own export endpoint.
+ */
+const exportEmployeeWorkLogSynced = async (query = {}) => {
+  const { month, year } = query;
+  const { startDate, endDate } = dateHelper.getMonthBounds(month, year);
+
+  const rawRows = await platformAdminRepository.getEmployeeWorkLogSyncedAll({
+    startDate,
+    endDate,
+    search: query.search || undefined,
+    status: query.status,
+    sortBy: 'employee_name',
+    sortOrder: 'ASC',
+  });
+
+  const rows = rawRows.map(mapSyncedRow);
+  const filled = rows.filter((row) => row.total_hours > 0);
+  const notFilled = rows.filter((row) => row.total_hours === 0);
+
+  return {
+    period: { month, year, startDate, endDate },
+    sheets: [
+      { name: 'Hours > 0', columns: WORK_LOG_SYNCED_COLUMNS, rows: filled },
+      { name: 'Hours = 0', columns: WORK_LOG_SYNCED_COLUMNS, rows: notFilled },
+    ],
+  };
+};
+
 module.exports = {
   getOrganizationOverview,
   mapCompany,
@@ -161,4 +322,7 @@ module.exports = {
   mapProject,
   mapUser,
   buildServicePOHierarchy,
+  getTotalAdmins,
+  getEmployeeWorkLogSynced,
+  exportEmployeeWorkLogSynced,
 };

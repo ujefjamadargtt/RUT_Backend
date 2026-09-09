@@ -4,8 +4,9 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { Op } = require('sequelize');
 
-// Regression coverage for the "Service PO Admin / Delivery Head see only
-// their INDIVIDUALLY-mapped Service POs" change — previously
+// Regression coverage for the "Project Manager (renamed from Service PO
+// Admin) / Delivery Head see only their INDIVIDUALLY-mapped Service POs"
+// change — previously
 // servicePORepository.companyScope() UNIONED mappedServicePOIds alongside
 // the actor's normal BU-based company_id match, so these two roles still saw
 // every Service PO in their own mapped Business Unit(s), on top of whatever
@@ -135,8 +136,8 @@ test('getAll(): a non-qualifying role (e.g. BU Admin) -> filters.mappedServicePO
   restore();
 });
 
-test('getAll(): Service PO Admin -> filters.mappedServicePOIds is exactly their active mappings, regardless of companyId', async () => {
-  stubRoles(['Service PO Admin']);
+test('getAll(): Project Manager (renamed from Service PO Admin) -> filters.mappedServicePOIds is exactly their active mappings, regardless of companyId', async () => {
+  stubRoles(['Project Manager']);
   stubMappedServicePOs([101, 202]);
   const getCaptured = stubFindAllCapture();
 
@@ -146,8 +147,8 @@ test('getAll(): Service PO Admin -> filters.mappedServicePOIds is exactly their 
   restore();
 });
 
-test('getAll(): Delivery Head with ZERO active mappings -> filters.mappedServicePOIds is [] (sees nothing), not null (which would fall back to BU scope)', async () => {
-  stubRoles(['Delivery Head']);
+test('getAll(): Project Manager with ZERO active mappings -> filters.mappedServicePOIds is [] (sees nothing), not null (which would fall back to BU scope)', async () => {
+  stubRoles(['Project Manager']);
   stubMappedServicePOs([]);
   const getCaptured = stubFindAllCapture();
 
@@ -157,8 +158,22 @@ test('getAll(): Delivery Head with ZERO active mappings -> filters.mappedService
   restore();
 });
 
-test('getById(): mappedServicePOIds is threaded through to servicePORepository.findById\'s 5th argument', async () => {
+test('getAll(): the retired "Service PO Admin"/"Delivery Head" role names no longer qualify -> filters.mappedServicePOIds is null', async () => {
   stubRoles(['Service PO Admin']);
+  const getCaptured1 = stubFindAllCapture();
+  await servicePOService.getAll({}, { companyId: 10, hierarchyRank: 6, employeeId: 900 }, null);
+  assert.equal(getCaptured1().mappedServicePOIds, null);
+  restore();
+
+  stubRoles(['Delivery Head']);
+  const getCaptured2 = stubFindAllCapture();
+  await servicePOService.getAll({}, { companyId: 10, hierarchyRank: 6, employeeId: 900 }, null);
+  assert.equal(getCaptured2().mappedServicePOIds, null);
+  restore();
+});
+
+test('getById(): mappedServicePOIds is threaded through to servicePORepository.findById\'s 5th argument', async () => {
+  stubRoles(['Project Manager']);
   stubMappedServicePOs([555]);
   let capturedArgs;
   servicePORepository.findById = async (...args) => {

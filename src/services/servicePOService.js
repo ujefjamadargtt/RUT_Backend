@@ -145,7 +145,7 @@ async function assertValidDeliveryHead(employeeId, companyId) {
 }
 
 /**
- * Service PO Admin / Delivery Head see ONLY Service POs individually mapped
+ * Project Manager / Delivery Head see ONLY Service POs individually mapped
  * to them (employee_servicepo_mapping, an active row) — NOT every PO in
  * their own mapped Business Unit(s). A PO mapped to them shows even when its
  * own BU isn't one of theirs; just as importantly, a PO in their own mapped
@@ -187,7 +187,7 @@ async function resolveIndividuallyMappedServicePOIds(employeeId) {
  * selected, unchanged from before. A BU-scoped actor is unaffected either
  * way (already limited to their own single active BU).
  *
- * A Service PO Admin/Delivery Head is scoped ENTIRELY differently: instead
+ * A Project Manager/Delivery Head is scoped ENTIRELY differently: instead
  * of the BU-based `companyId`/`centralisedOwnerIds` scoping above, they see
  * ONLY their individually-mapped Service POs (companyScope() overrides,
  * never unions, when `mappedServicePOIds` is non-null) — see
@@ -222,7 +222,7 @@ const getAll = async (query = {}, authContext, headerCompanyId = null) => {
     // Widens the list to this actor's own tenant's Centralised POs
     // (company_id NULL) — see resolveCentralisedOwnerIds()'s doc comment.
     centralisedOwnerIds: await resolveCentralisedOwnerIds(companyId),
-    // For a Service PO Admin/Delivery Head, REPLACES companyId/
+    // For a Project Manager/Delivery Head, REPLACES companyId/
     // centralisedOwnerIds above entirely with this actor's own individually-
     // mapped POs (see resolveIndividuallyMappedServicePOIds()'s doc
     // comment) — `null` (every other role) leaves them in full effect.
@@ -243,7 +243,7 @@ const getAll = async (query = {}, authContext, headerCompanyId = null) => {
 /**
  * Return the full details for a single Service PO, including resources.
  *
- * A Service PO Admin/Delivery Head reaches this ONLY for a Service PO
+ * A Project Manager/Delivery Head reaches this ONLY for a Service PO
  * individually mapped to them (never merely because it's in their own
  * mapped BU) — same override rule getAll() applies, so a row it lists never
  * 404s the moment it's opened, and a same-BU-but-unmapped PO 404s here just
@@ -256,7 +256,7 @@ const getAll = async (query = {}, authContext, headerCompanyId = null) => {
  */
 const getById = async (id, authContext) => {
   const companyId = await resolveActorCompanyScope(authContext);
-  // A BU-scoped actor (BU Admin/Service PO Admin) must be able to VIEW a
+  // A BU-scoped actor (BU Admin/Project Manager) must be able to VIEW a
   // Centralised PO applicable to their own tenant, even though it never
   // gets a BU of its own (company_id NULL). See
   // servicePORepository.companyScope()'s doc comment.

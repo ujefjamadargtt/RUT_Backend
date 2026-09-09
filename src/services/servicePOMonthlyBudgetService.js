@@ -48,17 +48,17 @@ async function assertServicePOExists(servicePOId, companyId) {
  *
  * - Manager: the UNION of Service POs mapped to them via either of the two
  *   independent mapping paths that exist in this data model:
- *     1. manager_servicepo_mappings (manager_user_id) — a Service PO Admin's
+ *     1. manager_servicepo_mappings (manager_user_id) — a Project Manager's
  *        formal grant to a Manager on their team (see teamMappingService).
  *     2. employee_servicepo_mapping (employee_id), via the Manager's own
  *        linked Employee record (req.employeeId) — the same staffing
  *        assignment employeeServicePOMappingRepository.findByEmployee()
  *        feeds to the Employee Timesheet module. A Manager IS an Employee
  *        and can be assigned to a PO as a resource the same way any other
- *        Employee is, independent of any Service PO Admin grant.
+ *        Employee is, independent of any Project Manager grant.
  *   Both are real, independently-populated mapping tables in this app — a
  *   Manager mapped through only one of them must still see that PO here.
- * - Every other role (BU Admin, Service PO Admin, Admin, HR, Employee,
+ * - Every other role (BU Admin, Project Manager, Admin, HR, Employee,
  *   Project Admin, ...): no individual-mapping restriction — every Service
  *   PO in the caller's own company. A Company IS the BU/entity boundary
  *   here, so companyId scoping (applied by every repository call this

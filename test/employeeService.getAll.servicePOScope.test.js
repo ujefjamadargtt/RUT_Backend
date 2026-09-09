@@ -35,7 +35,7 @@ function restore() {
   companyAccessControlService.resolveAdminScopeForBusinessUnits = ORIGINAL.resolveAdminScopeForBusinessUnits;
 }
 
-// Identity passthrough for BU Admin/Service PO Admin scenarios —
+// Identity passthrough for BU Admin/Project Manager scenarios —
 // resolveAdminScopeForBusinessUnits' own widening logic (own-BUs -> owning
 // Admin -> Admin's full scope) is tested directly in
 // test/companyAccessControlService.resolveAdminScopeForBusinessUnits.test.js.

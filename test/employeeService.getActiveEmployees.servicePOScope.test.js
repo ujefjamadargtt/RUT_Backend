@@ -37,7 +37,7 @@ function restore() {
   companyAccessControlService.resolveAdminScopeForBusinessUnits = ORIGINAL.resolveAdminScopeForBusinessUnits;
 }
 
-// Identity passthrough for BU Admin/Service PO Admin scenarios —
+// Identity passthrough for BU Admin/Project Manager scenarios —
 // resolveAdminScopeForBusinessUnits' own widening logic is tested directly
 // in test/companyAccessControlService.resolveAdminScopeForBusinessUnits.test.js.
 // Called at the START of a test (not module scope) since restore() resets it.
@@ -62,13 +62,13 @@ function captureRepoCall(rows = []) {
   };
 }
 
-// Service PO Admin mapped to BU 3 and BU 7, currently viewing (selected)
+// Project Manager (renamed from Service PO Admin) mapped to BU 3 and BU 7, currently viewing (selected)
 // Global BU 3 — the exact scenario from the frontend's own example.
-const SERVICE_PO_ADMIN_MULTI_BU = {
+const PROJECT_MANAGER_MULTI_BU = {
   companyId: 3,
   hierarchyRank: 6,
   employeeId: 900,
-  roleNames: ['Service PO Admin'],
+  roleNames: ['Project Manager'],
   employeeBusinessUnits: [3, 7],
 };
 
@@ -80,7 +80,7 @@ test('no service_po_id: behavior is completely unchanged — resolveEmployeeAcce
   };
   const { getCompanyId, getAccessWhere } = captureRepoCall([]);
 
-  await employeeService.getActiveEmployees(SERVICE_PO_ADMIN_MULTI_BU, null);
+  await employeeService.getActiveEmployees(PROJECT_MANAGER_MULTI_BU, null);
 
   assert.equal(accessWhereCalled, true);
   assert.equal(getCompanyId(), 3);
@@ -99,7 +99,7 @@ test('service_po_id given: bypasses resolveEmployeeAccessWhere entirely (no "own
   };
   const { getCompanyId, getAccessWhere } = captureRepoCall([]);
 
-  await employeeService.getActiveEmployees(SERVICE_PO_ADMIN_MULTI_BU, 388);
+  await employeeService.getActiveEmployees(PROJECT_MANAGER_MULTI_BU, 388);
 
   assert.equal(accessWhereCalled, false);
   assert.deepEqual(getCompanyId(), [3, 7]);
@@ -128,7 +128,7 @@ test('a Centralised Service PO (no company_id) uses the SAME caller-scope resolu
   servicePORepository.findById = async () => ({ id: 500, company_id: null, is_centralised: true });
   const { getCompanyId } = captureRepoCall([]);
 
-  await employeeService.getActiveEmployees(SERVICE_PO_ADMIN_MULTI_BU, 500);
+  await employeeService.getActiveEmployees(PROJECT_MANAGER_MULTI_BU, 500);
 
   assert.deepEqual(getCompanyId(), [3, 7]);
   restore();
@@ -156,7 +156,7 @@ test('a service_po_id outside the caller\'s tenant scope 404s rather than silent
   servicePORepository.findById = async () => null;
 
   await assert.rejects(
-    () => employeeService.getActiveEmployees(SERVICE_PO_ADMIN_MULTI_BU, 999),
+    () => employeeService.getActiveEmployees(PROJECT_MANAGER_MULTI_BU, 999),
     (err) => {
       assert.equal(err.statusCode, 404);
       return true;

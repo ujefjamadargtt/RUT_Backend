@@ -54,8 +54,8 @@ module.exports = (sequelize) => {
       },
       // Self-referencing FK — this role's users also get every capability
       // granted (directly or transitively) to the referenced role. Only set
-      // for the two edges the RBAC spec states (Service PO Admin <- Manager,
-      // Project Admin <- Service PO Admin); NULL otherwise. See
+      // for the two edges the RBAC spec states (Project Manager <- Manager,
+      // Project Admin <- Project Manager); NULL otherwise. See
       // src/services/roleHierarchyService.js.
       inherits_role_id: {
         type: DataTypes.INTEGER,

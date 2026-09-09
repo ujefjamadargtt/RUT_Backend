@@ -133,6 +133,15 @@ const createEmployeeSchema = Joi.object({
       'string.max': 'Sub location cannot exceed 256 characters.',
     }),
 
+  original_entity: Joi.string()
+    .trim()
+    .max(512)
+    .optional()
+    .allow('', null)
+    .messages({
+      'string.max': 'Original entity cannot exceed 512 characters.',
+    }),
+
   date_of_joining: Joi.date()
     .iso()
     .max('now')
@@ -273,6 +282,15 @@ const updateEmployeeSchema = Joi.object({
     .allow('', null)
     .messages({
       'string.max': 'Sub location cannot exceed 256 characters.',
+    }),
+
+  original_entity: Joi.string()
+    .trim()
+    .max(512)
+    .optional()
+    .allow('', null)
+    .messages({
+      'string.max': 'Original entity cannot exceed 512 characters.',
     }),
 
   date_of_joining: Joi.date()

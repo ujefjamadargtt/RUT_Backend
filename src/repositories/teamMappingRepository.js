@@ -4,7 +4,7 @@ const { Employee, Role, TeamMapping } = require('../models');
 
 /**
  * Team Mapping Repository
- * Raw database access for team_mappings — Service PO Admin's own roster of
+ * Raw database access for team_mappings — Project Manager's own roster of
  * Managers. No business logic — that belongs in teamMappingService.js.
  */
 
@@ -37,7 +37,7 @@ const findUsersByRole = async (roleId, companyId) => {
 
 /**
  * Every active team_mappings row for a company, keyed for a quick "which
- * Service PO Admin (if any) owns this Manager" lookup when building the
+ * Project Manager (if any) owns this Manager" lookup when building the
  * drawer's Manager list.
  *
  * @param {number} companyId
@@ -50,7 +50,7 @@ const findAllMappingsInCompany = async (companyId) => {
 };
 
 /**
- * All active Managers belonging to one Service PO Admin's own team.
+ * All active Managers belonging to one Project Manager's own team.
  *
  * @param {number} servicePOAdminUserId
  * @param {number} companyId
@@ -64,7 +64,7 @@ const findByServicePOAdmin = async (servicePOAdminUserId, companyId) => {
 
 /**
  * Find the (at most one) mapping for a given Manager, regardless of which
- * Service PO Admin owns it — the uniqueness/409 check.
+ * Project Manager owns it — the uniqueness/409 check.
  *
  * @param {number} managerUserId
  * @returns {Promise<TeamMapping|null>}
@@ -74,7 +74,7 @@ const findByManager = async (managerUserId) => {
 };
 
 /**
- * Find a specific Service PO Admin -> Manager mapping (ownership check for remove).
+ * Find a specific Project Manager -> Manager mapping (ownership check for remove).
  *
  * @param {number} servicePOAdminUserId
  * @param {number} managerUserId

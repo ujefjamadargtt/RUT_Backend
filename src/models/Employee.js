@@ -119,6 +119,11 @@ module.exports = (sequelize) => {
         type: DataTypes.STRING(256),
         allowNull: true,
       },
+      // See database/migrations/20260895_add_employee_original_entity_column.sql.
+      original_entity: {
+        type: DataTypes.STRING(512),
+        allowNull: true,
+      },
       date_of_joining: {
         type: DataTypes.DATEONLY,
         allowNull: true,

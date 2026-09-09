@@ -7,14 +7,16 @@ const requirePlatformAdmin = require('../src/middlewares/requirePlatformAdmin');
 
 // Role -> hierarchy_rank, per database/migrations/20260836_seed_target_roles_and_capabilities.sql
 // (1 Platform Admin, 2 Admin, 3 Entity Admin, 4 BU Admin, 5 Project Admin,
-// 6 Service PO Admin, 7 Manager, 8 Employee; HR has no numeric rank).
+// 6 Project Manager [renamed from Service PO Admin, see
+// 20260896_rename_service_po_admin_role_to_project_manager.sql], 7 Manager,
+// 8 Employee; HR has no numeric rank).
 const RANKS = {
   'Platform Admin': 1,
   Admin: 2,
   'Entity Admin': 3,
   'BU Admin': 4,
   'Project Admin': 5,
-  'Service PO Admin': 6,
+  'Project Manager': 6,
   Manager: 7,
   Employee: 8,
   HR: null,

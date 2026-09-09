@@ -43,7 +43,7 @@ const {
  * such a PO is visible to every Business Unit it was auto-mapped into (see
  * getActiveCentralisedPOIds()'s doc comment), so a strict company_id match
  * alone would wrongly hide it from PO Master's list/detail/allocate/
- * dropdown paths for a BU-scoped actor (BU Admin/Service PO Admin). The
+ * dropdown paths for a BU-scoped actor (BU Admin/Project Manager). The
  * `created_by IN (...)` guard is the TENANT boundary — callers must resolve
  * `centralisedOwnerIds` via companyAccessControlService.
  * resolveCentralisedOwnerCreatorIds(), the Admin(s)/Entity Admin who
@@ -64,7 +64,7 @@ const {
  * BU-scoped actor can still never edit, close, or delete a Centralised PO.
  * No effect when `centralisedOwnerIds` is omitted/empty (the default).
  *
- * `mappedServicePOIds` — for a Service PO Admin/Delivery Head, whose
+ * `mappedServicePOIds` — for a Project Manager/Delivery Head, whose
  * visibility is driven ENTIRELY by individual mapping
  * (employee_servicepo_mapping, an active row) rather than Business Unit
  * membership: a PO mapped to them shows regardless of whether its own BU is
@@ -76,7 +76,7 @@ const {
  * `null` (the default) means "not applicable for this actor" — every other
  * role keeps its normal BU/Centralised scoping, completely unaffected.
  * Callers resolve this via servicePOService.resolveIndividuallyMappedServicePOIds(),
- * which returns `null` for every role except Service PO Admin/Delivery Head.
+ * which returns `null` for every role except Project Manager/Delivery Head.
  * Read/view only, same as `centralisedOwnerIds` — never opted into by
  * update()/close()/softDelete().
  *
@@ -140,7 +140,7 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
   // latter, but only the ones administered by THEIR OWN tenant. See
   // companyScope()'s doc comment.
   //
-  // mappedServicePOIds — for a Service PO Admin/Delivery Head, REPLACES the
+  // mappedServicePOIds — for a Project Manager/Delivery Head, REPLACES the
   // BU/Centralised scoping above with exactly their individually-mapped
   // POs, even outside their own BU(s) — never a union. See companyScope()'s
   // doc comment.
@@ -544,7 +544,7 @@ const softDelete = async (id, updatedBy, companyId) => {
  * getActivePOs() above, scoped to the CALLER's authorized company/tenant
  * scope via companyScope() (the hard tenant boundary — never bypassed).
  *
- * `unrestricted: true` (the target Employee holds Service PO Admin or
+ * `unrestricted: true` (the target Employee holds Project Manager or
  * Delivery Head — see employeeServicePOMappingService.
  * hasUnrestrictedServicePOVisibility()) additionally skips any Business
  * Unit narrowing: every eligible PO across the caller's whole authorized

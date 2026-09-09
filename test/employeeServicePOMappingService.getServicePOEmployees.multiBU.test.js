@@ -5,7 +5,8 @@ const assert = require('node:assert/strict');
 
 // Regression coverage for the "X-Company-Id header is required" bug on
 // GET /employee-servicepo-mapping/service-po/:servicePOId: a multi-BU BU
-// Admin/Service PO Admin/Delivery Head must be able to open ANY Service PO
+// Admin/Project Manager (renamed from Service PO Admin)/Delivery Head must
+// be able to open ANY Service PO
 // within their own managed BU set WITHOUT first selecting that exact BU —
 // getServicePOEmployees() now resolves scope from authContext.
 // employeeBusinessUnits (resolveEmployeeMappingScope), not the single
@@ -63,7 +64,7 @@ test('a BU Admin mapped to multiple BUs (3 and 7) can open a Service PO in BU 7 
   restore();
 });
 
-test('a Service PO Admin mapped to multiple BUs gets the same header-free access', async () => {
+test('a Project Manager (renamed from Service PO Admin) mapped to multiple BUs gets the same header-free access', async () => {
   stubScopePassthrough();
   let capturedScope;
   servicePORepository.findById = async (id, scope) => {

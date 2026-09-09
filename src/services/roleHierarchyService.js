@@ -15,8 +15,8 @@ const { Role, RoleCapability } = require('../models');
  *
  * Inheritance is deliberately NOT a blanket "every senior role gets every
  * junior role's capabilities" rule — only the two edges the RBAC spec
- * actually states are wired (Service PO Admin <- Manager, Project Admin <-
- * Service PO Admin) via `inherits_role_id`. Every other role's capability
+ * actually states are wired (Project Manager <- Manager, Project Admin <-
+ * Project Manager) via `inherits_role_id`. Every other role's capability
  * list is self-contained. Adding a new inheritance edge later is a data
  * change (set `inherits_role_id`), not a code change — this resolver simply
  * walks whatever chain the data describes.

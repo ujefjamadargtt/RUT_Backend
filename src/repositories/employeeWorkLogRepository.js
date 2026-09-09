@@ -464,15 +464,12 @@ const getHierarchyBreakdownForRange = async ({ employeeId, startDate, endDate })
  * Admin "Sync Employee Work Logs" flow (see timesheetService.previewPmsImport
  * / confirmImport). Never reads from `timesheets`.
  *
- * Deliberately NOT filtered by status='synced' vs 'approved': Employee Work
- * Logs are the source of truth and can keep changing after a sync (an
- * employee may edit or delete an already-synced entry — see
- * employeeTimesheetService.js). Sync is idempotent/overwrite (re-projects
- * the ENTIRE current state of the month into `timesheets` every time it
- * runs), so it must read every non-pending row for the month, not just the
- * ones changed since the last sync — otherwise an unmodified-but-previously-
- * synced entry would be silently dropped from the official Timesheet on a
- * repeat sync.
+ * Deliberately NOT filtered by status='synced' vs 'approved': Sync is
+ * idempotent/overwrite (re-projects the ENTIRE current state of the month
+ * into `timesheets` every time it runs), so it must read every non-pending
+ * row for the month, not just the ones changed since the last sync —
+ * otherwise an unmodified-but-previously-synced entry would be silently
+ * dropped from the official Timesheet on a repeat sync.
  *
  * IS filtered to exclude status='pending': approval now happens BEFORE
  * Sync (a Manager approves an Employee's pending Work Log entries directly,
@@ -1050,6 +1047,30 @@ const deleteByEmployeeAndDateRange = async (employeeId, startDate, endDate, comp
 };
 
 /**
+ * Whether this employee has at least one 'synced' row within an inclusive
+ * work_date range — guards the Monthly Work Log REPLACE-SAVE
+ * (employeeMonthlyWorkLogService.submitMonthlyWorkLog/deleteMonthlyWorkLog)
+ * from silently wiping a row that has already been synced to the official
+ * Timesheet (see EmployeeWorkLog.js's status doc comment: "Synced rows are
+ * read-only").
+ * @param {number} employeeId
+ * @param {string} startDate - "YYYY-MM-DD"
+ * @param {string} endDate - "YYYY-MM-DD"
+ * @returns {Promise<boolean>}
+ */
+const hasSyncedEntriesInRange = async (employeeId, startDate, endDate) => {
+  const row = await EmployeeWorkLog.findOne({
+    where: {
+      employee_id: employeeId,
+      work_date: { [Op.gte]: startDate, [Op.lte]: endDate },
+      status: 'synced',
+    },
+    attributes: ['id'],
+  });
+  return !!row;
+};
+
+/**
  * Whether a Monthly Work Log entry already exists for this employee within
  * a date range — backs the Daily-side guard
  * (employeeTimesheetService.assertNoMonthlyLogForDate) that blocks Daily
@@ -1154,6 +1175,7 @@ module.exports = {
   bulkCreate,
   deleteByEmployeeAndDate,
   deleteByEmployeeAndDateRange,
+  hasSyncedEntriesInRange,
   update,
   deleteById,
   getDailyHours,

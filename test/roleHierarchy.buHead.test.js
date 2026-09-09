@@ -19,9 +19,9 @@ test('BU Head itself has no user-creation rights (not a key in the matrix)', () 
 
 test('Every pre-existing ROLE_CREATION_MATRIX entry is unchanged', () => {
   assert.deepEqual(ROLE_CREATION_MATRIX['Platform Admin'], ['Admin']);
-  assert.deepEqual(ROLE_CREATION_MATRIX['BU Admin'], ['Project Admin', 'Service PO Admin', 'Manager', 'Employee', 'HR']);
-  assert.deepEqual(ROLE_CREATION_MATRIX['Project Admin'], ['Service PO Admin']);
-  assert.deepEqual(ROLE_CREATION_MATRIX['Service PO Admin'], ['Manager']);
+  assert.deepEqual(ROLE_CREATION_MATRIX['BU Admin'], ['Project Admin', 'Project Manager', 'Manager', 'Employee', 'HR']);
+  assert.deepEqual(ROLE_CREATION_MATRIX['Project Admin'], ['Project Manager']);
+  assert.deepEqual(ROLE_CREATION_MATRIX['Project Manager'], ['Manager']);
   // Admin/Entity Admin keep every previously-creatable role too — BU Head is
   // an ADDITION to these lists, not a replacement.
   assert.ok(ROLE_CREATION_MATRIX['Admin'].includes('Entity Admin'));

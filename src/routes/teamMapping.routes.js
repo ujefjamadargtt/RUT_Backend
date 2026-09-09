@@ -5,8 +5,8 @@
  * tags:
  *   name: Team Mapping
  *   description: >
- *     Service PO Admin's own "My Team" screen — self-service: lists and
- *     manages the calling Service PO Admin's own Managers ("Manage Team")
+ *     Project Manager's own "My Team" screen — self-service: lists and
+ *     manages the calling Project Manager's own Managers ("Manage Team")
  *     and which Service POs those Managers can operate on ("Manage Team
  *     Mapping"). Replaces the old BU-Admin-assigns-Head-Manager flow now
  *     that the "Head Manager" role is retired.

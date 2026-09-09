@@ -362,7 +362,7 @@ const getEmployeeMappings = async (employeeId, companyId, status) => {
  * narrows to exactly one, already-authorized PO.
  *
  * Uses resolveEmployeeMappingScope() (below) — NOT resolveActorCompanyScope()
- * — for this PO-access check: a BU Admin/Service PO Admin/Delivery Head
+ * — for this PO-access check: a BU Admin/Project Manager/Delivery Head
  * mapped to MULTIPLE Business Units must be able to open ANY Service PO
  * within their own managed set without first selecting that exact BU via
  * X-Company-Id (the route this backs uses authenticateIdentity, not the
@@ -392,14 +392,15 @@ const getServicePOEmployees = async (servicePOId, authContext, status) => {
  * Role-name fragments (matched case-insensitively, by substring) that grant
  * an Employee unrestricted Service PO visibility for the "Manage Service PO
  * Mapping" screen — see getServicePOOptionsForEmployee()/
- * saveEmployeeServicePOMappings() below. "Delivery Head" is not its own row
- * in the `roles` table today (it's a per-Service-PO staffing field,
- * service_pos.delivery_head_employee_id) — the business is folding it into
- * the "Service PO Admin" role itself (e.g. renaming it to "Service PO
- * Admin/Delivery Head"), so both fragments are matched independently to
- * keep working regardless of the exact final role name.
+ * saveEmployeeServicePOMappings() below. Renamed from "Service PO Admin" to
+ * "Project Manager" (see database/migrations/
+ * 20260896_rename_service_po_admin_role_to_project_manager.sql) — matched
+ * by fragment (not exact-equality) so this keeps working regardless of
+ * casing. "Delivery Head" is NOT this role — it's a separate per-Service-PO
+ * staffing field (service_pos.delivery_head_employee_id), not its own row
+ * in the `roles` table, and is unaffected by this rename.
  */
-const UNRESTRICTED_SERVICE_PO_ROLE_FRAGMENTS = ['service po admin', 'delivery head'];
+const UNRESTRICTED_SERVICE_PO_ROLE_FRAGMENTS = ['project manager'];
 
 /**
  * @param {string[]} roleNames - the Employee's ACTUAL roles, always fetched
@@ -445,7 +446,7 @@ async function resolveMappingTargetEmployee(employeeId, companyId) {
  * Compute { unrestricted, businessUnitIds } for one Employee — the two
  * inputs servicePORepository.getEligibleForMapping() needs. Role is always
  * re-fetched from the database (employeeRoleRepository) — a request body
- * can never assert "this employee is Service PO Admin" itself.
+ * can never assert "this employee is Project Manager" itself.
  * @param {Employee} employee
  * @returns {Promise<{ unrestricted: boolean, businessUnitIds: number[] }>}
  */
@@ -468,7 +469,7 @@ async function resolveMappingEligibilityInputs(employee) {
  * Employee is eligible to be mapped to, plus their currently mapped Service
  * PO ids — the frontend renders these as a checkbox list (Test cases 1-5).
  *
- * MOST IMPORTANT BUSINESS RULE: an Employee holding Service PO Admin or
+ * MOST IMPORTANT BUSINESS RULE: an Employee holding Project Manager or
  * Delivery Head sees every eligible Service PO within the caller's
  * authorized company/tenant scope, regardless of their own Business Unit —
  * see servicePORepository.getEligibleForMapping()'s doc comment. Every
@@ -618,8 +619,10 @@ const saveEmployeeServicePOMappings = async (employeeId, servicePOIds, userId, a
  * "which Service POs can an EMPLOYEE be mapped to" (Employee -> PO
  * direction); this one governs "who may open the Service PO -> Employee
  * Mapping screen at all" (the reverse direction, PO -> Employee).
+ * "service po admin" was renamed to "project manager" — see
+ * UNRESTRICTED_SERVICE_PO_ROLE_FRAGMENTS's doc comment above.
  */
-const SERVICE_PO_MAPPING_AUTHORITY_ROLE_FRAGMENTS = ['bu admin', 'service po admin', 'delivery head'];
+const SERVICE_PO_MAPPING_AUTHORITY_ROLE_FRAGMENTS = ['bu admin', 'project manager'];
 
 /**
  * @param {string[]} roleNames - the CALLER's own actual active role(s),
@@ -640,12 +643,12 @@ function hasServicePOMappingAuthority(roleNames = []) {
  * NOT just the caller's currently SELECTED Global Business Unit
  * (authContext.companyId, a single value even for a multi-BU actor).
  *
- * For a BU Admin/Service PO Admin/Delivery Head, "same Admin/company
+ * For a BU Admin/Project Manager/Delivery Head, "same Admin/company
  * scope" means the ENTIRE tenant their owning Admin manages — the same
  * full scope that Admin themselves would see — NOT merely the Business
  * Unit(s) this specific actor personally happens to be mapped to (a BU
  * Admin managing only 2 of 5 BUs under the same Admin must still see every
- * Employee across all 5, matching the "BU Admin/Service PO Admin/Delivery
+ * Employee across all 5, matching the "BU Admin/Project Manager/Delivery
  * Head are operating under the Admin's scope" business rule). Resolved via
  * companyAccessControlService.resolveAdminScopeForBusinessUnits(), walking
  * UP from the caller's own Business Unit(s) (authContext.employeeBusinessUnits
@@ -693,7 +696,7 @@ async function resolveEmployeeMappingScope({ hierarchyRank, employeeId, companyI
  * (`created_by: employeeId`) fallback (see that function's own doc
  * comment).
  *
- * For every other rank (BU Admin, Service PO Admin, Delivery Head, and
+ * For every other rank (BU Admin, Project Manager, Delivery Head, and
  * anyone else): resolveEmployeeAccessWhere() would instead apply its
  * narrow "my own team" scope — bypassed here in favor of the caller's
  * OWNING Admin's full scope (companyAccessControlService.
@@ -701,7 +704,7 @@ async function resolveEmployeeMappingScope({ hierarchyRank, employeeId, companyI
  * as the SAME kind of accessWhere fragment the Admin themselves gets, not
  * a bare companyId/employeeScope() call: an Employee the owning Admin
  * directly created but never assigned a Business Unit to (confirmed root
- * cause of a BU Admin/Service PO Admin/Delivery Head seeing fewer
+ * cause of a BU Admin/Project Manager/Delivery Head seeing fewer
  * Employees — e.g. "10 of 18" — than their owning Admin's real total)
  * matches NEITHER a plain company_id/employee_business_units check NOR
  * `{ id: adminId }` — only `{ created_by: adminId }`. So this builds
@@ -794,7 +797,7 @@ const getEmployeeOptionsForServicePO = async (servicePOId, authContext, options 
 
   // resolveEmployeeMappingScope() here too (NOT resolveActorCompanyScope())
   // — same reasoning as getServicePOEmployees() above: a multi-BU BU Admin/
-  // Service PO Admin/Delivery Head must be able to open ANY Service PO
+  // Project Manager/Delivery Head must be able to open ANY Service PO
   // within their own managed set without X-Company-Id having been set to
   // that exact BU first.
   const tenantScope = await resolveEmployeeMappingScope(authContext);
@@ -846,7 +849,7 @@ const getEmployeeOptionsForServicePO = async (servicePOId, authContext, options 
  * getEmployeeOptionsForServicePO() above).
  *
  * Deliberately NOT backed by GET /entities or GET /companies: both 403 a BU
- * Admin/Service PO Admin/Delivery Head (Entity Admin/Admin only), and even
+ * Admin/Project Manager/Delivery Head (Entity Admin/Admin only), and even
  * for a BU Admin, GET /companies ignores `entity_id` and returns only that
  * BU Admin's own directly-mapped BUs — narrower than the "owning Admin's
  * full scope" getEmployeeOptionsForServicePO() itself is scoped to (see its

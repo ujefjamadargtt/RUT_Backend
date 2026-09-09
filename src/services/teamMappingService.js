@@ -8,16 +8,16 @@ const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
 const logger = require('../utils/logger');
 
 /**
- * Team Mapping Service — Service PO Admin's own "My Team" screen.
+ * Team Mapping Service — Project Manager's own "My Team" screen.
  *
  * Self-service, unlike the old headManagerMappingService this replaces: the
- * Service PO Admin IS the actor (their own req.userId), not a third party
+ * Project Manager IS the actor (their own req.userId), not a third party
  * (BU Admin) assigning on someone else's behalf — see the RBAC redesign's
- * decision that Service PO Admin now directly owns/creates Manager
+ * decision that Project Manager now directly owns/creates Manager
  * accounts and the team they manage.
  *
  * Two related capabilities live here, matching the spec's two distinct
- * Service PO Admin responsibilities:
+ * Project Manager responsibilities:
  *   - "Manage Team" (servicepo.manage_team) — the Manager roster itself
  *     (assign/remove which Managers are on my team) — team_mappings.
  *   - "Manage Team Mapping" (servicepo.manage_team_mapping) — which Service
@@ -61,7 +61,7 @@ async function resolveRoleId(roleName) {
 }
 
 /**
- * The calling Service PO Admin's own Managers.
+ * The calling Project Manager's own Managers.
  *
  * @param {number} servicePOAdminUserId
  * @param {number} companyId
@@ -96,7 +96,7 @@ const getAvailableManagers = async (companyId) => {
 };
 
 /**
- * Add a Manager to the calling Service PO Admin's own team.
+ * Add a Manager to the calling Project Manager's own team.
  *
  * @param {number} servicePOAdminUserId
  * @param {number} managerUserId
@@ -125,7 +125,7 @@ const addManager = async (servicePOAdminUserId, managerUserId, companyId, actorI
     throw conflictError(
       existing.service_po_admin_user_id === servicePOAdminUserId
         ? 'This Manager is already on your team.'
-        : 'This Manager already belongs to a different Service PO Admin\'s team.'
+        : 'This Manager already belongs to a different Project Manager\'s team.'
     );
   }
 
@@ -154,7 +154,7 @@ const addManager = async (servicePOAdminUserId, managerUserId, companyId, actorI
 };
 
 /**
- * Remove a Manager from the calling Service PO Admin's own team.
+ * Remove a Manager from the calling Project Manager's own team.
  *
  * @param {number} servicePOAdminUserId
  * @param {number} managerUserId
@@ -185,9 +185,9 @@ const removeManager = async (servicePOAdminUserId, managerUserId, companyId, act
 };
 
 /**
- * Confirm a Manager is on the calling Service PO Admin's own team — the
+ * Confirm a Manager is on the calling Project Manager's own team — the
  * scoping check both grantServicePO()/revokeServicePO() below use, so a
- * Service PO Admin can only grant Service PO access to Managers actually on
+ * Project Manager can only grant Service PO access to Managers actually on
  * their own team.
  */
 async function assertOwnTeamMember(servicePOAdminUserId, managerUserId, companyId) {
@@ -198,7 +198,7 @@ async function assertOwnTeamMember(servicePOAdminUserId, managerUserId, companyI
 }
 
 /**
- * Grant a Service PO to one of the Service PO Admin's own team Managers —
+ * Grant a Service PO to one of the Project Manager's own team Managers —
  * "Manage Team Mapping". Reuses manager_servicepo_mappings unmodified.
  *
  * @param {number} servicePOAdminUserId
@@ -236,7 +236,7 @@ const grantServicePO = async (servicePOAdminUserId, managerUserId, servicePOId, 
 };
 
 /**
- * Revoke a Service PO grant from one of the Service PO Admin's own team
+ * Revoke a Service PO grant from one of the Project Manager's own team
  * Managers.
  *
  * @param {number} servicePOAdminUserId
@@ -259,7 +259,7 @@ const revokeServicePO = async (servicePOAdminUserId, managerUserId, servicePOId,
 };
 
 /**
- * Every Service PO grant across the Service PO Admin's own team — powers
+ * Every Service PO grant across the Project Manager's own team — powers
  * the "Manage Team Mapping" screen's listing.
  *
  * @param {number} servicePOAdminUserId

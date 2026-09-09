@@ -98,15 +98,28 @@ test('a Business Unit with no Entity association is included in business_units b
   restore();
 });
 
-test('Service PO Admin / Delivery Head get the same treatment as BU Admin (authorized via role name, not hierarchyRank)', async () => {
+test('Project Manager (renamed from Service PO Admin) gets the same treatment as BU Admin (authorized via role name, not hierarchyRank)', async () => {
   companyAccessControlService.resolveAdminScopeForBusinessUnits = async () => [5];
   stubCompanies([{ id: 5, company_name: 'Delta BU', entity_id: 30, entity: { entity_id: 30, entity_name: 'Delta Entity' } }]);
 
   const result = await employeeServicePOMappingService.getEmployeeMappingFilterOptions({
-    companyId: 1, hierarchyRank: 6, employeeId: 900, roleNames: ['Service PO Admin'], employeeBusinessUnits: [5],
+    companyId: 1, hierarchyRank: 6, employeeId: 900, roleNames: ['Project Manager'], employeeBusinessUnits: [5],
   });
 
   assert.equal(result.business_units.length, 1);
   assert.equal(result.entities.length, 1);
+  restore();
+});
+
+test('the retired "Service PO Admin" role name no longer gets Service PO mapping authority (403)', async () => {
+  await assert.rejects(
+    () => employeeServicePOMappingService.getEmployeeMappingFilterOptions({
+      companyId: 1, hierarchyRank: 6, employeeId: 900, roleNames: ['Service PO Admin'], employeeBusinessUnits: [5],
+    }),
+    (err) => {
+      assert.equal(err.statusCode, 403);
+      return true;
+    }
+  );
   restore();
 });

@@ -185,8 +185,8 @@ Employee.hasMany(EmployeeLoginSession, { foreignKey: 'employee_id', as: 'loginSe
 EmployeeLoginSession.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
 
 // Role self-referencing inheritance edge (see roleHierarchyService.js) —
-// only ever set for the two edges the RBAC spec states (Service PO Admin <-
-// Manager, Project Admin <- Service PO Admin); NULL for every other role.
+// only ever set for the two edges the RBAC spec states (Project Manager <-
+// Manager, Project Admin <- Project Manager); NULL for every other role.
 Role.belongsTo(Role, { foreignKey: 'inherits_role_id', as: 'inheritsFrom' });
 Role.hasMany(Role, { foreignKey: 'inherits_role_id', as: 'inheritedBy' });
 
@@ -266,7 +266,7 @@ Employee.hasMany(ServicePO, { foreignKey: 'delivery_head_employee_id', as: 'deli
 ServiceCategory.hasMany(ServiceType, { foreignKey: 'service_category_id', as: 'serviceTypes' });
 ServiceType.belongsTo(ServiceCategory, { foreignKey: 'service_category_id', as: 'serviceCategory' });
 
-// Manager hierarchy chain: Service PO Admin -> Manager -> Employee/
+// Manager hierarchy chain: Project Manager -> Manager -> Employee/
 // ServicePO (one hop shorter than before "Head Manager" was retired — see
 // database/migrations/20260844_rename_head_manager_mappings_to_team_mappings.sql).
 // Three distinct mapping tables, each a strict "one owner" or plain

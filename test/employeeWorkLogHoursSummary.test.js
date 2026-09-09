@@ -64,7 +64,7 @@ test('an explicitly requested employee is intersected with the authorized employ
 
   await summaryService.getSummary(
     { date: '2026-08-28', employeeId: 22, page: 1, limit: 10, sortBy: 'employee_name', sortOrder: 'ASC' },
-    { userId: 5, employeeId: 5, hierarchyRank: 6, roleNames: ['Service PO Admin'] },
+    { userId: 5, employeeId: 5, hierarchyRank: 6, roleNames: ['Project Manager'] },
     [10]
   );
 

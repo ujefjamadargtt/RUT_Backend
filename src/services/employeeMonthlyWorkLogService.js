@@ -25,6 +25,11 @@ const logger = require('../utils/logger');
  * employeeTimesheetService.replaceDailyEntries uses for one date, scoped to
  * a whole month here. This is also how "update the Monthly entry, never
  * duplicate" is satisfied — resubmitting just replaces it again.
+ *
+ * Blocked entirely (409) once ANY row in the month's range is already
+ * 'synced' — a synced row's official record already lives in `timesheets`
+ * and must stay read-only (see EmployeeWorkLog.js's status doc comment).
+ * Same rule for deleteMonthlyWorkLog.
  */
 
 const MONTHLY_HOUR_CAP = 176;
@@ -38,6 +43,12 @@ function badRequestError(message) {
 function validationError(message) {
   const err = new Error(message);
   err.statusCode = 422;
+  return err;
+}
+
+function conflictError(message) {
+  const err = new Error(message);
+  err.statusCode = 409;
   return err;
 }
 
@@ -124,6 +135,16 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data, options = {}) =
   }
 
   const { endDate, startDate } = dateHelper.getMonthBounds(month, year);
+
+  // This month's range is about to be wiped (deleteByEmployeeAndDateRange
+  // below) and reinserted wholesale — must not silently discard a row
+  // that's already been synced to the official Timesheet (see
+  // EmployeeWorkLog.js's status doc comment: "Synced rows are read-only").
+  if (await employeeWorkLogRepository.hasSyncedEntriesInRange(employeeId, startDate, endDate)) {
+    throw conflictError(
+      `This month's work log has already been synced to the official Timesheet and can no longer be edited.`
+    );
+  }
 
   // Deliberately does NOT reject when Daily entries (TIME_BASED or HOURLY)
   // already exist for this month — submitting a Monthly Work Log is
@@ -239,6 +260,12 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data, options = {}) =
  */
 const deleteMonthlyWorkLog = async (employeeId, companyId, month, year) => {
   const { startDate, endDate } = dateHelper.getMonthBounds(month, year);
+
+  if (await employeeWorkLogRepository.hasSyncedEntriesInRange(employeeId, startDate, endDate)) {
+    throw conflictError(
+      `This month's work log has already been synced to the official Timesheet and can no longer be deleted.`
+    );
+  }
 
   await employeeWorkLogRepository.deleteByEmployeeAndDateRange(employeeId, startDate, endDate, companyId);
 

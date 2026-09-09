@@ -13,7 +13,7 @@ const { sendSuccess, sendCreated, sendError, sendNotFound } = require('../utils/
  * write (assign/remove/activate/deactivate) from server-verified req fields
  * only (never body/query) — for Admin/Entity Admin (company-less), the
  * resolved array of owned Company ids (unchanged); for every BU-scoped rank
- * (BU Admin/Service PO Admin/Delivery Head/etc), the caller's OWNING ADMIN's
+ * (BU Admin/Project Manager/Delivery Head/etc), the caller's OWNING ADMIN's
  * FULL multi-BU scope (employeeServicePOMappingService.
  * resolveEmployeeMappingScope) — NOT just the single currently-selected
  * X-Company-Id.
@@ -162,7 +162,7 @@ const getServicePOEmployees = async (req, res, next) => {
     // employeeBusinessUnits is required here — this route runs
     // authenticateIdentity (not the full authenticate), so req.companyId is
     // never set; the service resolves scope from employeeBusinessUnits
-    // instead, letting a multi-BU BU Admin/Service PO Admin/Delivery Head
+    // instead, letting a multi-BU BU Admin/Project Manager/Delivery Head
     // open a PO in ANY of their managed BUs without an X-Company-Id header.
     const mappings = await employeeServicePOMappingService.getServicePOEmployees(
       servicePOId,
@@ -189,7 +189,7 @@ const getServicePOEmployees = async (req, res, next) => {
  * Data source for the "Manage Service PO Mapping" screen launched from the
  * Employee Master action of the same name: every Service PO this Employee
  * is eligible to be mapped to, plus their currently mapped Service PO ids.
- * The role check (Service PO Admin / Delivery Head -> unrestricted
+ * The role check (Project Manager / Delivery Head -> unrestricted
  * visibility) is resolved server-side inside the service — the frontend
  * never asserts the Employee's role itself.
  */

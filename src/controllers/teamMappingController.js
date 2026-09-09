@@ -5,7 +5,7 @@ const { sendSuccess, sendCreated, sendNoContent, sendNotFound, sendError } = req
 const logger = require('../utils/logger');
 
 /**
- * Team Mapping Controller — Service PO Admin's own "My Team" screen.
+ * Team Mapping Controller — Project Manager's own "My Team" screen.
  */
 
 const getMyTeam = async (req, res) => {

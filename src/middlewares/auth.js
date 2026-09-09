@@ -79,6 +79,20 @@ function getEffectiveHierarchyRank(activeRoles) {
 }
 
 /**
+ * Effective `roles.permission` across active roles — 'Read & Write' if ANY
+ * active role has it (a permissive default, so a legacy multi-role session
+ * — see the `decoded.activeRoleId == null` branch below — never loses write
+ * access it would otherwise have), 'Read' only if EVERY active role is
+ * 'Read'. Role-Based Login scopes a session to exactly one active role in
+ * practice, so this is normally just that one role's own `permission`.
+ * @param {object[]} activeRoles
+ * @returns {'Read'|'Read & Write'}
+ */
+function getEffectiveRolePermission(activeRoles) {
+  return activeRoles.every((role) => role.permission === 'Read') ? 'Read' : 'Read & Write';
+}
+
+/**
  * JWT Authentication Middleware
  * Extracts Bearer token, verifies it, loads the Employee, and attaches to
  * req.user. Employee is the sole login identity now — see the
@@ -222,6 +236,7 @@ const authenticateIdentity = async (req, res, next) => {
     req.employeeRoleNames = activeRoles.map((role) => role.role_name);
     req.userRoleName = req.employeeRoleNames[0] || null;
     req.hierarchyRank = hierarchyRank;
+    req.rolePermission = getEffectiveRolePermission(activeRoles);
     req.capabilities = effectiveCapabilities;
     req.employeeBusinessUnits = activeBusinessUnits;
     req.userRoles = req.employeeRoleNames;
