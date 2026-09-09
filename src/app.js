@@ -122,7 +122,7 @@ app.use(cors({
 }));
 
 // ─── Rate Limiting ────────────────────────────────────────────────────────────
-app.use(apiLimiter);
+// app.use(apiLimiter);
 
 // ─── Body Parsing ─────────────────────────────────────────────────────────────
 app.use(express.json({ limit: '10mb' }));
