@@ -20,9 +20,9 @@ const ROLE_CREATION_MATRIX = {
   'Platform Admin': ['Admin'],
   Admin: ['Entity Admin', 'BU Admin', 'BU Head'],
   'Entity Admin': ['BU Admin', 'BU Head'],
-  'BU Admin': ['Project Admin', 'Project Manager', 'Manager', 'Employee', 'HR'],
+  'BU Admin': ['Project Admin', 'Project Manager', 'Team Lead', 'Employee', 'HR'],
   'Project Admin': ['Project Manager'],
-  'Project Manager': ['Manager'],
+  'Project Manager': ['Team Lead'],
 };
 
 /**

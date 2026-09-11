@@ -12,6 +12,11 @@ const router = express.Router();
 
 const clientController = require('../controllers/clientController');
 const authenticate = require('../middlewares/auth');
+const authorize = require('../middlewares/authorize');
+// Only Admin/BU Admin (senior-tier, bypasses this entirely) and Project
+// Manager (explicit grant — see 20260898_grant_client_project_servicepo_
+// capabilities_to_project_manager.sql) may create/update/delete a Client.
+const canManageClients = authorize(['bu.create_client']);
 // GET-only: lets a BU-scoped caller mapped to more than one Business Unit
 // omit X-Company-Id and see every Client across every BU they're mapped to,
 // instead of resolveCompany.js's 400 — see resolveReportCompanyScope.js.
@@ -83,6 +88,7 @@ const { handleClientUpload } = require('../middlewares/upload');
 router.post(
   '/import',
   authenticate,
+  canManageClients,
   importLimiter,
   handleClientUpload,
   clientController.importClients
@@ -209,6 +215,7 @@ router.get(
 router.post(
   '/',
   authenticate,
+  canManageClients,
   validate(createClientSchema),
   clientController.createClient
 );
@@ -250,6 +257,7 @@ router.post(
 router.put(
   '/:id',
   authenticate,
+  canManageClients,
   validate(updateClientSchema),
   clientController.updateClient
 );
@@ -277,6 +285,7 @@ router.put(
 router.delete(
   '/:id',
   authenticate,
+  canManageClients,
   clientController.deleteClient
 );
 

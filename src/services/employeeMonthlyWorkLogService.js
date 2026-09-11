@@ -205,11 +205,10 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data, options = {}) =
         hierarchy_node_id: line.hierarchy_node_id || null,
         work_date: endDate,
         hours: line.hours,
-        // Never undefined — Employee self-service's Joi schema requires a
-        // non-empty description, but the Manager path (allowHierarchyNode:
-        // false callers) treats it as optional, so a genuinely blank/absent
-        // value must still resolve to '', never left unset against this
-        // NOT NULL column (same fallback pattern as
+        // Never undefined — description is optional on both the Employee
+        // self-service and Manager (allowHierarchyNode: false) paths, so a
+        // genuinely blank/absent value must still resolve to '', never left
+        // unset against this NOT NULL column (same fallback pattern as
         // employeeTimesheetService.withFallbackDescription).
         description: line.description || '',
         // The work log belongs to the Service PO's OWN owning BU, not

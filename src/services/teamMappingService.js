@@ -13,15 +13,22 @@ const logger = require('../utils/logger');
  * Self-service, unlike the old headManagerMappingService this replaces: the
  * Project Manager IS the actor (their own req.userId), not a third party
  * (BU Admin) assigning on someone else's behalf — see the RBAC redesign's
- * decision that Project Manager now directly owns/creates Manager
+ * decision that Project Manager now directly owns/creates Team Lead
  * accounts and the team they manage.
+ *
+ * "Team Lead" is the role_name this file's Managers/managerUserId
+ * params/variables/DB columns (manager_user_id, manager_servicepo_mappings,
+ * team_mappings.manager_user_id, ...) refer to — renamed from "Manager" in
+ * 20260897_rename_manager_role_to_team_lead.sql (same role_id, so none of
+ * that internal plumbing needed to change, only the display name callers
+ * resolve by).
  *
  * Two related capabilities live here, matching the spec's two distinct
  * Project Manager responsibilities:
- *   - "Manage Team" (servicepo.manage_team) — the Manager roster itself
- *     (assign/remove which Managers are on my team) — team_mappings.
+ *   - "Manage Team" (servicepo.manage_team) — the Team Lead roster itself
+ *     (assign/remove which Team Leads are on my team) — team_mappings.
  *   - "Manage Team Mapping" (servicepo.manage_team_mapping) — which Service
- *     POs my team's Managers can operate on — reuses the existing
+ *     POs my team's Team Leads can operate on — reuses the existing
  *     manager_servicepo_mappings table/repository unmodified (its shape
  *     never depended on who the granting actor was).
  */
@@ -61,7 +68,7 @@ async function resolveRoleId(roleName) {
 }
 
 /**
- * The calling Project Manager's own Managers.
+ * The calling Project Manager's own Team Leads.
  *
  * @param {number} servicePOAdminUserId
  * @param {number} companyId
@@ -72,14 +79,14 @@ const getMyTeam = async (servicePOAdminUserId, companyId) => {
 };
 
 /**
- * ALL Managers of the company, each flagged with whether they're already on
- * a team (and whose) — powers the "Add Manager to my team" drawer.
+ * ALL Team Leads of the company, each flagged with whether they're already
+ * on a team (and whose) — powers the "Add Team Lead to my team" drawer.
  *
  * @param {number} companyId
  * @returns {Promise<Array>}
  */
 const getAvailableManagers = async (companyId) => {
-  const managerRoleId = await resolveRoleId('Manager');
+  const managerRoleId = await resolveRoleId('Team Lead');
   const [managers, mappings] = await Promise.all([
     teamMappingRepository.findUsersByRole(managerRoleId, companyId),
     teamMappingRepository.findAllMappingsInCompany(companyId),
@@ -96,7 +103,7 @@ const getAvailableManagers = async (companyId) => {
 };
 
 /**
- * Add a Manager to the calling Project Manager's own team.
+ * Add a Team Lead to the calling Project Manager's own team.
  *
  * @param {number} servicePOAdminUserId
  * @param {number} managerUserId
@@ -110,22 +117,22 @@ const addManager = async (servicePOAdminUserId, managerUserId, companyId, actorI
     throw badRequestError('You cannot map yourself as your own team member.');
   }
 
-  const managerRoleId = await resolveRoleId('Manager');
+  const managerRoleId = await resolveRoleId('Team Lead');
   const candidates = await teamMappingRepository.findUsersByRole(managerRoleId, companyId);
   const target = candidates.find((u) => u.id === managerUserId);
   if (!target) {
-    throw notFoundError('Manager not found in this company.');
+    throw notFoundError('Team Lead not found in this company.');
   }
   if (target.status !== 'active') {
-    throw badRequestError('Cannot map an inactive Manager.');
+    throw badRequestError('Cannot map an inactive Team Lead.');
   }
 
   const existing = await teamMappingRepository.findByManager(managerUserId);
   if (existing) {
     throw conflictError(
       existing.service_po_admin_user_id === servicePOAdminUserId
-        ? 'This Manager is already on your team.'
-        : 'This Manager already belongs to a different Project Manager\'s team.'
+        ? 'This Team Lead is already on your team.'
+        : 'This Team Lead already belongs to a different Project Manager\'s team.'
     );
   }
 
@@ -154,7 +161,7 @@ const addManager = async (servicePOAdminUserId, managerUserId, companyId, actorI
 };
 
 /**
- * Remove a Manager from the calling Project Manager's own team.
+ * Remove a Team Lead from the calling Project Manager's own team.
  *
  * @param {number} servicePOAdminUserId
  * @param {number} managerUserId
@@ -166,7 +173,7 @@ const addManager = async (servicePOAdminUserId, managerUserId, companyId, actorI
 const removeManager = async (servicePOAdminUserId, managerUserId, companyId, actorId, req) => {
   const existing = await teamMappingRepository.findByServicePOAdminAndManager(servicePOAdminUserId, managerUserId, companyId);
   if (!existing) {
-    throw notFoundError('This Manager is not on your team.');
+    throw notFoundError('This Team Lead is not on your team.');
   }
 
   await teamMappingRepository.deleteById(existing.id);
@@ -185,20 +192,20 @@ const removeManager = async (servicePOAdminUserId, managerUserId, companyId, act
 };
 
 /**
- * Confirm a Manager is on the calling Project Manager's own team — the
+ * Confirm a Team Lead is on the calling Project Manager's own team — the
  * scoping check both grantServicePO()/revokeServicePO() below use, so a
- * Project Manager can only grant Service PO access to Managers actually on
+ * Project Manager can only grant Service PO access to Team Leads actually on
  * their own team.
  */
 async function assertOwnTeamMember(servicePOAdminUserId, managerUserId, companyId) {
   const mapping = await teamMappingRepository.findByServicePOAdminAndManager(servicePOAdminUserId, managerUserId, companyId);
   if (!mapping) {
-    throw forbiddenError('This Manager is not on your team.');
+    throw forbiddenError('This Team Lead is not on your team.');
   }
 }
 
 /**
- * Grant a Service PO to one of the Project Manager's own team Managers —
+ * Grant a Service PO to one of the Project Manager's own team Team Leads —
  * "Manage Team Mapping". Reuses manager_servicepo_mappings unmodified.
  *
  * @param {number} servicePOAdminUserId
@@ -218,7 +225,7 @@ const grantServicePO = async (servicePOAdminUserId, managerUserId, servicePOId, 
 
   const existing = await managerServicePOMappingRepository.findByManagerAndServicePO(managerUserId, servicePOId, companyId);
   if (existing) {
-    throw conflictError('This Service PO is already granted to this Manager.');
+    throw conflictError('This Service PO is already granted to this Team Lead.');
   }
 
   const grant = await managerServicePOMappingRepository.create({
@@ -230,14 +237,14 @@ const grantServicePO = async (servicePOAdminUserId, managerUserId, servicePOId, 
     updated_by: actorId,
   });
 
-  logger.info('Service PO granted to team Manager', { servicePOAdminUserId, managerUserId, servicePOId, actorId });
+  logger.info('Service PO granted to team member (Team Lead)', { servicePOAdminUserId, managerUserId, servicePOId, actorId });
 
   return grant;
 };
 
 /**
  * Revoke a Service PO grant from one of the Project Manager's own team
- * Managers.
+ * Team Leads.
  *
  * @param {number} servicePOAdminUserId
  * @param {number} managerUserId
@@ -250,17 +257,17 @@ const revokeServicePO = async (servicePOAdminUserId, managerUserId, servicePOId,
 
   const existing = await managerServicePOMappingRepository.findByManagerAndServicePO(managerUserId, servicePOId, companyId);
   if (!existing) {
-    throw notFoundError('This Service PO is not granted to this Manager.');
+    throw notFoundError('This Service PO is not granted to this Team Lead.');
   }
 
   await managerServicePOMappingRepository.deleteById(existing.id);
 
-  logger.info('Service PO revoked from team Manager', { servicePOAdminUserId, managerUserId, servicePOId });
+  logger.info('Service PO revoked from team member (Team Lead)', { servicePOAdminUserId, managerUserId, servicePOId });
 };
 
 /**
- * Every Service PO grant across the Project Manager's own team — powers
- * the "Manage Team Mapping" screen's listing.
+ * Every Service PO grant across the Project Manager's own team of Team
+ * Leads — powers the "Manage Team Mapping" screen's listing.
  *
  * @param {number} servicePOAdminUserId
  * @param {number} companyId

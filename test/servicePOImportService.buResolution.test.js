@@ -63,7 +63,7 @@ function stubReferenceData({ ownedEntityIds = [], ownedCompanies = [] } = {}) {
     id: 40,
     full_name: 'Jane Manager',
     status: 'active',
-    users: [{ id: 1, is_deleted: false, role: { id: 1, role_name: 'Manager' } }],
+    users: [{ id: 1, is_deleted: false, role: { id: 1, role_name: 'Team Lead' } }],
   }];
 
   entityRepository.findIdsOwnedByAdmin = async () => ownedEntityIds;

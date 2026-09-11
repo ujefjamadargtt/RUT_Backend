@@ -26,9 +26,7 @@ const monthlyEntryLineSchema = Joi.object({
     'number.positive': 'Hours must be greater than 0.',
     'number.max': 'Hours cannot exceed 176 per month.',
   }),
-  description: Joi.string().trim().min(1).max(2000).required().messages({
-    'any.required': 'Description is required.',
-    'string.min': 'Description cannot be empty.',
+  description: Joi.string().trim().max(2000).allow('').optional().messages({
     'string.max': 'Description cannot exceed 2000 characters.',
   }),
 });

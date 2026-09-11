@@ -111,7 +111,27 @@ const getById = async (id, authContext) => {
 const create = async (data, userId, req) => {
   const { company_id: bodyCompanyId, ...fields } = data;
 
-  const companyId = await resolveCreateCompanyIdForActor(req, bodyCompanyId != null ? bodyCompanyId : null, { required: false, resourceLabel: 'a Project' });
+  // For a BU-scoped actor (BU Admin/Project Manager) who doesn't explicitly
+  // override company_id, the Project's own Business Unit should follow
+  // whichever BU the selected Client already belongs to, rather than
+  // silently defaulting to whatever BU happens to be active in the
+  // X-Company-Id header — otherwise a multi-BU actor picking a Client under
+  // one of their OTHER mapped BUs gets a spurious "Client not found" purely
+  // because their active header BU doesn't happen to match it (same root
+  // cause/fix as servicePOService.create()). resolveCreateCompanyIdForActor
+  // still fully validates this derived BU is one of the actor's own mapped
+  // Business Units below — this only changes WHERE the BU signal comes from.
+  // Scoped to BU-scoped actors only: a company-less actor (Admin/Entity
+  // Admin) keeps its existing "either an owned Company or BU-less" client
+  // resolution below untouched.
+  const preFetchedClient = (req.companyId != null && bodyCompanyId == null)
+    ? await clientRepository.findByIdUnscoped(fields.client_id)
+    : null;
+  const effectiveBodyCompanyId = bodyCompanyId != null
+    ? bodyCompanyId
+    : (preFetchedClient && preFetchedClient.company_id != null ? preFetchedClient.company_id : null);
+
+  const companyId = await resolveCreateCompanyIdForActor(req, effectiveBodyCompanyId, { required: false, resourceLabel: 'a Project' });
   const authContext = { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId };
   data = fields;
 
@@ -126,7 +146,9 @@ const create = async (data, userId, req) => {
   // servicePOService.js's assertValidDeliveryHead()).
   let client;
   if (companyId != null) {
-    client = await clientRepository.findById(data.client_id, companyId);
+    client = preFetchedClient && preFetchedClient.company_id === companyId
+      ? preFetchedClient
+      : await clientRepository.findById(data.client_id, companyId);
   } else {
     const ownedCompanyIds = await resolveActorCompanyScope(authContext);
     const candidate = await clientRepository.findByIdUnscoped(data.client_id);

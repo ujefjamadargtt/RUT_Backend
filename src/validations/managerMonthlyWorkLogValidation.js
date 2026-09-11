@@ -7,17 +7,13 @@ const { monthYearQuerySchema } = require('./employeeTimesheetValidation');
  * Manager Monthly Work Log Validation Schemas.
  *
  * A single line item within a POST/PUT submission — same shape as Employee
- * self-service's monthlyEntryLineSchema (employeeMonthlyWorkLogValidation.js)
- * with two deliberate differences:
- *   - hierarchy_node_id is NOT accepted here: a Manager can only log
- *     against the Employee's Main PO itself, never drill into a specific
- *     Parent/Child hierarchy node (may be added later — see
- *     employeeMonthlyWorkLogService.submitMonthlyWorkLog's
- *     allowHierarchyNode option, which enforces this same rule server-side
- *     as defense in depth).
- *   - description is OPTIONAL here (employee self-service requires it) —
- *     per spec, only Employee Code/Name, Service PO, and Hours are
- *     mandatory for a Manager-filled entry.
+ * self-service's monthlyEntryLineSchema (employeeMonthlyWorkLogValidation.js),
+ * except hierarchy_node_id is NOT accepted here: a Manager can only log
+ * against the Employee's Main PO itself, never drill into a specific
+ * Parent/Child hierarchy node (may be added later — see
+ * employeeMonthlyWorkLogService.submitMonthlyWorkLog's allowHierarchyNode
+ * option, which enforces this same rule server-side as defense in depth).
+ * description is optional on both paths.
  */
 const managerMonthlyEntryLineSchema = Joi.object({
   service_po_id: Joi.number().integer().positive().required().messages({

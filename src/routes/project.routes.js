@@ -12,6 +12,11 @@ const router = express.Router();
 
 const projectController = require('../controllers/projectController');
 const authenticate = require('../middlewares/auth');
+const authorize = require('../middlewares/authorize');
+// Only Admin/BU Admin (senior-tier, bypasses this entirely) and Project
+// Manager (explicit grant — see 20260898_grant_client_project_servicepo_
+// capabilities_to_project_manager.sql) may create/update/delete a Project.
+const canManageProjects = authorize(['bu.manage_projects']);
 // GET-only: same "BU-scoped caller mapped to >1 BU may omit X-Company-Id,
 // aggregating across every BU they're mapped to" contract as client.routes.js
 // — see resolveReportCompanyScope.js. Writes below keep the full
@@ -85,6 +90,7 @@ const { handleProjectUpload } = require('../middlewares/upload');
 router.post(
   '/import',
   authenticate,
+  canManageProjects,
   importLimiter,
   handleProjectUpload,
   projectController.importProjects
@@ -208,6 +214,7 @@ router.get(
 router.post(
   '/',
   authenticate,
+  canManageProjects,
   validate(createProjectSchema),
   projectController.createProject
 );
@@ -235,6 +242,7 @@ router.post(
 router.put(
   '/:id',
   authenticate,
+  canManageProjects,
   validate(updateProjectSchema),
   projectController.updateProject
 );
@@ -262,6 +270,7 @@ router.put(
 router.delete(
   '/:id',
   authenticate,
+  canManageProjects,
   projectController.deleteProject
 );
 

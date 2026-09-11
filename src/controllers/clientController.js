@@ -2,6 +2,7 @@
 
 const clientService       = require('../services/clientService');
 const clientImportService = require('../services/clientImportService');
+const { resolveActorFullReach } = require('../services/companyAccessControlService');
 const {
   sendSuccess,
   sendCreated,
@@ -84,7 +85,23 @@ const getClientById = async (req, res) => {
       return sendError(res, 'Invalid client ID.', 400);
     }
 
-    const client = await clientService.getById(id, buildClientAuthContext(req));
+    // A direct lookup by id must succeed whenever this actor has ANY
+    // legitimate access to the Client — never narrowed down to whichever ONE
+    // Business Unit happens to be currently active (X-Company-Id), unlike
+    // getAllClients()'s deliberate "narrow when a BU is selected" list
+    // filtering. See companyAccessControlService.resolveActorFullReach()'s
+    // doc comment for the bug this fixes.
+    const fullReachCompanyIds = await resolveActorFullReach({
+      hierarchyRank: req.hierarchyRank,
+      employeeId: req.employeeId,
+      employeeBusinessUnits: req.employeeBusinessUnits,
+    });
+
+    const client = await clientService.getById(id, {
+      companyId: fullReachCompanyIds,
+      hierarchyRank: req.hierarchyRank,
+      employeeId: req.employeeId,
+    });
     return sendSuccess(res, client, 'Client fetched successfully.');
   } catch (error) {
     if (error.statusCode === 404) {

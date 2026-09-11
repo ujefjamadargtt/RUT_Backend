@@ -482,6 +482,45 @@ async function resolveReportCompanyScope(authContext, requestedCompanyId) {
 }
 
 /**
+ * Resolve an actor's FULL reachable Company scope, deliberately IGNORING any
+ * X-Company-Id header / company_id query param — for a single-record-by-ID
+ * lookup (GET /clients/:id, /projects/:id, /service-pos/:id), never for a
+ * list/dropdown read.
+ *
+ * Bug this exists to fix: client.routes.js/project.routes.js/
+ * servicePO.routes.js's GET /:id routes run the same authenticateReadMultiBU
+ * chain as their own GET / (list) sibling, so req.companyIds arrives already
+ * narrowed by resolveReportCompanyScope() to a SINGLE Business Unit whenever
+ * the Global BU selector (X-Company-Id) happens to be set — which, in
+ * practice, is on nearly every request once a multi-BU actor has selected
+ * one. That narrowing is the correct, deliberately tested behavior for a
+ * LIST view (see servicePOService.getAll.buScope.test.js: "a company-less
+ * Admin with a Business Unit SELECTED... narrows to just that ONE BU — the
+ * bug fix"), but a direct single-record lookup by id has no "list" to filter
+ * — a Client/Project/Service PO the actor has genuine access to (via ANY one
+ * of their own mapped/owned Business Units) must resolve successfully
+ * regardless of which OTHER Business Unit happens to be currently active
+ * elsewhere in their session. Concretely: a BU Admin mapped to BUs 10 and 20,
+ * currently active on BU 10, must still be able to open/reference a Client
+ * that lives in BU 20 — same principle as resolveCreateCompanyIdForActor's
+ * Client-BU-derivation fix on the create side.
+ *
+ * Thin wrapper around resolveReportCompanyScope() with requestedCompanyId
+ * hard-coded to null, so it always returns the unnarrowed reachableCompanyIds
+ * branch (every Business Unit this actor can reach) — same ranking rules
+ * (Platform Admin -> every Company; Admin/Entity Admin -> owned Companies;
+ * BU-scoped rank >= 4 -> every mapped Business Unit), reused rather than
+ * duplicated.
+ *
+ * @param {{ hierarchyRank: number|null, employeeId: number|null, employeeBusinessUnits: Array<{id: number}> }} authContext
+ * @returns {Promise<number[]>}
+ * @throws {Error} 403 NO_BUSINESS_UNIT if a BU-scoped actor has no active BU mapping at all
+ */
+async function resolveActorFullReach(authContext) {
+  return resolveReportCompanyScope(authContext, null);
+}
+
+/**
  * Narrows an already-resolved companyIds[] (BU/role reach, e.g. from
  * resolveReportCompanyScope) down to just the Companies that also belong to
  * a given Entity — backs the Reports module's optional `entityId` query
@@ -744,6 +783,7 @@ module.exports = {
   resolveSingleCompanyIdForCompanyLessActor,
   resolveActorCompanyScopeForSelectedBU,
   resolveReportCompanyScope,
+  resolveActorFullReach,
   intersectCompanyIdsWithEntity,
   resolveImportBusinessUnitId,
   resolveOwningAdminIdForCompany,

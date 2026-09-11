@@ -203,7 +203,7 @@ const authenticateIdentity = async (req, res, next) => {
     // config/jwt.js's generateTokens(). Every downstream permission check
     // below (hierarchyRank/capabilities/userRoles) must reflect ONLY that
     // role, not every role this employee currently holds — otherwise
-    // picking "Manager" at login would still grant whatever a
+    // picking "Team Lead" at login would still grant whatever a
     // simultaneously-held "BU Admin" role can do. `null` only for a
     // pre-existing session issued before this feature shipped; that one
     // token keeps its original all-roles behavior until it's replaced by a

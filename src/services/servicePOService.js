@@ -295,13 +295,35 @@ const create = async (data, userId, req) => {
   const { company_id: bodyCompanyId, ...fields } = data;
   const authContext = { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId };
 
+  // For a BU-scoped actor (BU Admin/Project Manager) who doesn't explicitly
+  // override company_id, the Service PO's own Business Unit should follow
+  // whichever BU the selected Client already belongs to, rather than
+  // silently defaulting to whatever BU happens to be active in the
+  // X-Company-Id header — otherwise a multi-BU actor picking a Client under
+  // one of their OTHER mapped BUs gets a spurious "Client not found" purely
+  // because their active header BU doesn't happen to match it.
+  // resolveCreateCompanyIdForActor still fully validates this derived BU is
+  // one of the actor's own mapped Business Units below — this only changes
+  // WHERE the BU signal comes from. Scoped to BU-scoped actors only: a
+  // company-less actor (Admin/Entity Admin) creating a non-Centralised PO
+  // must still be forced to supply an explicit company_id up front
+  // (resolveCreateCompanyId's existing 400) — deriving one from the Client
+  // here would silently bypass that guard.
+  const preFetchedClient = (req.companyId != null && bodyCompanyId == null)
+    ? await clientRepository.findByIdUnscoped(fields.client_id)
+    : null;
+  const effectiveBodyCompanyId = bodyCompanyId != null
+    ? bodyCompanyId
+    : (preFetchedClient && preFetchedClient.company_id != null ? preFetchedClient.company_id : null);
+
   // Normal Service PO: BU is mandatory (required=true).
   // Centralised Service PO: BU is optional — stays NULL if not supplied.
-  // For a multi-BU BU Admin, an explicit body company_id wins over the
-  // X-Company-Id header; validation is handled inside resolveCreateCompanyIdForActor.
+  // For a multi-BU BU Admin, an explicit body company_id (or, now, the
+  // selected Client's own BU) wins over the X-Company-Id header; validation
+  // is handled inside resolveCreateCompanyIdForActor.
   const companyId = await resolveCreateCompanyIdForActor(
     req,
-    bodyCompanyId != null ? bodyCompanyId : null,
+    effectiveBodyCompanyId,
     fields.is_centralised === true
       ? { required: false }
       : { required: true, resourceLabel: 'a Service PO' }
@@ -311,7 +333,7 @@ const create = async (data, userId, req) => {
   // Validate client exists, is active, AND belongs to the same company (or
   // has no company assigned yet — see belongsToCompanyOrUnassigned()) —
   // otherwise a PO could be attached to another company's client.
-  const client = await clientRepository.findByIdUnscoped(data.client_id);
+  const client = preFetchedClient || await clientRepository.findByIdUnscoped(data.client_id);
   if (!belongsToCompanyOrUnassigned(client, companyId)) {
     const err = new Error('Client not found.');
     err.statusCode = 404;
@@ -400,6 +422,25 @@ const create = async (data, userId, req) => {
       await employeeServicePOMappingService.autoMapExistingEmployeesToCentralisedServicePO(
         po.id, companyId, userId, transaction
       );
+    }
+
+    // A BU Admin/Project Manager creating a Service PO themselves must be
+    // auto-mapped to it — a Project Manager's OWN Service PO visibility
+    // (getAll()/getById() above) is driven ENTIRELY by an active
+    // employee_servicepo_mapping row, never by Business Unit membership, so
+    // without this they couldn't even see the PO they just created until
+    // someone separately mapped them to it afterward. bulkCreate's
+    // ignoreDuplicates makes this a safe no-op if a Centralised-PO auto-map
+    // above already covered this same creator/PO pair.
+    if (employeeServicePOMappingService.hasServicePOMappingAuthority(req.userRoles)) {
+      await employeeServicePOMappingRepository.bulkCreate([{
+        company_id: companyId,
+        employee_id: userId,
+        service_po_id: po.id,
+        status: 'active',
+        created_by: userId,
+        updated_by: userId,
+      }], { transaction });
     }
   });
 

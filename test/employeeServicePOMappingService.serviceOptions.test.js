@@ -53,8 +53,8 @@ test('hasUnrestrictedServicePOVisibility(): false for the retired "Service PO Ad
   assert.equal(employeeServicePOMappingService.hasUnrestrictedServicePOVisibility(['Delivery Head']), false);
 });
 
-test('hasUnrestrictedServicePOVisibility(): false for Manager/Employee/BU Admin and other unrelated roles', () => {
-  assert.equal(employeeServicePOMappingService.hasUnrestrictedServicePOVisibility(['Manager']), false);
+test('hasUnrestrictedServicePOVisibility(): false for Team Lead/Employee/BU Admin and other unrelated roles', () => {
+  assert.equal(employeeServicePOMappingService.hasUnrestrictedServicePOVisibility(['Team Lead']), false);
   assert.equal(employeeServicePOMappingService.hasUnrestrictedServicePOVisibility(['Employee']), false);
   assert.equal(employeeServicePOMappingService.hasUnrestrictedServicePOVisibility(['BU Admin']), false);
   assert.equal(employeeServicePOMappingService.hasUnrestrictedServicePOVisibility([]), false);

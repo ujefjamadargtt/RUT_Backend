@@ -150,7 +150,7 @@ test('loginWithMicrosoft() returns requiresRoleSelection for an Employee with mu
   stubHappyPathSideEffects();
   stubVerifiedToken();
   authRepository.findEmployeeByEmail = async () => baseEmployee({
-    roles: [activeRole({ id: 8, role_name: 'Employee' }), activeRole({ id: 9, role_name: 'Manager' })],
+    roles: [activeRole({ id: 8, role_name: 'Employee' }), activeRole({ id: 9, role_name: 'Team Lead' })],
   });
 
   const result = await authService.loginWithMicrosoft('some-id-token');

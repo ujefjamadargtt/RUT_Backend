@@ -12,6 +12,7 @@ const router = express.Router();
 
 const servicePOController = require('../controllers/servicePOController');
 const authenticate = require('../middlewares/auth');
+const authorize = require('../middlewares/authorize');
 // GET-only: same "BU-scoped caller mapped to >1 BU may omit X-Company-Id,
 // aggregating across every BU they're mapped to" contract as client.routes.js
 // — see resolveReportCompanyScope.js. Writes below keep the full
@@ -28,11 +29,10 @@ const {
 } = require('../validations/servicePOValidation');
 const { handleServicePOUpload } = require('../middlewares/upload');
 
-// Convenience role arrays
-const VIEW_ROLES = ['HR', 'Finance', 'Management', 'Division Head', 'Project Manager'];
-const WRITE_ROLES = ['Finance', 'Management'];
-const ALLOCATE_ROLES = ['HR', 'Project Manager', 'Management'];
-const DEALLOCATE_ROLES = ['HR', 'Project Manager'];
+// Only Admin/BU Admin (senior-tier, bypasses this entirely) and Project
+// Manager (explicit grant — see 20260898_grant_client_project_servicepo_
+// capabilities_to_project_manager.sql) may create/update/delete a Service PO.
+const canManageServicePOs = authorize(['project.manage_servicepos']);
 
 // ─── Import Service POs from Excel/CSV (before /:id to avoid route shadowing) ─
 /**
@@ -98,6 +98,7 @@ const DEALLOCATE_ROLES = ['HR', 'Project Manager'];
 router.post(
   '/import',
   authenticate,
+  canManageServicePOs,
   importLimiter,
   handleServicePOUpload,
   servicePOController.importServicePOs
@@ -264,6 +265,7 @@ router.get(
 router.post(
   '/',
   authenticate,
+  canManageServicePOs,
   validate(createServicePOSchema),
   servicePOController.createServicePO
 );
@@ -314,6 +316,7 @@ router.post(
 router.put(
   '/:id',
   authenticate,
+  canManageServicePOs,
   validate(updateServicePOSchema),
   servicePOController.updateServicePO
 );
@@ -341,6 +344,7 @@ router.put(
 router.delete(
   '/:id',
   authenticate,
+  canManageServicePOs,
   servicePOController.deleteServicePO
 );
 

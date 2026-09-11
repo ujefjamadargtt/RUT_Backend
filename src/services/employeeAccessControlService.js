@@ -17,7 +17,7 @@ const employeeRepository = require('../repositories/employeeRepository');
  * Project Manager is the ONE NULL-rank role that is NOT a BU Admin peer —
  * it keeps its own data-driven "own team" scope (team_mappings), resolved
  * by the generic branch further down — so it's explicitly excluded here.
- * (Manager/Employee are also individually-mapped, but both carry an
+ * (Team Lead/Employee are also individually-mapped, but both carry an
  * explicit integer hierarchy_rank, so they never reach this check at all.)
  *
  * @param {number|null} hierarchyRank
@@ -87,21 +87,23 @@ function isReadOnlyBuAdminPeer({ hierarchyRank, roleNames = [], rolePermission }
  *                       Project Manager/Employee mapping table exists yet
  *                       to narrow this further — see the doc comment below).
  *   6 Project Manager- their own Employee record, plus every Employee
- *                       mapped to a Manager on their team (team_mappings).
- *   7 Manager         - their own Employee record, plus every Employee
- *                       mapped to them (manager_employee_mappings).
+ *                       mapped to a Team Lead on their team (team_mappings).
+ *   7 Team Lead       - their own Employee record, plus every Employee
+ *                       mapped to them (manager_employee_mappings; renamed
+ *                       from "Manager" — 20260897_rename_manager_role_to_
+ *                       team_lead.sql — same role_id/tables/columns).
  *   8 Employee        - their own Employee record only.
  *   HR (no rank)      - scoped to their own Company.
  *
- * Manager/Service-PO-Admin scope is resolved the same DATA-DRIVEN way
+ * Team Lead/Project Manager scope is resolved the same DATA-DRIVEN way
  * resolveEmployeeScope() (timesheetApprovalReportService.js) and
  * assertOwnEmployee() (managerSelfServiceService.js) already do: whoever
- * the mapping tables say is a Manager/Project Manager for an Employee gets
+ * the mapping tables say is a Team Lead/Project Manager for an Employee gets
  * that access, regardless of their role name/rank — a User's PRIMARY role
- * can be anything and they can still hold a Secondary Manager mapping (a
+ * can be anything and they can still hold a Secondary Team Lead mapping (a
  * real, already-seen case). This is computed unconditionally for every
  * caller below their own tier, not gated behind a role-name check, so it
- * also naturally covers a caller who holds Manager/Project Manager as an
+ * also naturally covers a caller who holds Team Lead/Project Manager as an
  * ADDITIONAL operational role (see database/migrations/
  * 20260850_add_user_additional_roles.sql) on top of a different primary
  * role — the union-of-roles behavior required for multi-role accounts.
@@ -110,7 +112,7 @@ function isReadOnlyBuAdminPeer({ hierarchyRank, roleNames = [], rolePermission }
  * both have a `*.view_mapped_employees` capability seeded in
  * role_capabilities, implying an intended narrower-than-company-wide scope,
  * but no mapping table backing either capability exists in the schema
- * today (only Manager -> Employee and Project Manager -> Manager do).
+ * today (only Team Lead -> Employee and Project Manager -> Team Lead do).
  * Falling back to company-wide for these two tiers is the tightest bound
  * the EXISTING schema supports without inventing a new mapping table; it
  * still closes the reported cross-company/ID-guessing vulnerability. A
@@ -170,7 +172,7 @@ const resolveEmployeeAccessWhere = async ({ userId, employeeId, companyId, hiera
     return companyId ? employeeRepository.employeeScope(companyId) : { id: -1 };
   }
 
-  // Everyone else (Project Manager, Manager, Employee, and anyone holding
+  // Everyone else (Project Manager, Team Lead, Employee, and anyone holding
   // either as an additional role) — individual, data-driven scope: their
   // own Employee record, plus whoever manager_employee_mappings/
   // team_mappings actually say they manage.

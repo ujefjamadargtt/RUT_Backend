@@ -46,18 +46,22 @@ async function assertServicePOExists(servicePOId, companyId) {
  * DB-verified req.companyId, never client input) so a mapping row from
  * another company can never widen access.
  *
- * - Manager: the UNION of Service POs mapped to them via either of the two
- *   independent mapping paths that exist in this data model:
+ * - Team Lead (role_name, renamed from "Manager" — same role_id, so
+ *   manager_servicepo_mappings/manager_employee_mappings and their
+ *   manager_user_id/manager_employee_id columns are unaffected — see
+ *   20260897_rename_manager_role_to_team_lead.sql): the UNION of Service
+ *   POs mapped to them via either of the two independent mapping paths
+ *   that exist in this data model:
  *     1. manager_servicepo_mappings (manager_user_id) — a Project Manager's
- *        formal grant to a Manager on their team (see teamMappingService).
- *     2. employee_servicepo_mapping (employee_id), via the Manager's own
+ *        formal grant to a Team Lead on their team (see teamMappingService).
+ *     2. employee_servicepo_mapping (employee_id), via the Team Lead's own
  *        linked Employee record (req.employeeId) — the same staffing
  *        assignment employeeServicePOMappingRepository.findByEmployee()
- *        feeds to the Employee Timesheet module. A Manager IS an Employee
+ *        feeds to the Employee Timesheet module. A Team Lead IS an Employee
  *        and can be assigned to a PO as a resource the same way any other
  *        Employee is, independent of any Project Manager grant.
  *   Both are real, independently-populated mapping tables in this app — a
- *   Manager mapped through only one of them must still see that PO here.
+ *   Team Lead mapped through only one of them must still see that PO here.
  * - Every other role (BU Admin, Project Manager, Admin, HR, Employee,
  *   Project Admin, ...): no individual-mapping restriction — every Service
  *   PO in the caller's own company. A Company IS the BU/entity boundary
@@ -72,7 +76,7 @@ async function assertServicePOExists(servicePOId, companyId) {
  * @returns {Promise<number[]|null>} allowed service_po_ids, or null = no PO-level restriction
  */
 async function getAllowedServicePOIds(userId, roleName, companyId, employeeId) {
-  if (roleName === 'Manager') {
+  if (roleName === 'Team Lead') {
     const [grantedMappings, staffedMappings] = await Promise.all([
       managerServicePOMappingRepository.findByManager(userId, companyId),
       employeeId

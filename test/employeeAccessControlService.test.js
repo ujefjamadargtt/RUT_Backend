@@ -187,7 +187,7 @@ test('Employee with no linked Employee record and no mappings is denied everythi
   restore();
 });
 
-test('Manager scope is data-driven from manager_employee_mappings, unioned with their own record', async () => {
+test('Team Lead (rank 7, renamed from Manager) scope is data-driven from manager_employee_mappings, unioned with their own record', async () => {
   stubEmployeeScopeAsLegacyOnly();
   managerEmployeeMappingRepository.findByManager = async (managerEmployeeId, companyId) => {
     assert.equal(managerEmployeeId, 434);
@@ -198,7 +198,7 @@ test('Manager scope is data-driven from manager_employee_mappings, unioned with 
   teamMappingRepository.findByServicePOAdmin = async () => [];
 
   const where = await resolveEmployeeAccessWhere({
-    userId: 121, employeeId: 434, companyId: 54, hierarchyRank: 7, roleNames: ['Manager'],
+    userId: 121, employeeId: 434, companyId: 54, hierarchyRank: 7, roleNames: ['Team Lead'],
   });
 
   const opIn = Object.getOwnPropertySymbols(where.id)[0];
@@ -247,10 +247,10 @@ test('Project Manager (renamed from Service PO Admin) scope includes every Emplo
   restore();
 });
 
-test('Manager/Employee-tier caller with no companyId is denied everything, not left unscoped', async () => {
+test('Team Lead/Employee-tier caller with no companyId is denied everything, not left unscoped', async () => {
   stubNoMappings();
   const where = await resolveEmployeeAccessWhere({
-    userId: 121, employeeId: 434, companyId: null, hierarchyRank: 7, roleNames: ['Manager'],
+    userId: 121, employeeId: 434, companyId: null, hierarchyRank: 7, roleNames: ['Team Lead'],
   });
   assert.deepEqual(where, { id: -1 });
   restore();

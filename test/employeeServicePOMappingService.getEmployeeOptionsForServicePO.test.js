@@ -250,7 +250,7 @@ test('hasServicePOMappingAuthority(): matches BU Admin and Project Manager (rena
   assert.equal(employeeServicePOMappingService.hasServicePOMappingAuthority(['project manager']), true);
   assert.equal(employeeServicePOMappingService.hasServicePOMappingAuthority(['Service PO Admin']), false);
   assert.equal(employeeServicePOMappingService.hasServicePOMappingAuthority(['Delivery Head']), false);
-  assert.equal(employeeServicePOMappingService.hasServicePOMappingAuthority(['Manager']), false);
+  assert.equal(employeeServicePOMappingService.hasServicePOMappingAuthority(['Team Lead']), false);
   assert.equal(employeeServicePOMappingService.hasServicePOMappingAuthority(['Employee']), false);
   assert.equal(employeeServicePOMappingService.hasServicePOMappingAuthority([]), false);
 });

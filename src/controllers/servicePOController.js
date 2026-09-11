@@ -2,6 +2,7 @@
 
 const servicePOService = require('../services/servicePOService');
 const servicePOImportService = require('../services/servicePOImportService');
+const { resolveActorFullReach } = require('../services/companyAccessControlService');
 const {
   sendSuccess,
   sendCreated,
@@ -71,7 +72,23 @@ const getServicePOById = async (req, res) => {
       return sendError(res, 'Invalid Service PO ID.', 400);
     }
 
-    const po = await servicePOService.getById(id, buildAuthContext(req));
+    // A direct lookup by id must succeed whenever this actor has ANY
+    // legitimate access to the Service PO — never narrowed down to whichever
+    // ONE Business Unit happens to be currently active (X-Company-Id),
+    // unlike getAllServicePOs()'s deliberate "narrow when a BU is selected"
+    // list filtering. See companyAccessControlService.resolveActorFullReach()'s
+    // doc comment for the bug this fixes.
+    const fullReachCompanyIds = await resolveActorFullReach({
+      hierarchyRank: req.hierarchyRank,
+      employeeId: req.employeeId,
+      employeeBusinessUnits: req.employeeBusinessUnits,
+    });
+
+    const po = await servicePOService.getById(id, {
+      companyId: fullReachCompanyIds,
+      hierarchyRank: req.hierarchyRank,
+      employeeId: req.employeeId,
+    });
     return sendSuccess(res, po, 'Service PO fetched successfully.');
   } catch (error) {
     if (error.statusCode === 404) {

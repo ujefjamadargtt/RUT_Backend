@@ -21,7 +21,7 @@ const getMyTeam = async (req, res) => {
 const getAvailableManagers = async (req, res) => {
   try {
     const managers = await teamMappingService.getAvailableManagers(req.companyId);
-    return sendSuccess(res, managers, 'Managers fetched successfully.');
+    return sendSuccess(res, managers, 'Team Leads fetched successfully.');
   } catch (error) {
     logger.error('getAvailableManagers error', { error: error.message, userId: req.userId });
     return sendError(res, error.message, error.statusCode || 500);
@@ -33,9 +33,9 @@ const addManager = async (req, res) => {
     const mapping = await teamMappingService.addManager(
       req.userId, req.body.manager_user_id, req.companyId, req.userId, req
     );
-    return sendCreated(res, mapping, 'Manager added to your team successfully.');
+    return sendCreated(res, mapping, 'Team Lead added to your team successfully.');
   } catch (error) {
-    if (error.statusCode === 404) return sendNotFound(res, 'Manager');
+    if (error.statusCode === 404) return sendNotFound(res, 'Team Lead');
     if (error.statusCode === 409 || error.statusCode === 400) return sendError(res, error.message, error.statusCode);
     logger.error('addManager error', { error: error.message, userId: req.userId });
     return sendError(res, error.message, error.statusCode || 500);
@@ -45,7 +45,7 @@ const addManager = async (req, res) => {
 const removeManager = async (req, res) => {
   try {
     const managerUserId = parseInt(req.params.managerUserId, 10);
-    if (isNaN(managerUserId)) return sendError(res, 'Invalid Manager ID.', 400);
+    if (isNaN(managerUserId)) return sendError(res, 'Invalid Team Lead ID.', 400);
 
     await teamMappingService.removeManager(req.userId, managerUserId, req.companyId, req.userId, req);
     return sendNoContent(res);
@@ -69,7 +69,7 @@ const getMyTeamServicePOGrants = async (req, res) => {
 const grantServicePO = async (req, res) => {
   try {
     const managerUserId = parseInt(req.params.managerUserId, 10);
-    if (isNaN(managerUserId)) return sendError(res, 'Invalid Manager ID.', 400);
+    if (isNaN(managerUserId)) return sendError(res, 'Invalid Team Lead ID.', 400);
 
     const grant = await teamMappingService.grantServicePO(
       req.userId, managerUserId, req.body.service_po_id, req.companyId, req.userId
@@ -77,7 +77,7 @@ const grantServicePO = async (req, res) => {
     return sendCreated(res, grant, 'Service PO granted successfully.');
   } catch (error) {
     if (error.statusCode === 403) return sendError(res, error.message, 403);
-    if (error.statusCode === 404) return sendNotFound(res, 'Manager or Service PO');
+    if (error.statusCode === 404) return sendNotFound(res, 'Team Lead or Service PO');
     if (error.statusCode === 409) return sendError(res, error.message, 409);
     logger.error('grantServicePO error', { error: error.message, userId: req.userId });
     return sendError(res, error.message, error.statusCode || 500);
