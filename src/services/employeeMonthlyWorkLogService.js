@@ -214,9 +214,12 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data, options = {}) =
         // The work log belongs to the Service PO's OWN owning BU, not
         // necessarily the caller's active session BU (cross-BU resourcing) —
         // see employeeTimesheetService.replaceDailyEntries' identical
-        // comment. Falls back to the session companyId only for a
-        // BU-less/Centralised PO (company_id: null).
-        company_id: po.company_id ?? companyId,
+        // comment. Falls back to the session companyId for a BU-less/
+        // Centralised PO (company_id: null), and ALSO for a Centralised PO
+        // that does carry its own specific company_id — a Centralised PO is
+        // usable across BUs by definition, so its own company_id is never a
+        // meaningful anchor; only the logging employee's own session BU is.
+        company_id: po.is_centralised ? companyId : (po.company_id ?? companyId),
         status: forceApproved ? 'approved' : 'pending',
         log_type: 'monthly',
         created_by: creatorId,

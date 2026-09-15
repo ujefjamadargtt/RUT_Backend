@@ -103,7 +103,7 @@ const updateEntitySchema = Joi.object({
 const listEntitiesQuerySchema = Joi.object({
   page: Joi.number().integer().min(1).default(1),
   limit: Joi.number().integer().min(1).max(200).default(20),
-  status: Joi.string().valid('active', 'inactive', 'all').default('active'),
+  status: Joi.string().valid('active', 'inactive', 'all').default('all'),
   search: Joi.string().trim().max(100).optional().allow(''),
   sort_by: Joi.string().valid('entity_name', 'entity_code', 'created_at').default('entity_name'),
   sort_order: Joi.string().valid('ASC', 'DESC', 'asc', 'desc').default('ASC'),

@@ -556,9 +556,14 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
         // The work log belongs to the Service PO's OWN owning BU, not
         // necessarily the caller's active session BU (cross-BU resourcing —
         // see assertProjectMapped's doc comment). Falls back to the session
-        // companyId only for a BU-less/Centralised PO (company_id: null),
-        // which has no owning BU of its own to anchor to.
-        company_id: po.company_id ?? companyId,
+        // companyId for a BU-less/Centralised PO (company_id: null), which
+        // has no owning BU of its own to anchor to — and ALSO for a
+        // Centralised PO that DOES carry a specific company_id (a BU-scoped
+        // actor's own BU stamped it on creation, see servicePOService.create):
+        // a Centralised PO is by definition usable across BUs, so its own
+        // company_id is never a meaningful anchor for the logging employee's
+        // work — only the session's own BU is.
+        company_id: po.is_centralised ? companyId : (po.company_id ?? companyId),
         status: 'pending',
         created_by: employeeId,
         updated_by: employeeId,
@@ -709,8 +714,10 @@ const updateEntry = async (employeeId, companyId, id, data) => {
       // Re-anchored to the (possibly changed) Service PO's own owning BU —
       // see replaceDailyEntries' identical comment on why this isn't the
       // session's companyId. Matters here specifically when this edit
-      // changes service_po_id to a PO owned by a different BU.
-      company_id: po.company_id ?? companyId,
+      // changes service_po_id to a PO owned by a different BU. A Centralised
+      // PO is the one exception (see replaceDailyEntries) — it never anchors
+      // the BU, even when it carries its own specific company_id.
+      company_id: po.is_centralised ? companyId : (po.company_id ?? companyId),
       updated_by: employeeId,
       // An edit to an 'approved' entry reverts it to 'pending' (re-requires
       // approval) EXCEPT when the entry is 'rejected': saving edits must NOT
@@ -865,8 +872,9 @@ const addTimeEntries = async (employeeId, companyId, data) => {
         hours: newTotalHours,
         description: effectiveDescription,
         // See replaceDailyEntries' identical comment — anchored to the
-        // Service PO's own owning BU, not the caller's active session.
-        company_id: po.company_id ?? companyId,
+        // Service PO's own owning BU, not the caller's active session,
+        // except for a Centralised PO, which never anchors the BU.
+        company_id: po.is_centralised ? companyId : (po.company_id ?? companyId),
         status: 'pending',
         created_by: employeeId,
         updated_by: employeeId,

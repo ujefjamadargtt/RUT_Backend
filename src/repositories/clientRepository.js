@@ -1,8 +1,21 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { Client, ServicePO } = require('../models');
+const { Client, ServicePO, Company, Entity } = require('../models');
 const logger = require('../utils/logger');
+
+// A factory, not a shared constant — Sequelize mutates include objects in
+// place while building a query, so each findAll()/findOne() call needs its
+// own instance (same reasoning as platformAdminRepository.js's buCompanyInclude).
+const companyWithEntityInclude = () => ({
+  model: Company,
+  as: 'company',
+  attributes: ['id', 'company_name', 'entity_id'],
+  required: false,
+  include: [
+    { model: Entity, as: 'entity', attributes: ['id', 'entity_name'], required: false },
+  ],
+});
 
 /**
  * Client Repository
@@ -96,7 +109,8 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
     limit,
     offset,
     order: [[safeSortBy, safeSortOrder]],
-    attributes: ['id', 'client_code', 'client_name', 'industry', 'status', 'created_at', 'updated_at', 'created_by'],
+    attributes: ['id', 'client_code', 'client_name', 'industry', 'status', 'company_id', 'created_at', 'updated_at', 'created_by'],
+    include: [companyWithEntityInclude()],
   });
 };
 
@@ -110,6 +124,7 @@ const findById = async (id, companyId) => {
   return Client.findOne({
     where: { id, ...companyScope(companyId) },
     attributes: ['id', 'client_code', 'client_name', 'industry', 'status', 'company_id', 'created_at', 'updated_at', 'created_by', 'updated_by'],
+    include: [companyWithEntityInclude()],
   });
 };
 

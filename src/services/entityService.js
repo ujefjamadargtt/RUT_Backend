@@ -76,7 +76,7 @@ const getAll = async (query = {}, entityIds = []) => {
 
   const filters = {
     search: query.search || null,
-    status: query.status || 'active',
+    status: query.status || 'all',
     entityIds,
   };
 
