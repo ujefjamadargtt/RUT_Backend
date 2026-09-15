@@ -105,7 +105,11 @@ async function getBillableTrend(req, res, next) {
 async function getAnalyticsDashboard(req, res, next) {
   try {
     const filters = { ...req.body, ...req.query };
-    const result = await dashboardService.getAnalyticsDashboard(filters, req.companyId);
+    // req.companyIds (always an array — see dashboard.routes.js's
+    // authenticateAnalyticsMultiBU) — every reachable company when
+    // X-Company-Id is omitted, or the one selected/validated company
+    // otherwise. Unlike the rest of this controller's req.companyId.
+    const result = await dashboardService.getAnalyticsDashboard(filters, req.companyIds);
     return sendSuccess(res, result, 'Analytics dashboard fetched successfully.');
   } catch (err) {
     logger.error('Dashboard getAnalyticsDashboard error', { error: err.message, stack: err.stack, userId: req.userId });
@@ -131,7 +135,9 @@ async function getAnalyticsDashboard(req, res, next) {
 async function getMonthlyResourceUtilization(req, res, next) {
   try {
     const filters = { ...req.body, ...req.query };
-    const result = await dashboardService.getMonthlyResourceUtilization(filters, req.companyId);
+    // req.companyIds (always an array) — see getAnalyticsDashboard()'s
+    // comment above / dashboard.routes.js's authenticateAnalyticsMultiBU.
+    const result = await dashboardService.getMonthlyResourceUtilization(filters, req.companyIds);
     return sendSuccess(res, result, 'Monthly resource utilization report fetched successfully.');
   } catch (err) {
     logger.error('Dashboard getMonthlyResourceUtilization error', { error: err.message, stack: err.stack, userId: req.userId });

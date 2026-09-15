@@ -7,11 +7,23 @@ const Joi = require('joi');
 const authenticateBase = require('../middlewares/auth');
 const resolveCompanyContextForCompanyLessActors = require('../middlewares/resolveCompanyContextForCompanyLessActors');
 // Admin/Entity Admin (ranks 2-3) have no single req.companyId from
-// authenticateBase alone — every Dashboard endpoint (including analytics /
-// analytics2) reads req.companyId directly, so every route resolves ONE
-// Business Unit context for them too (see
+// authenticateBase alone — every Dashboard endpoint (other than analytics /
+// analytics2 below) reads req.companyId directly, so every one of THOSE
+// routes resolves ONE Business Unit context for them too (see
 // resolveCompanyContextForCompanyLessActors.js for the contract).
 const authenticate = [authenticateBase, resolveCompanyContextForCompanyLessActors];
+// GET-only, analytics/analytics2 ONLY: same "BU-scoped caller mapped to >1 BU
+// (or a company-less Admin/Entity Admin/Platform Admin) may omit X-Company-Id,
+// aggregating across every Business Unit they can reach" contract as
+// client.routes.js/project.routes.js/servicePO.routes.js/report.routes.js —
+// see resolveReportCompanyScope.js. Bug this fixes: the `authenticate` chain
+// above (resolveCompany.js + resolveCompanyContextForCompanyLessActors.js)
+// hard-rejects (400 COMPANY_HEADER_REQUIRED) a multi-BU/multi-company actor
+// who omits the header, and returns req.companyId === undefined for Platform
+// Admin unconditionally — neither aggregates, unlike every other multi-BU
+// read endpoint in this codebase.
+const resolveReportCompanyScope = require('../middlewares/resolveReportCompanyScope');
+const authenticateAnalyticsMultiBU = [authenticateBase.authenticateIdentity, resolveReportCompanyScope];
 const { validate } = require('../middlewares/validateRequest');
 const dashboardController = require('../controllers/dashboardController');
 const { heavyReportLimiter } = require('../middlewares/rateLimiters');
@@ -453,7 +465,7 @@ router.get(
  */
 router.get(
   '/analytics',
-  authenticate,
+  authenticateAnalyticsMultiBU,
   validate(analyticsQuerySchema, 'query'),
   dashboardController.getAnalyticsDashboard
 );
@@ -579,7 +591,7 @@ router.get(
  */
 router.get(
   '/analytics2',
-  authenticate,
+  authenticateAnalyticsMultiBU,
   validate(analyticsQuerySchema, 'query'),
   dashboardController.getMonthlyResourceUtilization
 );

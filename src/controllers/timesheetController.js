@@ -1,6 +1,7 @@
 'use strict';
 
 const timesheetService = require('../services/timesheetService');
+const { resolveActorFullReach } = require('../services/companyAccessControlService');
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
 const {
   sendSuccess,
@@ -468,7 +469,17 @@ const deleteTimesheet = async (req, res, next) => {
       return sendError(res, 'Invalid timesheet ID.', 400);
     }
 
-    await timesheetService.deleteTimesheet(id, req.companyId);
+    // A delete must succeed for any timesheet the caller has genuine access
+    // to (through ANY of their Business Units), never narrowed down to
+    // whichever ONE happens to be currently active (X-Company-Id) — see
+    // resolveActorFullReach()'s doc comment.
+    const fullReachCompanyIds = await resolveActorFullReach({
+      hierarchyRank: req.hierarchyRank,
+      employeeId: req.employeeId,
+      employeeBusinessUnits: req.employeeBusinessUnits,
+    });
+
+    await timesheetService.deleteTimesheet(id, fullReachCompanyIds);
 
     createAuditLog(
       req.userId,
@@ -524,7 +535,15 @@ const deleteImports = async (req, res, next) => {
       return sendError(res, 'ids must be a non-empty array of valid Timesheet Import History IDs.', 422);
     }
 
-    const result = await timesheetService.deleteImports(ids, req.companyId);
+    // Same rationale as deleteTimesheet() above — full BU/owned-Company
+    // reach, never narrowed to just the currently-active X-Company-Id.
+    const fullReachCompanyIds = await resolveActorFullReach({
+      hierarchyRank: req.hierarchyRank,
+      employeeId: req.employeeId,
+      employeeBusinessUnits: req.employeeBusinessUnits,
+    });
+
+    const result = await timesheetService.deleteImports(ids, fullReachCompanyIds);
 
     createAuditLog(
       req.userId,

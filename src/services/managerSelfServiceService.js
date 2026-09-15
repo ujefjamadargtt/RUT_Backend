@@ -601,7 +601,7 @@ const rejectWorkLogEntry = async (managerUserId, id, remark, companyId, actorId,
     throw conflictError(`Only a pending work log entry can be rejected (current status: ${entry.status}).`);
   }
 
-  const rejected = await employeeWorkLogRepository.rejectById(id, companyId, { remark, rejectedBy: actorId });
+  const rejected = await employeeWorkLogRepository.rejectById(id, { remark, rejectedBy: actorId });
 
   await createAuditLog(
     actorId,

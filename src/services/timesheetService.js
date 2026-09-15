@@ -2068,6 +2068,13 @@ const publishImport = async (timesheetImportId, companyId) => {
  * must not be re-requested just because the synced copy was deleted.
  *
  * @param {number} id
+ * @param {number|number[]} companyId - the caller's single active BU, or
+ *   every BU/owned-Company they can reach. The row is looked up across that
+ *   whole reach, then every subsequent step uses the row's OWN resolved
+ *   company_id — never the possibly-multi-value companyId param — so a
+ *   platform-wide Admin (or any multi-BU actor) can delete a timesheet that
+ *   belongs to any of their Business Units, not just whichever one happens
+ *   to be their currently-active one.
  * @returns {Promise<void>}
  */
 const deleteTimesheet = async (id, companyId) => {
@@ -2081,13 +2088,13 @@ const deleteTimesheet = async (id, companyId) => {
   const t = await sequelize.transaction();
   try {
     await employeeWorkLogRepository.revertSyncStatusByTuple(
-      companyId,
+      timesheet.company_id,
       timesheet.employee_id,
       timesheet.service_po_id,
       timesheet.timesheet_date,
       t
     );
-    await timesheetRepository.deleteById(id, companyId, t);
+    await timesheetRepository.deleteById(id, timesheet.company_id, t);
     await t.commit();
   } catch (err) {
     await t.rollback();
@@ -2111,11 +2118,17 @@ const deleteTimesheet = async (id, companyId) => {
  * This NEVER deletes Employee Work Logs (employee_work_logs) — they are the
  * source of truth, not the output of an import. Any work log rows that had
  * been synced into the import being deleted are instead reverted to
- * status='pending' (employeeWorkLogRepository.revertSyncStatusByImportIds,
- * step 0 below) so they remain intact and can be freely edited/re-synced —
- * the row itself is never touched.
+ * status='approved' (employeeWorkLogRepository.revertSyncStatusByImportIds,
+ * step 0 below) — same target status as a single-timesheet delete, since a
+ * Manager's approval already happened and must not be re-requested just
+ * because the synced copy was deleted in bulk — so they remain intact and
+ * are immediately eligible for the next sync. The row itself is never
+ * touched.
  *
  * @param {number[]} ids
+ * @param {number|number[]} companyId - the caller's single active BU, or
+ *   every BU/owned-Company they can reach (see findImportsByIds' companyScope)
+ *   — each id is only found/deleted if it actually belongs to one of them.
  * @returns {Promise<{ deletedImportCount: number, deletedTimesheetRows: number, deletedErrorRows: number, revertedWorkLogs: number, removedFiles: string[], failedFiles: object[] }>}
  */
 const deleteImports = async (ids, companyId) => {
@@ -2153,11 +2166,12 @@ const deleteImports = async (ids, companyId) => {
     // after a Timesheet Import is deleted — the official Timesheet data
     // for this import is about to disappear, so any work log rows this
     // import had synced are no longer accurately reflected anywhere and
-    // must revert to status='pending' (not just have their FK nulled) so
-    // they can be edited/deleted freely and picked up by a future sync.
-    // Must run BEFORE deleting the import history rows below (defense in
-    // depth: the FK's own ON DELETE SET NULL would clear the column
-    // regardless, but only this step restores `status`).
+    // must revert to status='approved' (not just have their FK nulled) so
+    // they remain intact and are immediately eligible for the next sync,
+    // without requiring re-approval. Must run BEFORE deleting the import
+    // history rows below (defense in depth: the FK's own ON DELETE SET
+    // NULL would clear the column regardless, but only this step restores
+    // `status`).
     revertedWorkLogs = await employeeWorkLogRepository.revertSyncStatusByImportIds(uniqueIds, t);
     // Child table 1: timesheet rows belonging to these imports
     deletedTimesheetRows = await timesheetRepository.deleteByImportIds(uniqueIds, t, companyId);

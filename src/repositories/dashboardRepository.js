@@ -16,10 +16,10 @@ const { QueryTypes } = require('sequelize');
 // alone silently undercounts the workforce. Same OR-with-legacy-column
 // pattern as employeeRepository.js's employeeScope().
 const EMPLOYEE_COMPANY_SCOPE_SQL = `(
-  company_id = :companyId
+  company_id IN (:companyId)
   OR id IN (
     SELECT employee_id FROM employee_business_units
-    WHERE business_unit_id = :companyId AND status = 'active'
+    WHERE business_unit_id IN (:companyId) AND status = 'active'
   )
 )`;
 
@@ -53,7 +53,7 @@ async function getActiveEmployees(companyId) {
  */
 async function getTotalClients(companyId) {
   const [result] = await sequelize.query(
-    'SELECT COUNT(*) AS total FROM clients WHERE company_id = :companyId',
+    'SELECT COUNT(*) AS total FROM clients WHERE company_id IN (:companyId)',
     { replacements: { companyId }, type: QueryTypes.SELECT }
   );
   return parseInt(result.total, 10);
@@ -67,7 +67,7 @@ async function getTotalClients(companyId) {
  */
 async function getActivePOs(companyId) {
   const [result] = await sequelize.query(
-    "SELECT COUNT(*) AS total FROM service_pos WHERE status IN ('in-progress', 'on-hold', 'pending') AND (company_id = :companyId OR company_id IS NULL)",
+    "SELECT COUNT(*) AS total FROM service_pos WHERE status IN ('in-progress', 'on-hold', 'pending') AND (company_id IN (:companyId) OR company_id IS NULL)",
     { replacements: { companyId }, type: QueryTypes.SELECT }
   );
   return parseInt(result.total, 10);
@@ -79,7 +79,7 @@ async function getActivePOs(companyId) {
  */
 async function getClosedPOs(companyId) {
   const [result] = await sequelize.query(
-    "SELECT COUNT(*) AS total FROM service_pos WHERE status = 'closed' AND (company_id = :companyId OR company_id IS NULL)",
+    "SELECT COUNT(*) AS total FROM service_pos WHERE status = 'closed' AND (company_id IN (:companyId) OR company_id IS NULL)",
     { replacements: { companyId }, type: QueryTypes.SELECT }
   );
   return parseInt(result.total, 10);
@@ -111,7 +111,7 @@ async function getCurrentMonthHours(month, year, hoursSource, roleId, companyId)
      FROM timesheets t
      WHERE EXTRACT(MONTH FROM timesheet_date) = :month
        AND EXTRACT(YEAR  FROM timesheet_date) = :year
-       AND t.company_id = :companyId
+       AND t.company_id IN (:companyId)
        ${publishGuard}`,
     {
       replacements: { month, year, companyId },
@@ -151,7 +151,7 @@ async function getCurrentMonthBillableSplit(month, year, hoursSource, roleId, co
      INNER JOIN service_pos sp ON sp.id = t.service_po_id
      WHERE EXTRACT(MONTH FROM t.timesheet_date) = :month
        AND EXTRACT(YEAR  FROM t.timesheet_date) = :year
-       AND t.company_id = :companyId
+       AND t.company_id IN (:companyId)
        ${publishGuard}`,
     {
       replacements: { month, year, companyId },
@@ -203,7 +203,7 @@ async function getCurrentMonthBillableSplit(month, year, hoursSource, roleId, co
 async function getTotalRevenue(filters = {}) {
   const { year, startDate, endDate, employeeId, clientId, poId, serviceTypeId, serviceCategoryId, companyId } = filters;
 
-  const conditions = ["sp.status IN ('in-progress', 'on-hold', 'pending', 'completed', 'closed')", '(sp.company_id = :companyId OR sp.company_id IS NULL)'];
+  const conditions = ["sp.status IN ('in-progress', 'on-hold', 'pending', 'completed', 'closed')", '(sp.company_id IN (:companyId) OR sp.company_id IS NULL)'];
   const replacements = { companyId };
 
   if (startDate && endDate) {
@@ -272,7 +272,7 @@ async function getTotalRevenue(filters = {}) {
 async function getTotalBudgetCost(filters = {}) {
   const { startDate, endDate, year, employeeId, clientId, poId, serviceTypeId, serviceCategoryId, companyId } = filters;
 
-  const conditions = ["cbm.status = 'active'", '(sp.company_id = :companyId OR sp.company_id IS NULL)'];
+  const conditions = ["cbm.status = 'active'", '(sp.company_id IN (:companyId) OR sp.company_id IS NULL)'];
   const replacements = { companyId };
 
   if (startDate && endDate) {
@@ -355,7 +355,7 @@ async function getRecentTimesheetActivity(hoursSource, roleId, companyId) {
      FROM timesheets t
      INNER JOIN employees e    ON e.id  = t.employee_id
      INNER JOIN service_pos sp ON sp.id = t.service_po_id
-     WHERE t.company_id = :companyId
+     WHERE t.company_id IN (:companyId)
        ${publishGuard}
      ORDER BY t.employee_id, t.timesheet_date DESC
      LIMIT 5`,
@@ -401,7 +401,7 @@ async function getRecentTimesheetActivityForPeriod(startDate, endDate, hoursSour
      INNER JOIN service_pos sp ON sp.id = t.service_po_id
      WHERE t.timesheet_date >= :startDate
        AND t.timesheet_date <= :endDate
-       AND t.company_id = :companyId
+       AND (t.company_id IN (:companyId) OR sp.company_id IN (:companyId) OR sp.company_id IS NULL)
        ${publishGuard}
      ORDER BY t.employee_id, t.timesheet_date DESC
      LIMIT 5`,
@@ -456,7 +456,7 @@ async function getTopPOsByHours(hoursSource, roleId, companyId) {
        INNER JOIN service_categories sc ON sc.id = st.service_category_id
        LEFT  JOIN timesheets t         ON t.service_po_id = sp.id
                                        ${publishGuard}
-       WHERE (sp.company_id = :companyId OR sp.company_id IS NULL)
+       WHERE (sp.company_id IN (:companyId) OR sp.company_id IS NULL)
        GROUP BY sp.id, sp.service_po_code, sp.service_po_name, c.client_name, sc.name
      ) ranked
      WHERE rn <= 5
@@ -515,7 +515,7 @@ async function getTopPOsByHoursForPeriod(startDate, endDate, hoursSource, roleId
                                        AND t.timesheet_date >= :startDate
                                        AND t.timesheet_date <= :endDate
                                        ${publishGuard}
-       WHERE (sp.company_id = :companyId OR sp.company_id IS NULL)
+       WHERE (sp.company_id IN (:companyId) OR sp.company_id IS NULL)
        GROUP BY sp.id, sp.service_po_code, sp.service_po_name, c.client_name, sc.name, sc.report_bucket_key
      ) ranked
      WHERE rn <= 5
@@ -551,7 +551,7 @@ async function getEmployeeCountByCategory(month, year, roleId, companyId) {
      WHERE EXTRACT(MONTH FROM t.timesheet_date) = :month
        AND EXTRACT(YEAR  FROM t.timesheet_date) = :year
        AND t.hours_logged > 0
-       AND t.company_id = :companyId
+       AND t.company_id IN (:companyId)
        ${publishGuard}
      GROUP BY sc.name`,
     { replacements: { month, year, companyId }, type: QueryTypes.SELECT }
@@ -587,7 +587,7 @@ async function getEmployeeCountByCategoryForPeriod(startDate, endDate, roleId, c
      WHERE t.timesheet_date >= :startDate
        AND t.timesheet_date <= :endDate
        AND t.hours_logged > 0
-       AND t.company_id = :companyId
+       AND (t.company_id IN (:companyId) OR sp.company_id IN (:companyId) OR sp.company_id IS NULL)
        ${publishGuard}
      GROUP BY sc.name, sc.report_bucket_key`,
     { replacements: { startDate, endDate, companyId }, type: QueryTypes.SELECT }
@@ -623,7 +623,7 @@ async function getActiveCountsForPeriod(month, year, roleId, companyId) {
      INNER JOIN clients c      ON c.id  = sp.client_id
      WHERE EXTRACT(MONTH FROM t.timesheet_date) = :month
        AND EXTRACT(YEAR  FROM t.timesheet_date) = :year
-       AND t.company_id = :companyId
+       AND t.company_id IN (:companyId)
        ${publishGuard}`,
     { replacements: { month, year, companyId }, type: QueryTypes.SELECT }
   );
@@ -664,7 +664,7 @@ async function getMonthlyHoursTrend(hoursSource, roleId, companyId) {
        ROUND(SUM(${hoursCol})::numeric, 2)   AS total_hours
      FROM timesheets t
      WHERE timesheet_date >= (CURRENT_DATE - INTERVAL '6 months')
-       AND t.company_id = :companyId
+       AND t.company_id IN (:companyId)
        ${publishGuard}
      GROUP BY year, month, label
      ORDER BY year ASC, month ASC`,
@@ -714,7 +714,7 @@ async function getEmployeeBillableBreakdown(filters) {
       AND EXTRACT(YEAR  FROM t.timesheet_date) = :year
       AND e.is_deleted = false
       AND e.status = 'active'
-      AND t.company_id = :companyId
+      AND t.company_id IN (:companyId)
       ${searchCondition}
       ${publishGuard}
   `;
@@ -728,7 +728,7 @@ async function getEmployeeBillableBreakdown(filters) {
         AND EXTRACT(YEAR  FROM t.timesheet_date) = :year
         AND e.is_deleted = false
         AND e.status = 'active'
-        AND t.company_id = :companyId
+        AND t.company_id IN (:companyId)
         ${searchCondition}
         ${publishGuard}
       ORDER BY e.full_name
@@ -755,7 +755,7 @@ async function getEmployeeBillableBreakdown(filters) {
     LEFT  JOIN service_categories sc ON sc.id = st.service_category_id
     WHERE EXTRACT(MONTH FROM t.timesheet_date) = :month
       AND EXTRACT(YEAR  FROM t.timesheet_date) = :year
-      AND t.company_id = :companyId
+      AND t.company_id IN (:companyId)
       ${publishGuard}
     GROUP BY e.id, e.employee_code, e.full_name, e.designation,
              sp.id, sp.service_po_code, sp.service_po_name, sp.is_billable, st.service_type_name, sc.name, sc.report_bucket_key
@@ -794,7 +794,7 @@ async function getPOBillableBreakdown(filters) {
     : 'COALESCE(t.modified_hours, t.hours_logged)';
 
   const replacements = { month: parseInt(month, 10), year: parseInt(year, 10), limit, offset, companyId };
-  const conditions = ["sp.is_deleted = false", "(sp.company_id = :companyId OR sp.company_id IS NULL)"];
+  const conditions = ["sp.is_deleted = false", "(sp.company_id IN (:companyId) OR sp.company_id IS NULL)"];
 
   if (search) {
     conditions.push('(sp.service_po_name ILIKE :search OR sp.service_po_code ILIKE :search OR c.client_name ILIKE :search)');
@@ -883,7 +883,7 @@ async function getTopEmployeesByPO(filters) {
   const conditions = [
     'EXTRACT(MONTH FROM t.timesheet_date) = :month',
     'EXTRACT(YEAR  FROM t.timesheet_date) = :year',
-    't.company_id = :companyId',
+    't.company_id IN (:companyId)',
   ];
 
   if (search) {
@@ -963,7 +963,7 @@ async function getTopEmployeesByPO(filters) {
       INNER JOIN employees e       ON e.id  = t.employee_id
       WHERE EXTRACT(MONTH FROM t.timesheet_date) = :month
         AND EXTRACT(YEAR  FROM t.timesheet_date) = :year
-        AND t.company_id = :companyId
+        AND t.company_id IN (:companyId)
         ${publishGuard ? `AND ${publishGuard}` : ''}
       GROUP BY sp.id, sp.service_po_code, sp.service_po_name, sp.is_billable, c.client_name,
                st.service_type_name, sc.name, e.id, e.employee_code, e.full_name
@@ -1023,7 +1023,7 @@ async function getBillableTrendDetail(filters) {
      INNER JOIN service_types st ON st.id = sp.service_type_id
      WHERE t.timesheet_date >= :windowStart
        AND t.timesheet_date <= :windowEnd
-       AND t.company_id = :companyId
+       AND t.company_id IN (:companyId)
        ${publishGuard}
      GROUP BY year, month, sp.id, sp.service_po_name, sp.is_billable, st.service_type_name
      ORDER BY year, month`,
@@ -1048,7 +1048,21 @@ function buildAnalyticsFilters(filters, replacements) {
   const conditions = [
     't.timesheet_date >= :startDate',
     't.timesheet_date <= :endDate',
-    't.company_id = :companyId',
+    // t.company_id ALONE is not reliable: confirmed cross-BU-resourcing
+    // paths (timesheetService.confirmImport()/createTimesheet() stamp the
+    // IMPORTING/logging actor's own companyId onto the row, not the
+    // referenced Service PO's) and Centralised/BU-less POs (sp.company_id
+    // IS NULL by design, yet the timesheet row itself still carries a real
+    // company_id) both produce a real timesheet row whose t.company_id
+    // does not equal its own sp.company_id — see docs/rbac-redesign/
+    // TESTING_SUMMARY.md's stray-DEFAULT note and servicePOService.js's
+    // belongsToCompanyOrUnassigned() for the BU-less-PO precedent. Every
+    // caller of this function already INNER JOINs service_pos AS sp, so
+    // widening via sp.company_id (same "IN (...) OR IS NULL" convention
+    // used everywhere else in this file) recovers those rows instead of
+    // silently zeroing out tiles/charts for an otherwise-correctly-scoped
+    // actor.
+    '(t.company_id IN (:companyId) OR sp.company_id IN (:companyId) OR sp.company_id IS NULL)',
   ];
   replacements.startDate = startDate;
   replacements.endDate = endDate;
@@ -1466,7 +1480,7 @@ async function getClientWiseCostAnalytics_oldWithMonthlyCost(hoursSource, roleId
      LEFT  JOIN monthly_costs mc
        ON mc.employee_id = t.employee_id
       AND mc.month_year = TO_CHAR(t.timesheet_date, 'YYYY-MM')
-     WHERE t.company_id = :companyId
+     WHERE t.company_id IN (:companyId)
      GROUP BY c.id, c.client_name
      ORDER BY total_cost DESC`,
     { replacements: { companyId }, type: QueryTypes.SELECT }
@@ -1509,7 +1523,7 @@ async function getClientCategoryCostMatrix_oldWithMonthlyCost(hoursSource, roleI
      LEFT  JOIN monthly_costs mc
        ON mc.employee_id = t.employee_id
       AND mc.month_year = TO_CHAR(t.timesheet_date, 'YYYY-MM')
-     WHERE t.company_id = :companyId
+     WHERE t.company_id IN (:companyId)
      GROUP BY c.id, c.client_name, category_name
      ORDER BY c.client_name, category_name`,
     { replacements: { companyId }, type: QueryTypes.SELECT }
@@ -1756,7 +1770,7 @@ function periodKey(dateStr) {
 function buildInvoiceMasterFilters(filters, replacements) {
   const { startDate, endDate, employeeId, clientId, poId, serviceTypeId, companyId } = filters;
 
-  const conditions = ['(sp.company_id = :companyId OR sp.company_id IS NULL)'];
+  const conditions = ['(sp.company_id IN (:companyId) OR sp.company_id IS NULL)'];
   replacements.companyId = companyId;
 
   replacements.startPeriodKey = periodKey(startDate);
@@ -1917,7 +1931,7 @@ async function getClientWiseCostAnalytics(hoursSource, roleId, companyId) {
      FROM timesheets t
      INNER JOIN service_pos sp ON sp.id = t.service_po_id
      INNER JOIN clients c      ON c.id  = sp.client_id
-     WHERE t.company_id = :companyId
+     WHERE (t.company_id IN (:companyId) OR sp.company_id IN (:companyId) OR sp.company_id IS NULL)
      GROUP BY c.id, c.client_name`,
     { replacements: { companyId }, type: QueryTypes.SELECT }
   );
@@ -1930,7 +1944,7 @@ async function getClientWiseCostAnalytics(hoursSource, roleId, companyId) {
      FROM service_po_monthly_budgets spmb
      INNER JOIN service_pos sp ON sp.id = spmb.service_po_id
      INNER JOIN clients c      ON c.id  = sp.client_id
-     WHERE (sp.company_id = :companyId OR sp.company_id IS NULL)
+     WHERE (sp.company_id IN (:companyId) OR sp.company_id IS NULL)
      GROUP BY c.id, c.client_name`,
     { replacements: { companyId }, type: QueryTypes.SELECT }
   );
@@ -1982,7 +1996,7 @@ async function getClientCategoryCostMatrix(hoursSource, roleId, companyId) {
      INNER JOIN clients c             ON c.id  = sp.client_id
      INNER JOIN service_types st      ON st.id = sp.service_type_id
      LEFT  JOIN service_categories sc ON sc.id = st.service_category_id
-     WHERE (sp.company_id = :companyId OR sp.company_id IS NULL)
+     WHERE (sp.company_id IN (:companyId) OR sp.company_id IS NULL)
      GROUP BY c.id, c.client_name, category_name
      ORDER BY c.client_name, category_name`,
     { replacements: { companyId }, type: QueryTypes.SELECT }
@@ -2128,7 +2142,7 @@ async function getProjectWiseAnalytics(filters) {
 async function getBudgetVsBilled(filters) {
   const { startDate, endDate, clientId, poId, serviceTypeId, companyId } = filters;
   const replacements = { companyId };
-  const conditions = ['(sp.company_id = :companyId OR sp.company_id IS NULL)', "(cbm.id IS NULL OR cbm.status = 'active')"];
+  const conditions = ['(sp.company_id IN (:companyId) OR sp.company_id IS NULL)', "(cbm.id IS NULL OR cbm.status = 'active')"];
 
   replacements.startPeriodKey = periodKey(startDate);
   replacements.endPeriodKey = periodKey(endDate);

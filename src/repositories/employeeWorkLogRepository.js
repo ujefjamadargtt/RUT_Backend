@@ -543,16 +543,21 @@ const markSyncedByTuples = async (companyId, tuples, timesheetImportId, transact
 
 /**
  * Revert every work log row currently linked to one of the given
- * timesheet_import_id values back to its pre-sync state — status='pending',
- * synced_at=null, timesheet_import_id=null. Called when an Admin deletes a
- * Timesheet Import (timesheetService.deleteImports): the official Timesheet
- * data for that import is gone, so the source work logs are no longer
- * "reflected in an official Timesheet" and must not be left stuck showing
- * status='synced' with a dangling reference. This is deliberately separate
- * from the DB-level ON DELETE SET NULL on the FK (which only clears the FK
- * column itself, not `status`) — the two together are what make Employee
- * Work Logs genuinely "remain intact" after an import deletion, not merely
- * "not deleted."
+ * timesheet_import_id values back to 'approved' (synced_at=null,
+ * timesheet_import_id=null), same as revertSyncStatusByTuple — a Manager's
+ * approval already happened and must not be re-requested just because the
+ * synced copy was deleted in bulk. Called when an Admin deletes a Timesheet
+ * Import (timesheetService.deleteImports): the official Timesheet data for
+ * that import is gone, so the source work logs are no longer "reflected in
+ * an official Timesheet" and must not be left stuck showing status='synced'
+ * with a dangling reference. This is deliberately separate from the
+ * DB-level ON DELETE SET NULL on the FK (which only clears the FK column
+ * itself, not `status`) — the two together are what make Employee Work
+ * Logs genuinely "remain intact" after an import deletion, not merely "not
+ * deleted."
+ *
+ * Guarded to status='synced' so a row already moved on for an unrelated
+ * reason (e.g. edited back to 'pending', or 'rejected') is never clobbered.
  *
  * @param {number[]} importIds
  * @param {object} [transaction]
@@ -562,9 +567,9 @@ const revertSyncStatusByImportIds = async (importIds, transaction = null) => {
   if (!importIds || importIds.length === 0) return 0;
 
   const [count] = await EmployeeWorkLog.update(
-    { status: 'pending', synced_at: null, timesheet_import_id: null },
+    { status: 'approved', synced_at: null, timesheet_import_id: null },
     {
-      where: { timesheet_import_id: { [Op.in]: importIds } },
+      where: { timesheet_import_id: { [Op.in]: importIds }, status: 'synced' },
       ...(transaction ? { transaction } : {}),
     }
   );

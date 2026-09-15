@@ -300,11 +300,15 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
 /**
  * Fetch a single timesheet entry by primary key with full associations.
  * @param {number} id
+ * @param {number|number[]} companyId - a single BU, or every BU/owned-Company
+ *   the caller can reach (see companyScope() above) — deleteTimesheet() looks
+ *   the row up across the caller's full reach, then acts using the row's own
+ *   resolved company_id from here on.
  * @returns {Promise<Timesheet|null>}
  */
 const findById = async (id, companyId) => {
   return Timesheet.findOne({
-    where: { id, company_id: companyId },
+    where: { id, ...companyScope(companyId) },
     include: buildIncludes(),
   });
 };
@@ -316,13 +320,13 @@ const findById = async (id, companyId) => {
  * timesheet_import_history.id.
  *
  * @param {number[]} ids
- * @param {number} companyId
+ * @param {number|number[]} companyId
  * @returns {Promise<Timesheet[]>}
  */
 const findByIds = async (ids, companyId) => {
   if (!ids || ids.length === 0) return [];
   return Timesheet.findAll({
-    where: { id: { [Op.in]: ids }, company_id: companyId },
+    where: { id: { [Op.in]: ids }, ...companyScope(companyId) },
     attributes: ['id'],
   });
 };

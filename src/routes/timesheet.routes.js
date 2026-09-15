@@ -172,9 +172,16 @@ router.get(
  *       422:
  *         description: ids missing or invalid
  */
+// Deliberately authenticateIdentity, not the shared `authenticate` chain —
+// a delete must succeed for any import/timesheet the caller has genuine
+// access to (through ANY of their Business Units), never narrowed down to
+// whichever ONE happens to be currently active (X-Company-Id) — same
+// principle as resolveActorFullReach()'s single-record-lookup fix
+// (getClientById et al). The controller resolves the caller's full BU/
+// owned-Company reach itself via resolveActorFullReach().
 router.delete(
   '/import',
-  authenticate,
+  authenticateBase.authenticateIdentity,
   validate(bulkIdsSchema, 'body'),
   timesheetController.deleteImports
 );
@@ -654,9 +661,11 @@ router.put(
  *       403:
  *         description: Forbidden — Finance role required
  */
+// See the DELETE /import route above for why this uses authenticateIdentity
+// instead of the shared `authenticate` chain.
 router.delete(
   '/:id',
-  authenticate,
+  authenticateBase.authenticateIdentity,
   timesheetController.deleteTimesheet
 );
 
@@ -698,9 +707,11 @@ router.delete(
  *       403:
  *         description: Forbidden — Finance or HR role required
  */
+// See the DELETE /import route above for why this uses authenticateIdentity
+// instead of the shared `authenticate` chain.
 router.delete(
   '/',
-  authenticate,
+  authenticateBase.authenticateIdentity,
   validate(bulkIdsSchema, 'body'),
   timesheetController.deleteImports
 );
