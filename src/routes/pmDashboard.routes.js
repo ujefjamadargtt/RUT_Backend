@@ -50,7 +50,10 @@ router.use(heavyReportLimiter);
  *     summary: >
  *       KPI row: team size, active projects/Service POs, logged hours,
  *       missing work logs, pending approvals, at-risk projects, overallocated
- *       and bench employees, budget vs billed.
+ *       and bench employees, budget vs billed — plus a `previous` sibling
+ *       object (same period one month back) for trend deltas, and a
+ *       portfolio-wide `project_status_breakdown` for a status donut/pie
+ *       chart.
  *     tags: [PMDashboard]
  *     security:
  *       - bearerAuth: []
@@ -72,7 +75,16 @@ router.use(heavyReportLimiter);
  *         schema: { type: number, default: 20 }
  *         description: "|planned-vs-actual hours variance %| at or above this counts a Project as at risk."
  *     responses:
- *       200: { description: PM Dashboard KPI summary }
+ *       200:
+ *         description: >
+ *           PM Dashboard KPI summary. `previous.team_size` and
+ *           `previous.active_projects` are always null — see
+ *           `previous_period_note` in the response body for why (this
+ *           schema has no historical team-roster/Project-status tracking).
+ *           `project_status_breakdown` is `[{status, count}]` for all 4
+ *           canonical statuses (on_track/at_risk/delayed/inactive), zero-
+ *           filled — `at_risk_projects` is exactly the sum of that
+ *           breakdown's at_risk + delayed counts, so the two never disagree.
  *       401: { description: Unauthorized }
  *       403: { description: Requires the Project Manager tier or above }
  */
@@ -99,7 +111,17 @@ router.get('/summary', authenticatePMDashboard, pmDashboardController.getSummary
  *       - in: query
  *         name: status
  *         schema: { type: string }
- *         description: Project status filter (e.g. active/inactive).
+ *         description: >
+ *           Raw Project lifecycle filter (active/inactive — the only two
+ *           values projects.status itself carries). NOT the same as
+ *           healthStatus below.
+ *       - in: query
+ *         name: healthStatus
+ *         schema: { type: string, enum: [on_track, at_risk, delayed, inactive] }
+ *         description: >
+ *           Filter by the COMPUTED health status (see /pm-dashboard/summary's
+ *           project_status_breakdown) — this is what the Project Overview
+ *           Status filter should use, not `status` above.
  *       - in: query
  *         name: search
  *         schema: { type: string }
@@ -113,7 +135,7 @@ router.get('/summary', authenticatePMDashboard, pmDashboardController.getSummary
  *         name: sortBy
  *         schema:
  *           type: string
- *           enum: [project_name, team_size, planned_hours, actual_hours, variance_pct, overdue_po_count, nearest_end_date]
+ *           enum: [project_name, team_size, planned_hours, actual_hours, variance_pct, overdue_po_count, nearest_end_date, health_status]
  *       - in: query
  *         name: sortOrder
  *         schema: { type: string, enum: [ASC, DESC] }
@@ -124,7 +146,14 @@ router.get('/summary', authenticatePMDashboard, pmDashboardController.getSummary
  *         name: limit
  *         schema: { type: integer }
  *     responses:
- *       200: { description: Paginated project rollup records }
+ *       200:
+ *         description: >
+ *           Paginated project rollup records. Each row carries both
+ *           `risk_flag` (boolean) and `health_status`
+ *           (on_track/at_risk/delayed/inactive) — the canonical status enum,
+ *           computed server-side (see /pm-dashboard/summary's
+ *           project_status_breakdown for the same categorization portfolio-
+ *           wide).
  *       401: { description: Unauthorized }
  *       403: { description: Requires the Project Manager tier or above }
  */
@@ -245,5 +274,40 @@ router.get('/worklog', authenticatePMDashboard, pmDashboardController.getWorklog
  *       403: { description: Requires the Project Manager tier or above }
  */
 router.get('/action-required', authenticatePMDashboard, pmDashboardController.getActionRequired);
+
+/**
+ * @swagger
+ * /pm-dashboard/monthly-hours-trend:
+ *   get:
+ *     summary: >
+ *       Monthly Logged vs Required Hours trend for this Project Manager's
+ *       team, one full calendar year (Jan-Dec) at a time.
+ *     description: >
+ *       BU narrowing uses the SAME mechanism as every other endpoint in this
+ *       module — the `company_id` query param or `X-Company-Id` header —
+ *       there is no separate `buId` parameter. `required_hours` is a flat
+ *       current-team-headcount x 160h/employee/month figure applied to
+ *       every month shown (see the response's own required_hours_note) —
+ *       this schema has no historical team-roster data, so it cannot
+ *       reflect headcount changes that happened during the year.
+ *     tags: [PMDashboard]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: year
+ *         schema: { type: integer }
+ *         description: Defaults to the current server year.
+ *     responses:
+ *       200:
+ *         description: >
+ *           { year, team_size, required_hours_per_employee_per_month,
+ *           required_hours_note, trend: [{ month, year, logged_hours,
+ *           required_hours }] } — always 12 rows, zero-filled for months
+ *           with no logged hours.
+ *       401: { description: Unauthorized }
+ *       403: { description: Requires the Project Manager tier or above }
+ */
+router.get('/monthly-hours-trend', authenticatePMDashboard, pmDashboardController.getMonthlyHoursTrend);
 
 module.exports = router;

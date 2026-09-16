@@ -5,8 +5,13 @@ const assert = require('node:assert/strict');
 
 const {
   resolvePeriod,
+  resolvePreviousPeriod,
   computeRiskFlag,
+  tallyProjectStatusBreakdown,
+  sumHealthBuckets,
   DEFAULT_VARIANCE_THRESHOLD_PCT,
+  AT_RISK_HEALTH_STATUSES,
+  PREVIOUS_PERIOD_UNAVAILABLE_FIELDS,
 } = require('../src/services/pmDashboardService');
 
 test('resolvePeriod defaults to the current server month/year when omitted', () => {
@@ -44,4 +49,66 @@ test('computeRiskFlag: variance below threshold and no overdue POs is not at ris
 test('computeRiskFlag: null variance (no planned hours) and no overdue POs is not at risk', () => {
   const row = { overdue_po_count: 0, variance_pct: null };
   assert.equal(computeRiskFlag(row, 20), false);
+});
+
+test('resolvePreviousPeriod: rolls back within the same year', () => {
+  const { prevMonthNum, prevYearNum, prevAsOfDate } = resolvePreviousPeriod(9, 2026);
+  assert.equal(prevMonthNum, 8);
+  assert.equal(prevYearNum, 2026);
+  // Last calendar day of August 2026.
+  assert.equal(prevAsOfDate.getFullYear(), 2026);
+  assert.equal(prevAsOfDate.getMonth(), 7); // 0-indexed August
+  assert.equal(prevAsOfDate.getDate(), 31);
+});
+
+test('resolvePreviousPeriod: January rolls back into December of the prior year', () => {
+  const { prevMonthNum, prevYearNum, prevAsOfDate } = resolvePreviousPeriod(1, 2026);
+  assert.equal(prevMonthNum, 12);
+  assert.equal(prevYearNum, 2025);
+  assert.equal(prevAsOfDate.getFullYear(), 2025);
+  assert.equal(prevAsOfDate.getMonth(), 11); // 0-indexed December
+  assert.equal(prevAsOfDate.getDate(), 31);
+});
+
+test('tallyProjectStatusBreakdown: returns all 4 buckets, zero-filled, for an empty portfolio', () => {
+  const breakdown = tallyProjectStatusBreakdown([]);
+  assert.deepEqual(breakdown, [
+    { status: 'on_track', count: 0 },
+    { status: 'at_risk', count: 0 },
+    { status: 'delayed', count: 0 },
+    { status: 'inactive', count: 0 },
+  ]);
+});
+
+test('tallyProjectStatusBreakdown: counts each row into its own bucket', () => {
+  const rows = [
+    { health_status: 'on_track' },
+    { health_status: 'on_track' },
+    { health_status: 'at_risk' },
+    { health_status: 'delayed' },
+    { health_status: 'inactive' },
+  ];
+  const breakdown = tallyProjectStatusBreakdown(rows);
+  const asMap = Object.fromEntries(breakdown.map((b) => [b.status, b.count]));
+  assert.deepEqual(asMap, { on_track: 2, at_risk: 1, delayed: 1, inactive: 1 });
+});
+
+test('tallyProjectStatusBreakdown: an unrecognized health_status falls back to on_track rather than being dropped', () => {
+  const breakdown = tallyProjectStatusBreakdown([{ health_status: 'something_unexpected' }]);
+  const asMap = Object.fromEntries(breakdown.map((b) => [b.status, b.count]));
+  assert.equal(asMap.on_track, 1);
+});
+
+test('sumHealthBuckets: at_risk_projects sums exactly the at_risk + delayed buckets', () => {
+  const breakdown = [
+    { status: 'on_track', count: 5 },
+    { status: 'at_risk', count: 2 },
+    { status: 'delayed', count: 3 },
+    { status: 'inactive', count: 1 },
+  ];
+  assert.equal(sumHealthBuckets(breakdown, AT_RISK_HEALTH_STATUSES), 5);
+});
+
+test('PREVIOUS_PERIOD_UNAVAILABLE_FIELDS documents exactly team_size and active_projects', () => {
+  assert.deepEqual(PREVIOUS_PERIOD_UNAVAILABLE_FIELDS, ['team_size', 'active_projects']);
 });

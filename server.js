@@ -1,5 +1,20 @@
 'use strict';
 
+// Force the Node process itself onto UTC, before anything else runs (in
+// particular before any Date object is constructed or the pg driver loads).
+// `employee_work_logs`/`user_sessions`/`password_reset_otps` etc. store
+// `TIMESTAMP` (no time zone) columns; when the process timezone is anything
+// other than UTC (e.g. a host defaulting to Asia/Kolkata), node-postgres's
+// naive-timestamp parser (postgres-date) falls back to interpreting the
+// stored value as PROCESS-LOCAL time instead of UTC, silently shifting every
+// created_at/updated_at/expires_at read by that offset. The DB session
+// itself already writes in UTC (see src/config/database.js's `timezone`
+// option); this line makes the read side agree. IST display conversions are
+// unaffected — they already go through moment-timezone with an explicit
+// 'Asia/Kolkata' zone (src/helpers/dateHelper.js), which doesn't depend on
+// the process's local timezone.
+process.env.TZ = 'UTC';
+
 require('dotenv').config();
 
 require('./src/config/validateEnv')();

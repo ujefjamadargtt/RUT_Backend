@@ -31,29 +31,35 @@ const companyController = require('../controllers/companyController');
  * legitimately needs to load THEIR OWN mapped BUs here too, without gaining
  * Entity Admin's "every company under my owned Entities" scope. Delegates
  * unchanged to requireEntityAdminOrAdmin for Admin/Entity Admin; for a BU
- * Admin with at least one active mapped BU, sets req.employeeBUsOnly so
- * companyController.getAll returns their own mapped BUs instead. Anyone
- * else (including a 0-BU BU Admin) is rejected exactly as before.
+ * Admin (rank 4), Project Admin (rank 5), or Project Manager (rank 6) with
+ * at least one active mapped BU, sets req.employeeBUsOnly so
+ * companyController.getAll returns their own mapped BUs instead — the same
+ * BU-filter dropdown the PM Dashboard screen needs (see the PM Dashboard
+ * capability gate in pmDashboard.routes.js, which grants those same two
+ * ranks access to that module). Anyone else (including a 0-BU actor at any
+ * of these three ranks) is rejected exactly as before.
  *
  * Uses authenticate.authenticateIdentity (not the default authenticate)
  * because resolveCompany is irrelevant to both branches here (Entity Admin/
- * Admin's scope comes from req.entityIds, not req.companyId; a BU Admin's
- * own mapped BUs come straight from req.employeeBusinessUnits) and a
- * multi-BU BU Admin must be able to load this dropdown BEFORE they have
- * picked an active BU to put in X-Company-Id — the same bootstrap
- * requirement as GET /employees/:id/business-units.
+ * Admin's scope comes from req.entityIds, not req.companyId; a BU-mapped
+ * actor's own mapped BUs come straight from req.employeeBusinessUnits) and a
+ * multi-BU actor must be able to load this dropdown BEFORE they have picked
+ * an active BU to put in X-Company-Id — the same bootstrap requirement as
+ * GET /employees/:id/business-units.
  */
+const BU_SCOPED_LISTING_RANKS = [4, 5, 6]; // BU Admin, Project Admin, Project Manager
+
 const allowCompanyListing = (req, res, next) => {
   if (req.hierarchyRank === 2 || (req.userRoleName && req.userRoleName.toLowerCase() === 'entity admin')) {
     return requireEntityAdminOrAdmin(req, res, next);
   }
-  if (req.hierarchyRank === 4 && (req.employeeBusinessUnits || []).length > 0) {
+  if (BU_SCOPED_LISTING_RANKS.includes(req.hierarchyRank) && (req.employeeBusinessUnits || []).length > 0) {
     req.employeeBUsOnly = true;
     return next();
   }
   return res.status(403).json({
     success: false,
-    message: 'Access denied. This action is restricted to Admin, Entity Admin, or a BU Admin with a mapped Business Unit.',
+    message: 'Access denied. This action is restricted to Admin, Entity Admin, or a BU Admin/Project Admin/Project Manager with a mapped Business Unit.',
     code: 'ENTITY_ADMIN_OR_ADMIN_OR_BU_ADMIN_REQUIRED',
   });
 };

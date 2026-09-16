@@ -34,11 +34,32 @@ const HOURS_COL = 'COALESCE(t.modified_hours, t.hours_logged)';
 // Project rollup — one row per Project, aggregating its Service POs.
 // ---------------------------------------------------------------------------
 /**
+ * The canonical, portfolio-wide Project health categorization — computed
+ * here (SQL), not left to the frontend to infer from a sample of loaded
+ * rows. `projects.status` itself is only ever 'active'/'inactive' in this
+ * schema (confirmed by the PM Dashboard audit) — there is no richer
+ * lifecycle enum to read off the Project record directly, so this derives
+ * a 4-bucket health status from the SAME signals the rest of this module
+ * already computes (overdue Service PO, staffing-variance threshold):
+ *   'inactive'  - projects.status <> 'active'
+ *   'delayed'   - active, and >=1 Service PO is overdue (past end_date,
+ *                 not completed/closed/cancelled)
+ *   'at_risk'   - active, not delayed, and |planned-vs-actual hours
+ *                 variance %| >= the caller's varianceThresholdPct
+ *   'on_track'  - active, none of the above
+ * Evaluated in that priority order (mutually exclusive) so every Project
+ * lands in exactly one bucket — safe to sum for a donut/pie chart.
+ */
+const PROJECT_HEALTH_STATUSES = ['on_track', 'at_risk', 'delayed', 'inactive'];
+
+/**
  * @param {object} filters
  * @param {number} filters.monthNum
  * @param {number} filters.yearNum
  * @param {string} filters.asOfDate - 'YYYY-MM-DD', for overdue/timeline risk
- * @param {string} [filters.status] - Project status filter
+ * @param {string} [filters.status] - raw Project status filter (active/inactive)
+ * @param {string} [filters.healthStatus] - one of PROJECT_HEALTH_STATUSES
+ * @param {number} [filters.varianceThresholdPct=20]
  * @param {string} [filters.search]
  * @param {string} [filters.sortBy]
  * @param {string} [filters.sortOrder]
@@ -49,15 +70,20 @@ const HOURS_COL = 'COALESCE(t.modified_hours, t.hours_logged)';
  */
 async function getProjectRollup(filters) {
   const {
-    monthNum, yearNum, asOfDate, status, search,
+    monthNum, yearNum, asOfDate, status, search, healthStatus,
+    varianceThresholdPct = 20,
     sortBy = 'project_name', sortOrder = 'ASC', limit, offset, companyIds,
   } = filters;
 
-  const allowedSort = ['project_name', 'team_size', 'planned_hours', 'actual_hours', 'variance_pct', 'overdue_po_count', 'nearest_end_date'];
+  const allowedSort = ['project_name', 'team_size', 'planned_hours', 'actual_hours', 'variance_pct', 'overdue_po_count', 'nearest_end_date', 'health_status'];
   const safeSort = allowedSort.includes(sortBy) ? sortBy : 'project_name';
   const safeOrder = sortOrder && sortOrder.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
 
-  const replacements = { monthNum, yearNum, asOfDate, limit, offset, companyIds };
+  const replacements = {
+    monthNum, yearNum, asOfDate, limit, offset, companyIds,
+    varianceThresholdPct: parseFloat(varianceThresholdPct),
+    healthStatus: healthStatus && PROJECT_HEALTH_STATUSES.includes(healthStatus) ? healthStatus : null,
+  };
   const conditions = ['p.is_deleted = false', '(p.company_id IN (:companyIds) OR p.company_id IS NULL)'];
   if (status && status !== 'all') { conditions.push('p.status = :status'); replacements.status = status; }
   if (search) {
@@ -115,7 +141,14 @@ async function getProjectRollup(filters) {
     )
   `;
 
-  const dataQuery = `
+  // health_status is a computed CASE expression, not a plain column — it
+  // can't be referenced from a WHERE clause in the same SELECT that defines
+  // it (Postgres doesn't resolve SELECT-list aliases against themselves).
+  // Same idiom already used elsewhere in this codebase for a computed-column
+  // filter (see managementReportRepository.js's varianceFilterClause/
+  // benchFilterClause): compute it in an inner SELECT, filter in an outer
+  // wrapping SELECT.
+  const baseSelect = `
     ${cte}
     SELECT
       isp.id AS project_id, isp.project_code, isp.project_name, isp.project_status,
@@ -131,18 +164,36 @@ async function getProjectRollup(filters) {
         ELSE NULL
       END AS variance_pct,
       COALESCE(risk.overdue_po_count, 0)  AS overdue_po_count,
-      risk.nearest_end_date
+      risk.nearest_end_date,
+      CASE
+        WHEN isp.project_status <> 'active' THEN 'inactive'
+        WHEN COALESCE(risk.overdue_po_count, 0) > 0 THEN 'delayed'
+        WHEN COALESCE(planned.planned_hours, 0) > 0
+          AND ABS((COALESCE(actual.actual_hours, 0) - planned.planned_hours) / planned.planned_hours * 100) >= :varianceThresholdPct
+          THEN 'at_risk'
+        ELSE 'on_track'
+      END AS health_status
     FROM in_scope_projects isp
     LEFT JOIN clients c ON c.id = isp.client_id
     LEFT JOIN team    ON team.project_id = isp.id
     LEFT JOIN planned ON planned.project_id = isp.id
     LEFT JOIN actual  ON actual.project_id = isp.id
     LEFT JOIN risk    ON risk.project_id = isp.id
+  `;
+
+  const healthStatusFilterClause = `WHERE (:healthStatus::text IS NULL OR filtered.health_status = :healthStatus)`;
+
+  const dataQuery = `
+    SELECT * FROM (${baseSelect}) filtered
+    ${healthStatusFilterClause}
     ORDER BY ${safeSort} ${safeOrder} NULLS LAST
     LIMIT :limit OFFSET :offset
   `;
 
-  const countQuery = `${cte} SELECT COUNT(*) AS total FROM in_scope_projects`;
+  const countQuery = `
+    SELECT COUNT(*) AS total FROM (${baseSelect}) filtered
+    ${healthStatusFilterClause}
+  `;
 
   const [rows, countResult] = await Promise.all([
     sequelize.query(dataQuery, { replacements, type: QueryTypes.SELECT }),
@@ -330,7 +381,7 @@ async function getPortfolioCounts({ companyIds }) {
   const [row] = await sequelize.query(
     `SELECT
        (SELECT COUNT(*) FROM clients c
-          WHERE c.is_deleted = false AND (c.company_id IN (:companyIds) OR c.company_id IS NULL)) AS total_clients,
+          WHERE c.status != 'inactive' AND (c.company_id IN (:companyIds) OR c.company_id IS NULL)) AS total_clients,
        (SELECT COUNT(*) FROM projects p
           WHERE p.is_deleted = false AND (p.company_id IN (:companyIds) OR p.company_id IS NULL)) AS total_projects,
        (SELECT COUNT(*) FROM projects p
@@ -445,7 +496,44 @@ async function getAtRiskProjectCount({ companyIds, monthNum, yearNum, asOfDate, 
   return parseInt(row.total, 10);
 }
 
+// ---------------------------------------------------------------------------
+// Monthly logged hours, by team employeeIds, across a whole calendar year —
+// for the Monthly Logged vs Required Hours trend chart. "Required hours" is
+// NOT computed here — it's a flat employeeCount x
+// employeeWorkLogComplianceService.MONTH_THRESHOLD figure, not derived from
+// any real per-month data (see pmDashboardService.getMonthlyHoursTrend's
+// doc comment for why). Scoped by employee_id, not by Service PO/company —
+// matching employeeWorkLogComplianceService's own deliberate choice to
+// include an employee's full cross-BU workload, since this chart exists to
+// compare against that exact same report's threshold.
+// ---------------------------------------------------------------------------
+/**
+ * @param {object} filters
+ * @param {number[]} filters.employeeIds
+ * @param {number} filters.yearNum
+ * @returns {Promise<object[]>} rows: { month, logged_hours } — only months
+ *   with at least one timesheet entry are returned; the service layer
+ *   zero-fills the rest.
+ */
+async function getMonthlyHoursByEmployee({ employeeIds, yearNum }) {
+  if (!employeeIds || employeeIds.length === 0) return [];
+
+  const replacements = { employeeIds, yearNum };
+  return sequelize.query(
+    `SELECT
+       EXTRACT(MONTH FROM t.timesheet_date)::int AS month,
+       ROUND(SUM(${HOURS_COL})::numeric, 2) AS logged_hours
+     FROM timesheets t
+     WHERE t.employee_id IN (:employeeIds)
+       AND EXTRACT(YEAR FROM t.timesheet_date) = :yearNum
+     GROUP BY month
+     ORDER BY month`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+}
+
 module.exports = {
+  PROJECT_HEALTH_STATUSES,
   getProjectRollup,
   getTeamCapacity,
   getPendingApprovals,
@@ -453,4 +541,5 @@ module.exports = {
   getLoggedHoursMTD,
   getBudgetVsBilled,
   getAtRiskProjectCount,
+  getMonthlyHoursByEmployee,
 };

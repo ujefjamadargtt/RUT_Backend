@@ -47,4 +47,7 @@ module.exports = {
   getTeam: buildHandler('PM Dashboard team capacity', pmDashboardService.getTeam, { paginated: true }),
   getWorklog: buildHandler('PM Dashboard work log compliance', pmDashboardService.getWorklog, { paginated: true }),
   getActionRequired: buildHandler('PM Dashboard action required', pmDashboardService.getActionRequired),
+  // Fixed-size (12-row) array, not a paginated list — same convention as
+  // managementReportController.getServiceLineBusinessMix.
+  getMonthlyHoursTrend: buildHandler('PM Dashboard monthly hours trend', pmDashboardService.getMonthlyHoursTrend),
 };

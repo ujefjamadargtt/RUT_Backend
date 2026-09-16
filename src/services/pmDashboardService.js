@@ -4,6 +4,7 @@ const { Op } = require('sequelize');
 const { Employee } = require('../models');
 const employeeAccessControlService = require('./employeeAccessControlService');
 const employeeRepository = require('../repositories/employeeRepository');
+const managerEmployeeMappingRepository = require('../repositories/managerEmployeeMappingRepository');
 const employeeWorkLogComplianceService = require('./employeeWorkLogComplianceService');
 const pmDashboardRepository = require('../repositories/pmDashboardRepository');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
@@ -60,8 +61,30 @@ function resolvePeriod(query) {
 }
 
 /**
- * Copied from employeeWorkLogComplianceService.resolveAuthorizedEmployeeIds
- * (see that file's own doc comment for why this is copied, not imported).
+ * Based on employeeWorkLogComplianceService.resolveAuthorizedEmployeeIds
+ * (see that file's own doc comment for why this is copied, not imported),
+ * PLUS the caller's direct manager_employee_mappings reports pulled in
+ * UNSCOPED by Business Unit.
+ *
+ * Without that addition, this resolved down to
+ * employeeAccessControlService.resolveEmployeeAccessWhere() alone, which
+ * intersects every result (including a caller's own direct reports) against
+ * `companyIds` — the caller's own BU reach. A Project Manager whose direct
+ * reports span more than one BU (a real, confirmed case — see the "Team
+ * Size doesn't match My Team" investigation) would then have their
+ * cross-BU direct reports silently dropped from every PM Dashboard view
+ * (team_size, Team Capacity, Work Log/Approvals, Action Required), while
+ * the My Team screen (managerSelfServiceService.getMyEmployees, which calls
+ * managerEmployeeMappingRepository.findByManager with no companyId — see
+ * that repository's companyScopeOrNull()) shows all of them. Decision: PM
+ * Dashboard's "my team" must match My Team's own definition of "my team"
+ * exactly — a direct report counts regardless of which BU they sit in.
+ *
+ * The caller's OWN record is deliberately excluded from the return value —
+ * resolveEmployeeAccessWhere() adds it for its other callers (Employee
+ * Master/Work Log Compliance, where a PM legitimately needs to see/manage
+ * their own row too), but "team_size"/Team Capacity/Action Required are
+ * about the PM's REPORTS, not the PM themself.
  *
  * @param {object} authContext - { userId, employeeId, hierarchyRank, roleNames }
  * @param {number[]} companyIds
@@ -70,13 +93,21 @@ function resolvePeriod(query) {
 async function resolveTeamEmployeeIds(authContext, companyIds) {
   if (!companyIds || companyIds.length === 0) return [];
 
+  const { employeeId } = authContext;
+  const employeeIds = new Set();
+
+  if (employeeId) {
+    const directReports = await managerEmployeeMappingRepository.findByManager(employeeId);
+    directReports.forEach((m) => employeeIds.add(m.employee_id));
+  }
+
   const accessScopes = await Promise.all(
     companyIds.map((companyId) =>
       employeeAccessControlService.resolveEmployeeAccessWhere({ ...authContext, companyId })
     )
   );
   const companyScope = await employeeRepository.employeeScope(companyIds);
-  const employees = await Employee.findAll({
+  const scopedEmployees = await Employee.findAll({
     where: {
       [Op.and]: [
         { is_deleted: false },
@@ -87,7 +118,13 @@ async function resolveTeamEmployeeIds(authContext, companyIds) {
     attributes: ['id'],
     raw: true,
   });
-  return employees.map((e) => e.id);
+  scopedEmployees.forEach((e) => employeeIds.add(e.id));
+
+  if (employeeId) {
+    employeeIds.delete(employeeId);
+  }
+
+  return [...employeeIds];
 }
 
 function resolveAsOfDate(query) {
@@ -105,9 +142,75 @@ function computeRiskFlag(row, varianceThresholdPct) {
   return row.overdue_po_count > 0 || (variancePct !== null && Math.abs(variancePct) >= varianceThresholdPct);
 }
 
+/**
+ * The previous calendar month/year relative to (monthNum, yearNum), plus an
+ * `asOfDate` for that period — the LAST calendar day of it — for re-running
+ * the at-risk/overdue calculation as it would have read at that point in
+ * time (see getSummary()'s doc comment on why `asOfDate` is shifted, not
+ * just monthNum/yearNum).
+ *
+ * @param {number} monthNum
+ * @param {number} yearNum
+ * @returns {{ prevMonthNum: number, prevYearNum: number, prevAsOfDate: Date }}
+ */
+function resolvePreviousPeriod(monthNum, yearNum) {
+  const prevMonthNum = monthNum === 1 ? 12 : monthNum - 1;
+  const prevYearNum = monthNum === 1 ? yearNum - 1 : yearNum;
+  // Date(year, month, 0) — "day 0" of prevMonthNum+1 — is the last calendar
+  // day of prevMonthNum. prevMonthNum here is already 1-indexed, so passing
+  // it straight as the Date constructor's (0-indexed) month arg lands on
+  // the following month, and day 0 rolls back to the day before it.
+  const prevAsOfDate = new Date(prevYearNum, prevMonthNum, 0);
+  return { prevMonthNum, prevYearNum, prevAsOfDate };
+}
+
+/**
+ * Tally a full (unpaginated) getProjectRollup() result into portfolio-wide
+ * counts per PROJECT_HEALTH_STATUSES bucket — the Projects by Status donut/
+ * pie chart. Always returns all 4 buckets, zero-filled, so the chart has a
+ * stable shape even for an empty portfolio.
+ *
+ * @param {object[]} rows - pmDashboardRepository.getProjectRollup()'s rows,
+ *   each carrying a `health_status` column
+ * @returns {{status: string, count: number}[]}
+ */
+function tallyProjectStatusBreakdown(rows) {
+  const counts = new Map(pmDashboardRepository.PROJECT_HEALTH_STATUSES.map((s) => [s, 0]));
+  rows.forEach((r) => {
+    const key = pmDashboardRepository.PROJECT_HEALTH_STATUSES.includes(r.health_status) ? r.health_status : 'on_track';
+    counts.set(key, counts.get(key) + 1);
+  });
+  return pmDashboardRepository.PROJECT_HEALTH_STATUSES.map((status) => ({ status, count: counts.get(status) }));
+}
+
+function sumHealthBuckets(breakdown, statuses) {
+  return breakdown
+    .filter((b) => statuses.includes(b.status))
+    .reduce((sum, b) => sum + b.count, 0);
+}
+
 // ---------------------------------------------------------------------------
 // GET /pm-dashboard/summary — the KPI row.
 // ---------------------------------------------------------------------------
+const AT_RISK_HEALTH_STATUSES = ['at_risk', 'delayed'];
+
+/**
+ * Fields on the `previous` sibling object that CANNOT be reliably computed
+ * for a past period — both are current-state snapshots in this schema, not
+ * periodized data:
+ *   - team_size: derived from manager_employee_mappings/team_mappings, which
+ *     carry no effective-dated history — only "who reports to whom RIGHT
+ *     NOW." There is no way to ask "who was on this PM's team last month."
+ *   - active_projects: projects.status is a plain current-state column with
+ *     no change history exposed to this module (an AuditLog table exists,
+ *     but reconstructing historical status from it is a materially bigger
+ *     change than this endpoint's scope).
+ * Returned as `null` rather than a fabricated or always-unchanged number —
+ * see the PM Dashboard audit's "if a metric can't be reliably calculated,
+ * say so explicitly" principle.
+ */
+const PREVIOUS_PERIOD_UNAVAILABLE_FIELDS = ['team_size', 'active_projects'];
+
 /**
  * @param {object} query
  * @param {object} authContext - { userId, employeeId, hierarchyRank, roleNames }
@@ -118,6 +221,7 @@ async function getSummary(query, authContext, companyIds) {
   const { monthNum, yearNum } = resolvePeriod(query);
   const asOfDate = resolveAsOfDate(query);
   const varianceThresholdPct = resolveVarianceThresholdPct(query);
+  const { prevMonthNum, prevYearNum, prevAsOfDate } = resolvePreviousPeriod(monthNum, yearNum);
 
   const employeeIds = await resolveTeamEmployeeIds(authContext, companyIds);
 
@@ -125,18 +229,28 @@ async function getSummary(query, authContext, companyIds) {
     portfolio,
     loggedHours,
     budgetVsBilled,
-    atRiskProjectCount,
+    projectRollupAll,
     complianceReport,
     pendingApprovals,
     teamCapacity,
+    prevLoggedHours,
+    prevBudgetVsBilled,
+    prevProjectRollupAll,
+    prevComplianceReport,
+    prevPendingApprovals,
+    prevTeamCapacity,
   ] = await Promise.all([
     pmDashboardRepository.getPortfolioCounts({ companyIds }),
     pmDashboardRepository.getLoggedHoursMTD({ companyIds, monthNum, yearNum }),
     pmDashboardRepository.getBudgetVsBilled({ companyIds, monthNum, yearNum }),
-    pmDashboardRepository.getAtRiskProjectCount({
-      companyIds, monthNum, yearNum,
+    // Unpaginated — the full portfolio, not one page — this is both the
+    // source for project_status_breakdown AND (summed) for at_risk_projects,
+    // so the two numbers can never silently disagree on screen.
+    pmDashboardRepository.getProjectRollup({
+      monthNum, yearNum,
       asOfDate: asOfDate.toISOString().slice(0, 10),
       varianceThresholdPct,
+      limit: 100000, offset: 0, companyIds,
     }),
     employeeWorkLogComplianceService.getReport({ month: monthNum, year: yearNum, limit: 1 }, authContext, companyIds),
     pmDashboardRepository.getPendingApprovals({ employeeIds, monthNum, yearNum, limit: 1, offset: 0 }),
@@ -145,10 +259,37 @@ async function getSummary(query, authContext, companyIds) {
       benchThresholdHours: DEFAULT_BENCH_THRESHOLD_HOURS,
       limit: 10000, offset: 0,
     }),
+    // --- Previous period, for the KPI trend deltas ---
+    pmDashboardRepository.getLoggedHoursMTD({ companyIds, monthNum: prevMonthNum, yearNum: prevYearNum }),
+    pmDashboardRepository.getBudgetVsBilled({ companyIds, monthNum: prevMonthNum, yearNum: prevYearNum }),
+    pmDashboardRepository.getProjectRollup({
+      monthNum: prevMonthNum, yearNum: prevYearNum,
+      asOfDate: prevAsOfDate.toISOString().slice(0, 10),
+      varianceThresholdPct,
+      limit: 100000, offset: 0, companyIds,
+    }),
+    employeeWorkLogComplianceService.getReport({ month: prevMonthNum, year: prevYearNum, limit: 1 }, authContext, companyIds),
+    // Same current `employeeIds` (team roster has no history — see
+    // PREVIOUS_PERIOD_UNAVAILABLE_FIELDS above) against the previous
+    // period's pending/capacity data — "how did THIS team's numbers look
+    // last month," not "who was on the team last month."
+    pmDashboardRepository.getPendingApprovals({ employeeIds, monthNum: prevMonthNum, yearNum: prevYearNum, limit: 1, offset: 0 }),
+    pmDashboardRepository.getTeamCapacity({
+      employeeIds, monthNum: prevMonthNum, yearNum: prevYearNum,
+      benchThresholdHours: DEFAULT_BENCH_THRESHOLD_HOURS,
+      limit: 10000, offset: 0,
+    }),
   ]);
 
   const overallocatedCount = teamCapacity.rows.filter((r) => r.overallocation_flag).length;
   const benchCount = teamCapacity.rows.filter((r) => r.bench_flag).length;
+  const prevOverallocatedCount = prevTeamCapacity.rows.filter((r) => r.overallocation_flag).length;
+  const prevBenchCount = prevTeamCapacity.rows.filter((r) => r.bench_flag).length;
+
+  const projectStatusBreakdown = tallyProjectStatusBreakdown(projectRollupAll.rows);
+  const atRiskProjectCount = sumHealthBuckets(projectStatusBreakdown, AT_RISK_HEALTH_STATUSES);
+  const prevProjectStatusBreakdown = tallyProjectStatusBreakdown(prevProjectRollupAll.rows);
+  const prevAtRiskProjectCount = sumHealthBuckets(prevProjectStatusBreakdown, AT_RISK_HEALTH_STATUSES);
 
   return {
     period: { month: monthNum, year: yearNum },
@@ -169,6 +310,31 @@ async function getSummary(query, authContext, companyIds) {
     pending_approvals: pendingApprovals.count,
     overallocated_employees: overallocatedCount,
     bench_employees: benchCount,
+    // Portfolio-wide (not paginated) — see tallyProjectStatusBreakdown()'s
+    // doc comment. Always all 4 PROJECT_HEALTH_STATUSES buckets, zero-filled.
+    project_status_breakdown: projectStatusBreakdown,
+    // Sibling object mirroring the periodized fields above, for the
+    // frontend to compute its own delta/direction ("+2 vs last month").
+    // team_size/active_projects are `null` — see
+    // PREVIOUS_PERIOD_UNAVAILABLE_FIELDS's doc comment for why.
+    previous: {
+      period: { month: prevMonthNum, year: prevYearNum },
+      team_size: null,
+      active_projects: null,
+      logged_hours_mtd: Math.round(prevLoggedHours * 100) / 100,
+      budget: {
+        invoiced_amount: Math.round(prevBudgetVsBilled.total_invoiced * 100) / 100,
+        billed_amount: Math.round(prevBudgetVsBilled.total_billed * 100) / 100,
+        variance: Math.round((prevBudgetVsBilled.total_invoiced - prevBudgetVsBilled.total_billed) * 100) / 100,
+      },
+      at_risk_projects: prevAtRiskProjectCount,
+      missing_work_logs: prevComplianceReport.meta.total,
+      pending_approvals: prevPendingApprovals.count,
+      overallocated_employees: prevOverallocatedCount,
+      bench_employees: prevBenchCount,
+    },
+    previous_period_unavailable_fields: PREVIOUS_PERIOD_UNAVAILABLE_FIELDS,
+    previous_period_note: 'team_size and active_projects reflect current state only — this schema has no effective-dated history for team roster membership or Project status changes, so a reliable "as of last period" value cannot be computed for either field.',
   };
 }
 
@@ -191,6 +357,8 @@ async function getProjects(query, authContext, companyIds) {
     monthNum, yearNum,
     asOfDate: asOfDate.toISOString().slice(0, 10),
     status: query.status || undefined,
+    healthStatus: query.healthStatus || undefined,
+    varianceThresholdPct,
     search: query.search || undefined,
     sortBy: query.sortBy,
     sortOrder: query.sortOrder,
@@ -266,6 +434,7 @@ async function getActionRequired(query, authContext, companyIds) {
     pmDashboardRepository.getProjectRollup({
       monthNum, yearNum,
       asOfDate: asOfDate.toISOString().slice(0, 10),
+      varianceThresholdPct,
       limit: 200, offset: 0, companyIds,
     }),
     pmDashboardRepository.getTeamCapacity({
@@ -293,15 +462,76 @@ async function getActionRequired(query, authContext, companyIds) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// GET /pm-dashboard/monthly-hours-trend — Logged vs Required hours, by
+// month, for a whole calendar year.
+// ---------------------------------------------------------------------------
+/**
+ * "Required hours" per month is a FLAT figure — this team's current
+ * headcount (employeeIds.length) x
+ * employeeWorkLogComplianceService.MONTH_THRESHOLD (160h/employee/month,
+ * the exact same threshold the Work Log Compliance widget already uses on
+ * this dashboard) — applied identically to every month in the year. It is
+ * NOT derived from a per-month historical headcount: as with
+ * getSummary()'s `previous.team_size`, this schema has no effective-dated
+ * roster history, so "how many people were on this team in March" can't be
+ * reliably answered. If team composition changed materially during the
+ * year, earlier months' required_hours will not reflect who was actually
+ * on the team then — flagged here and in the route's own swagger doc.
+ *
+ * BU narrowing uses the SAME mechanism as every other endpoint in this
+ * module — the `company_id` query param or `X-Company-Id` header, resolved
+ * by resolveReportCompanyScope into `companyIds` before this function ever
+ * runs. There is no separate `buId` parameter.
+ *
+ * @param {object} query - { year }
+ * @param {object} authContext
+ * @param {number[]} companyIds
+ * @returns {Promise<object>}
+ */
+async function getMonthlyHoursTrend(query, authContext, companyIds) {
+  const yearNum = query.year ? parseInt(query.year, 10) : new Date().getFullYear();
+
+  const employeeIds = await resolveTeamEmployeeIds(authContext, companyIds);
+  const rows = await pmDashboardRepository.getMonthlyHoursByEmployee({ employeeIds, yearNum });
+  const loggedByMonth = new Map(rows.map((r) => [r.month, parseFloat(r.logged_hours) || 0]));
+
+  const requiredHoursPerMonth = employeeIds.length * employeeWorkLogComplianceService.MONTH_THRESHOLD;
+
+  const trend = [];
+  for (let month = 1; month <= 12; month += 1) {
+    trend.push({
+      month,
+      year: yearNum,
+      logged_hours: Math.round((loggedByMonth.get(month) || 0) * 100) / 100,
+      required_hours: requiredHoursPerMonth,
+    });
+  }
+
+  return {
+    year: yearNum,
+    team_size: employeeIds.length,
+    required_hours_per_employee_per_month: employeeWorkLogComplianceService.MONTH_THRESHOLD,
+    required_hours_note: 'required_hours = current team headcount x required hours/employee/month, applied flat across every month shown — this schema has no historical team-roster data, so it does not reflect headcount changes that happened during the year.',
+    trend,
+  };
+}
+
 module.exports = {
   getSummary,
   getProjects,
   getTeam,
   getWorklog,
   getActionRequired,
+  getMonthlyHoursTrend,
   // Exported for testing
   resolvePeriod,
+  resolvePreviousPeriod,
   computeRiskFlag,
+  tallyProjectStatusBreakdown,
+  sumHealthBuckets,
   DEFAULT_VARIANCE_THRESHOLD_PCT,
   DEFAULT_BENCH_THRESHOLD_HOURS,
+  AT_RISK_HEALTH_STATUSES,
+  PREVIOUS_PERIOD_UNAVAILABLE_FIELDS,
 };
