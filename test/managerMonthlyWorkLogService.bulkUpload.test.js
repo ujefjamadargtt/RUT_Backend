@@ -196,6 +196,50 @@ test('a row with a blank Description still passes both gates and saves with desc
   assert.equal(submittedCalls[0].entries[0].description, '');
 });
 
+// Regression coverage for today's live incident: one employee's write-time
+// conflict (e.g. "already synced elsewhere") must not abort the rest of an
+// otherwise-valid file — every OTHER employee still gets processed, and the
+// failing one is reported back by name/code instead of just crashing the
+// whole request.
+test('one employee failing at write time is skipped and reported; the rest of the file still succeeds', async () => {
+  stubPrimaryTeam(42, [
+    { id: 1, employee_code: 'E001', status: 'active', is_deleted: false },
+    { id: 2, employee_code: 'E002', status: 'active', is_deleted: false },
+    { id: 3, employee_code: 'E003', status: 'active', is_deleted: false },
+  ]);
+  employeeTimesheetService.loadMappedPOsWithHierarchy = async () => ({
+    mappedPOs: [{ id: 501, service_po_name: 'PO Alpha' }],
+    hierarchyRowsByPOId: new Map(),
+  });
+
+  employeeMonthlyWorkLogService.submitMonthlyWorkLog = async (employeeId) => {
+    if (employeeId === 2) {
+      const err = new Error('This month\'s work log has already been synced to the official Timesheet and can no longer be edited.');
+      err.statusCode = 409;
+      throw err;
+    }
+    return {};
+  };
+
+  const filePath = writeSheet([
+    ['E001', 'Alice', 'PO Alpha', 10, 'work'],
+    ['E002', 'Bob', 'PO Alpha', 8, 'work'],
+    ['E003', 'Carol', 'PO Alpha', 6, 'work'],
+  ]);
+
+  const result = await managerMonthlyWorkLogService.bulkUploadMonthlyWorkLog(42, 10, filePath, PERIOD, 42, '127.0.0.1');
+
+  assert.equal(result.employees_processed, 2);
+  assert.equal(result.employees_failed, 1);
+  assert.equal(result.results.length, 2);
+  assert.deepEqual(result.results.map((r) => r.employee_code).sort(), ['E001', 'E003']);
+
+  assert.equal(result.failures.length, 1);
+  assert.equal(result.failures[0].employee_code, 'E002');
+  assert.equal(result.failures[0].employee_name, 'Bob');
+  assert.match(result.failures[0].error, /already been synced/);
+});
+
 test('Admin-tier caller bypasses the PRIMARY-manager ownership gate entirely', async () => {
   employeeRepository.findByCode = async () => ({ id: 1, status: 'active', is_deleted: false });
   let mappingLookupCalled = false;

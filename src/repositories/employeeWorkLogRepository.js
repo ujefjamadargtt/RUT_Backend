@@ -1053,20 +1053,32 @@ const deleteByEmployeeAndDateRange = async (employeeId, startDate, endDate, comp
 
 /**
  * Whether this employee has at least one 'synced' row within an inclusive
- * work_date range — guards the Monthly Work Log REPLACE-SAVE
- * (employeeMonthlyWorkLogService.submitMonthlyWorkLog/deleteMonthlyWorkLog)
- * from silently wiping a row that has already been synced to the official
- * Timesheet (see EmployeeWorkLog.js's status doc comment: "Synced rows are
- * read-only").
+ * work_date range, scoped to one Business Unit — guards the Monthly Work
+ * Log REPLACE-SAVE (employeeMonthlyWorkLogService.submitMonthlyWorkLog/
+ * deleteMonthlyWorkLog) from silently wiping a row that has already been
+ * synced to the official Timesheet (see EmployeeWorkLog.js's status doc
+ * comment: "Synced rows are read-only").
+ *
+ * MUST be scoped by companyId: a cross-BU-mapped employee can have a
+ * genuinely-synced row this same month under a DIFFERENT Business Unit
+ * (cross-BU resourcing is intentionally allowed — see this file's own
+ * header doc). Without this filter, that unrelated BU's synced row falsely
+ * blocks an import for a BU that has never synced anything for this
+ * employee this month — confirmed live: a BU005 import for an employee
+ * with an unrelated synced row under a different company_id was rejected
+ * with "already been synced," even though BU005 itself had no synced data
+ * for that employee/month at all.
  * @param {number} employeeId
  * @param {string} startDate - "YYYY-MM-DD"
  * @param {string} endDate - "YYYY-MM-DD"
+ * @param {number} companyId
  * @returns {Promise<boolean>}
  */
-const hasSyncedEntriesInRange = async (employeeId, startDate, endDate) => {
+const hasSyncedEntriesInRange = async (employeeId, startDate, endDate, companyId) => {
   const row = await EmployeeWorkLog.findOne({
     where: {
       employee_id: employeeId,
+      company_id: companyId,
       work_date: { [Op.gte]: startDate, [Op.lte]: endDate },
       status: 'synced',
     },

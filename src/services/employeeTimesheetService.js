@@ -442,7 +442,7 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
   // reinserted wholesale — must not silently discard a row that's already
   // been synced to the official Timesheet (see EmployeeWorkLog.js's status
   // doc comment: "Synced rows are read-only").
-  if (await employeeWorkLogRepository.hasSyncedEntriesInRange(employeeId, dateStr, dateStr)) {
+  if (await employeeWorkLogRepository.hasSyncedEntriesInRange(employeeId, dateStr, dateStr, companyId)) {
     throw conflictError(
       `${dateStr} has already been synced to the official Timesheet and can no longer be edited.`
     );

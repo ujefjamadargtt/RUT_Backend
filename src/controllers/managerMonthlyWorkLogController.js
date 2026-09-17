@@ -102,7 +102,9 @@ const bulkUpload = async (req, res, next) => {
       req.hierarchyRank,
       callerBuIds(req)
     );
-    const message = `Upload complete. ${result.employees_processed} employee(s) updated, ${result.total_rows} entries saved and approved.`;
+    const message = result.employees_failed > 0
+      ? `Upload finished with errors. ${result.employees_processed} employee(s) updated, ${result.employees_failed} employee(s) failed — see "failures" for details.`
+      : `Upload complete. ${result.employees_processed} employee(s) updated, ${result.total_rows} entries saved and approved.`;
     return sendSuccess(res, result, message);
   } catch (err) {
     if (err.statusCode === 422 && err.details) {

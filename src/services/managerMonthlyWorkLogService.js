@@ -465,15 +465,39 @@ const bulkUploadMonthlyWorkLog = async (managerUserId, companyId, filePath, peri
     rowsByEmployeeId.get(row.employee_id).push(row);
   }
 
+  // Gates 1/2 above already reject the WHOLE file up front on a bad row
+  // (typo/mapping problem — nothing written yet, uploader just fixes the
+  // file and re-uploads). This loop is different: every row already passed
+  // both gates, so a failure here is a per-EMPLOYEE business-state conflict
+  // discovered only at write time (e.g. that employee's month is already
+  // synced elsewhere) — unrelated employees in the same file must not be
+  // blocked by it. Each employee's REPLACE-SAVE is already its own
+  // transaction (submitMonthlyWorkLog), so catching one employee's failure
+  // here and continuing cannot leave THAT employee half-written; it only
+  // stops that one employee's own write, exactly like skipping their row
+  // entirely.
   const results = [];
+  const failures = [];
   for (const [employeeId, rows] of rowsByEmployeeId) {
     const entries = rows.map((r) => ({ service_po_id: r.service_po_id, hours: r.hours, description: r.description }));
-    await employeeMonthlyWorkLogService.submitMonthlyWorkLog(employeeId, companyId, { month, year, entries }, {
-      creatorId: actorId,
-      forceApproved: true,
-      allowHierarchyNode: false,
-    });
-    results.push({ employee_id: employeeId, employee_code: rows[0].employee_code, entry_count: entries.length });
+    try {
+      await employeeMonthlyWorkLogService.submitMonthlyWorkLog(employeeId, companyId, { month, year, entries }, {
+        creatorId: actorId,
+        forceApproved: true,
+        allowHierarchyNode: false,
+      });
+      results.push({ employee_id: employeeId, employee_code: rows[0].employee_code, entry_count: entries.length });
+    } catch (err) {
+      logger.warn('Manager bulk-upload: one employee failed, continuing with the rest', {
+        managerUserId, employeeId, employeeCode: rows[0].employee_code, month, year, error: err.message,
+      });
+      failures.push({
+        employee_id: employeeId,
+        employee_code: rows[0].employee_code,
+        employee_name: rows[0].employee_name,
+        error: err.message,
+      });
+    }
   }
 
   await createAuditLog(
@@ -482,20 +506,22 @@ const bulkUploadMonthlyWorkLog = async (managerUserId, companyId, filePath, peri
     'employee_work_logs',
     null,
     null,
-    { bulk_upload: true, month, year, employees: results.length, total_rows: resolvedRows.length },
+    { bulk_upload: true, month, year, employees: results.length, failed: failures.length, total_rows: resolvedRows.length },
     ipAddress
   );
 
   logger.info('Manager bulk-uploaded Monthly Work Log', {
-    managerUserId, month, year, employees: results.length, totalRows: resolvedRows.length, actorId,
+    managerUserId, month, year, employees: results.length, failed: failures.length, totalRows: resolvedRows.length, actorId,
   });
 
   return {
     month,
     year,
     employees_processed: results.length,
+    employees_failed: failures.length,
     total_rows: resolvedRows.length,
     results,
+    failures,
   };
 };
 

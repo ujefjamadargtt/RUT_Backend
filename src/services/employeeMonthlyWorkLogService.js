@@ -140,7 +140,7 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data, options = {}) =
   // below) and reinserted wholesale — must not silently discard a row
   // that's already been synced to the official Timesheet (see
   // EmployeeWorkLog.js's status doc comment: "Synced rows are read-only").
-  if (await employeeWorkLogRepository.hasSyncedEntriesInRange(employeeId, startDate, endDate)) {
+  if (await employeeWorkLogRepository.hasSyncedEntriesInRange(employeeId, startDate, endDate, companyId)) {
     throw conflictError(
       `This month's work log has already been synced to the official Timesheet and can no longer be edited.`
     );
@@ -263,7 +263,7 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data, options = {}) =
 const deleteMonthlyWorkLog = async (employeeId, companyId, month, year) => {
   const { startDate, endDate } = dateHelper.getMonthBounds(month, year);
 
-  if (await employeeWorkLogRepository.hasSyncedEntriesInRange(employeeId, startDate, endDate)) {
+  if (await employeeWorkLogRepository.hasSyncedEntriesInRange(employeeId, startDate, endDate, companyId)) {
     throw conflictError(
       `This month's work log has already been synced to the official Timesheet and can no longer be deleted.`
     );
