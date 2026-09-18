@@ -862,6 +862,120 @@ async function getMonthlyResourceUtilization(query, companyIds) {
   return buildPivotResponse(rawColumns, rawRows, count, page, limit);
 }
 
+const RESOURCE_MONTHLY_UTILIZATION_CAPACITY = 176;
+
+/**
+ * Resource Monthly Utilization Report
+ *
+ * A NEW report combining the Resource Project Utilization report's
+ * employee/month/client/project/service-type filter scope with the Monthly
+ * Resource Utilization report's billable/non-billable classification and
+ * utilization formula. Does not read from or alter either source report's
+ * endpoint — getResourceUtilization()/getMonthlyResourceUtilization() above
+ * and getResourseProjectUtilizationReport() below are untouched.
+ *
+ * Reuses buildPivotResponse() as-is for the billable/non-billable/leave
+ * classification and the existing Monthly Resource Utilization "Overall
+ * Utilization %" formula (total_utilization / 176-hr monthly_capacity * 100,
+ * where total_utilization excludes leave hours) — not reimplemented here.
+ * Billable/Non-Billable Utilization % are each computed against the same
+ * fixed 176-hr capacity independently (Billable Hours / 176, Non-Billable
+ * Hours / 176) — intentionally NOT against Total Hours, per product spec.
+ * The page/summary totals are derived from aggregated hours (via
+ * buildPivotResponse's own summary reduction), never from averaging
+ * per-employee percentages.
+ *
+ * @param {object} query - req.query (month, year required)
+ * @returns {Promise<{ data, meta, summary, month, year }>}
+ */
+async function getResourceMonthlyUtilizationReport(query, companyIds) {
+  const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
+
+  if (!filters.month || !filters.year) {
+    const err = new Error('month and year query parameters are required for this report.');
+    err.statusCode = 422;
+    throw err;
+  }
+  if (filters.month < 1 || filters.month > 12) {
+    const err = new Error('month must be between 1 and 12.');
+    err.statusCode = 422;
+    throw err;
+  }
+
+  const { page, limit, offset } = getPaginationParams(query);
+
+  const clientId = query.clientId ? parseInt(query.clientId, 10) : undefined;
+  // poId is accepted as an alias for projectId, same convention as the
+  // Resource Project Utilization report.
+  const poId = query.poId
+    ? parseInt(query.poId, 10)
+    : (query.projectId ? parseInt(query.projectId, 10) : undefined);
+  const serviceTypeId = query.serviceTypeId ? parseInt(query.serviceTypeId, 10) : undefined;
+
+  logger.info('Report: getResourceMonthlyUtilizationReport', {
+    filters, page, limit, clientId, poId, serviceTypeId,
+  });
+
+  const { columns: rawColumns, rows: rawRows, count } = await reportRepo.getResourceMonthlyUtilization({
+    month:      filters.month,
+    year:       filters.year,
+    employeeId: filters.employeeId,
+    clientId,
+    poId,
+    serviceTypeId,
+    search:     filters.search,
+    limit,
+    offset,
+    hoursSource: filters.hoursSource,
+    roleId: filters.roleId,
+    companyIds,
+  });
+
+  const { data: pivotData, summary: pivotSummary } = buildPivotResponse(rawColumns, rawRows, count, page, limit);
+
+  const utilizationAgainstCapacity = (hours, capacity) => (
+    capacity > 0 ? round2((parseFloat(hours) || 0) / capacity * 100) : 0
+  );
+
+  const data = pivotData.map((emp) => ({
+    employeeId: emp.employee_id,
+    employeeCode: emp.employee_code,
+    employeeName: emp.full_name,
+    month: filters.month,
+    year: filters.year,
+    billableHours: emp.billable_total,
+    nonBillableHours: emp.non_billable_total,
+    totalHours: emp.total_hours,
+    billableUtilizationPercentage: utilizationAgainstCapacity(emp.billable_total, RESOURCE_MONTHLY_UTILIZATION_CAPACITY),
+    nonBillableUtilizationPercentage: utilizationAgainstCapacity(emp.non_billable_total, RESOURCE_MONTHLY_UTILIZATION_CAPACITY),
+    overallUtilizationPercentage: emp.utilization_percentage,
+  }));
+
+  const meta = getPaginationMeta(count, page, limit);
+
+  // Billable/Non-Billable % at the summary level are against the SUMMED
+  // capacity across every employee on the page (176 × employee count) — the
+  // same aggregation basis buildPivotResponse itself uses internally for
+  // Overall Utilization % (pageSummary.monthly_capacity), so all three
+  // summary percentages share one consistent divisor. Derived here from the
+  // per-employee monthly_capacity already present on each pivotData row
+  // (not reimplemented — buildPivotResponse computed that same total for
+  // its own utilization_percentage, it just doesn't expose the raw sum).
+  const totalCapacity = pivotData.reduce((sum, emp) => sum + (parseFloat(emp.monthly_capacity) || 0), 0);
+
+  const summary = {
+    billableHours: pivotSummary.billable_total,
+    nonBillableHours: pivotSummary.non_billable_total,
+    totalHours: pivotSummary.total_hours,
+    billableUtilizationPercentage: utilizationAgainstCapacity(pivotSummary.billable_total, totalCapacity),
+    nonBillableUtilizationPercentage: utilizationAgainstCapacity(pivotSummary.non_billable_total, totalCapacity),
+    overallUtilizationPercentage: pivotSummary.utilization_percentage,
+  };
+
+  return { data, meta, summary, month: filters.month, year: filters.year };
+}
+
 async function getResourseProjectUtilizationReport(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
 
@@ -1802,6 +1916,7 @@ module.exports = {
   getInvoicePOSummary,
   getResourceUtilization,
   getMonthlyResourceUtilization,
+  getResourceMonthlyUtilizationReport,
   getResourseProjectUtilizationReport,
   getClientServicePOHoursReport,
   getClientCostAnalytics,

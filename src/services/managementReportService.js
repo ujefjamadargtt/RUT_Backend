@@ -533,6 +533,150 @@ async function getServiceLineBusinessMix(query, companyIds) {
   };
 }
 
+/**
+ * Same (month & year) OR (startMonth/startYear/endMonth/endYear) shorthand
+ * getInvoiceRealizationTrend already establishes, factored out here since
+ * all 3 reports below need it.
+ */
+function resolveMonthRange(query) {
+  let { startMonth, startYear, endMonth, endYear, month, year } = query;
+  if (!startMonth && month && year) {
+    startMonth = month; startYear = year; endMonth = month; endYear = year;
+  }
+  if (!startMonth || !startYear || !endMonth || !endYear) {
+    const err = new Error('Provide either (month & year) or (startMonth, startYear, endMonth, endYear).');
+    err.statusCode = 422;
+    throw err;
+  }
+  return {
+    startMonth: parseInt(startMonth, 10), startYear: parseInt(startYear, 10),
+    endMonth: parseInt(endMonth, 10), endYear: parseInt(endYear, 10),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 11. Project Manager-wise Utilization Report
+// ---------------------------------------------------------------------------
+async function getPMWiseUtilization(query, companyIds) {
+  const { page, limit, offset } = getPaginationParams(query);
+  const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
+  const range = resolveMonthRange(query);
+
+  logger.info('ManagementReport: getPMWiseUtilization', { range, page, limit });
+
+  const { rows, count } = await managementReportRepo.getPMWiseUtilization({
+    ...range, search: filters.search, sortBy: filters.sortBy, sortOrder: filters.sortOrder,
+    hoursSource: filters.hoursSource, limit, offset, companyIds,
+  });
+
+  const meta = getPaginationMeta(count, page, limit);
+  const totals = rows.reduce((acc, r) => {
+    acc.resources += parseInt(r.resource_count, 10) || 0;
+    acc.projects += parseInt(r.project_count, 10) || 0;
+    acc.logged += parseFloat(r.total_logged_hours) || 0;
+    acc.available += parseFloat(r.total_available_hours) || 0;
+    return acc;
+  }, { resources: 0, projects: 0, logged: 0, available: 0 });
+
+  return {
+    data: rows,
+    meta,
+    summary: {
+      total_resource_count: totals.resources,
+      total_project_count: totals.projects,
+      total_logged_hours: round2(totals.logged),
+      total_available_hours: round2(totals.available),
+      utilization_pct: totals.available > 0 ? round2((totals.logged / totals.available) * 100) : 0,
+    },
+    period: range,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 12. Project-wise Utilization Report
+// ---------------------------------------------------------------------------
+async function getProjectWiseUtilization(query, companyIds) {
+  const { page, limit, offset } = getPaginationParams(query);
+  const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
+  const range = resolveMonthRange(query);
+
+  logger.info('ManagementReport: getProjectWiseUtilization', { range, page, limit });
+
+  const { rows, count } = await managementReportRepo.getProjectWiseUtilization({
+    ...range, search: filters.search, sortBy: filters.sortBy, sortOrder: filters.sortOrder,
+    hoursSource: filters.hoursSource, limit, offset, companyIds,
+  });
+
+  const meta = getPaginationMeta(count, page, limit);
+  const totals = rows.reduce((acc, r) => {
+    acc.resources += parseInt(r.resource_count, 10) || 0;
+    acc.logged += parseFloat(r.total_logged_hours) || 0;
+    acc.available += parseFloat(r.total_available_hours) || 0;
+    return acc;
+  }, { resources: 0, logged: 0, available: 0 });
+
+  return {
+    data: rows,
+    meta,
+    summary: {
+      total_resource_count: totals.resources,
+      total_logged_hours: round2(totals.logged),
+      total_available_hours: round2(totals.available),
+      utilization_pct: totals.available > 0 ? round2((totals.logged / totals.available) * 100) : 0,
+    },
+    period: range,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 13. Month-wise Bench Report — org-wide monthly Bench %, one row per month.
+// ---------------------------------------------------------------------------
+async function getMonthWiseBench(query, companyIds) {
+  const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
+  const range = resolveMonthRange(query);
+
+  logger.info('ManagementReport: getMonthWiseBench', { range });
+
+  const monthly = await managementReportRepo.getMonthWiseBench({
+    ...range, hoursSource: filters.hoursSource, companyIds,
+  });
+
+  return {
+    data: monthly,
+    period: range,
+    note: 'Training has no service_type/service_po value in this schema today, so only Bench (idle/on bench) hours are excluded — Training exclusion is a no-op until such a category exists in the data.',
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 14. Resource-wise Bench % Report — companion to getMonthWiseBench above
+// (same source Excel tab, split into 2 reports per product decision).
+// ---------------------------------------------------------------------------
+async function getResourceWiseBench(query, companyIds) {
+  const { page, limit, offset } = getPaginationParams(query);
+  const filters = parseCommonFilters(query);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
+  const range = resolveMonthRange(query);
+
+  logger.info('ManagementReport: getResourceWiseBench', { range, page, limit });
+
+  const { rows, count } = await managementReportRepo.getResourceWiseBench({
+    ...range, sortBy: filters.sortBy, sortOrder: filters.sortOrder,
+    hoursSource: filters.hoursSource, limit, offset, companyIds,
+  });
+
+  const meta = getPaginationMeta(count, page, limit);
+
+  return {
+    data: rows,
+    meta,
+    period: range,
+  };
+}
+
 module.exports = {
   getServicePOProfitability,
   getBudgetedMarginForecast,
@@ -544,4 +688,8 @@ module.exports = {
   getDeliveryHeadPerformance,
   getInvoiceRealizationTrend,
   getServiceLineBusinessMix,
+  getPMWiseUtilization,
+  getProjectWiseUtilization,
+  getMonthWiseBench,
+  getResourceWiseBench,
 };

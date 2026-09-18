@@ -1067,6 +1067,94 @@ router.get(
 
 /**
  * @swagger
+ * /reports/resource-monthly-utilization:
+ *   get:
+ *     summary: Employee/resource-wise monthly utilization — Billable, Non-Billable, and Overall utilization %, each against the 176-hr monthly capacity
+ *     description: >
+ *       A NEW report combining the Resource Project Utilization report's
+ *       employee/month/client/project/service-type filter scope with the
+ *       Monthly Resource Utilization report's billable/non-billable
+ *       classification and utilization formula. Does not modify either
+ *       source report.
+ *       Billable Utilisation % = Billable Hours / 176 × 100.
+ *       Non-Billable Utilisation % = Non-Billable Hours / 176 × 100
+ *       (computed independently of each other — never against Total Hours).
+ *       Overall Utilisation % reuses the existing Monthly Resource
+ *       Utilization report's formula unchanged: (Total Hours − Leave Hours)
+ *       / 176 × 100. Summary totals are computed from aggregated hours
+ *       across the full filtered result set, not by averaging per-employee
+ *       percentages.
+ *     tags: [Reports]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         required: true
+ *         schema: { type: integer, minimum: 1, maximum: 12 }
+ *         description: Month number (1-12)
+ *       - in: query
+ *         name: year
+ *         required: true
+ *         schema: { type: integer }
+ *         description: Four-digit year
+ *       - in: query
+ *         name: employeeId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: clientId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: poId
+ *         schema: { type: integer }
+ *         description: Filter by Service PO (project). `projectId` is accepted as an alias.
+ *       - in: query
+ *         name: projectId
+ *         schema: { type: integer }
+ *         description: Alias for poId.
+ *       - in: query
+ *         name: serviceTypeId
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: search
+ *         schema: { type: string }
+ *         description: Search by employee name or code
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, minimum: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, minimum: 1, maximum: 100 }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
+ *     responses:
+ *       200:
+ *         description: >
+ *           Paginated employee rows — employeeId, employeeCode, employeeName,
+ *           month, year, billableHours, nonBillableHours, totalHours,
+ *           billableUtilizationPercentage, nonBillableUtilizationPercentage,
+ *           overallUtilizationPercentage. summary carries the same fields
+ *           aggregated across the full filtered result set.
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ *       422:
+ *         description: Validation error – month and year are required
+ */
+router.get(
+  '/resource-monthly-utilization',
+  authenticateMultiBU,
+  reportController.getResourceMonthlyUtilization
+);
+
+/**
+ * @swagger
  * /reports/client-service-po-hours:
  *   get:
  *     summary: Hours grouped by Client then Service PO

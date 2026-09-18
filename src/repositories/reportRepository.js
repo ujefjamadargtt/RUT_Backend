@@ -1848,6 +1848,162 @@ async function getMonthlyResourceUtilization(filters) {
   };
 }
 
+/**
+ * Resource Monthly Utilization Report — a NEW, standalone query. It is
+ * deliberately NOT a shared/modified version of getMonthlyResourceUtilization
+ * above: it adds optional clientId/poId/serviceTypeId filters (borrowed from
+ * the Resource Project Utilization report's filter set) that
+ * getMonthlyResourceUtilization does not support, and keeping this as a
+ * separate function guarantees the existing Monthly Resource Utilization
+ * report's query/behavior is untouched.
+ *
+ * The employee × service-type pivot shape (columns/rows) returned here is
+ * identical to getMonthlyResourceUtilization's, so it feeds the SAME
+ * buildPivotResponse() aggregation in reportService.js — billable/
+ * non-billable classification, leave detection, and the 176-hr
+ * total_utilization/monthly_capacity formula are reused as-is, not
+ * reimplemented.
+ *
+ * @param {object} filters
+ * @param {number} filters.month          - required
+ * @param {number} filters.year           - required
+ * @param {number} [filters.employeeId]
+ * @param {number} [filters.clientId]
+ * @param {number} [filters.poId]         - Service PO / project id
+ * @param {number} [filters.serviceTypeId]
+ * @param {string} [filters.search]
+ * @param {number} filters.limit
+ * @param {number} filters.offset
+ * @returns {{ columns: object[], rows: object[], count: number }}
+ */
+async function getResourceMonthlyUtilization(filters) {
+  const {
+    month, year, employeeId, clientId, poId, serviceTypeId, search,
+    limit, offset, hoursSource, roleId,
+  } = filters;
+  // hoursSource = 'O' -> original hours_logged. Anything else/default
+  // (including no roleId, or roleId != 5) -> modified_hours. roleId plays no
+  // part in this selection — only hoursSource does.
+  const hoursCol = (hoursSource === 'O')
+    ? 't.hours_logged'
+    : 'COALESCE(t.modified_hours, t.hours_logged)';
+
+  const replacements = {
+    month: parseInt(month, 10),
+    year: parseInt(year, 10),
+    limit,
+    offset,
+    companyIds: filters.companyIds,
+  };
+
+  const conditions = [
+    "EXTRACT(MONTH FROM t.timesheet_date) = :month",
+    "EXTRACT(YEAR  FROM t.timesheet_date) = :year",
+    "t.company_id IN (:companyIds)",
+    "e.is_deleted = false",
+    "e.status = 'active'",
+    "sp.is_deleted = false",
+    "st.is_deleted = false",
+    "sc.is_deleted = false",
+  ];
+
+  if (employeeId) {
+    conditions.push('e.id = :employeeId');
+    replacements.employeeId = parseInt(employeeId, 10);
+  }
+  if (clientId) {
+    conditions.push('c.id = :clientId');
+    replacements.clientId = parseInt(clientId, 10);
+  }
+  if (poId) {
+    conditions.push('sp.id = :poId');
+    replacements.poId = parseInt(poId, 10);
+  }
+  if (serviceTypeId) {
+    conditions.push('st.id = :serviceTypeId');
+    replacements.serviceTypeId = parseInt(serviceTypeId, 10);
+  }
+  if (search) {
+    conditions.push('(e.full_name ILIKE :search OR e.employee_code ILIKE :search)');
+    replacements.search = `%${search}%`;
+  }
+  // Role ID 5 only: exclude unpublished timesheet rows.
+  const publishGuard = Number(roleId) === 5
+    ? `EXISTS (SELECT 1 FROM timesheet_import_history h WHERE h.id = t.timesheet_import_id AND h.is_publish = true)`
+    : '';
+  if (publishGuard) conditions.push(publishGuard);
+
+  const baseFrom = `
+    FROM timesheets t
+    JOIN employees e           ON e.id  = t.employee_id
+    JOIN service_pos sp        ON sp.id = t.service_po_id
+    JOIN clients c              ON c.id  = sp.client_id
+    JOIN service_types st      ON st.id = sp.service_type_id
+    JOIN service_categories sc ON sc.id = st.service_category_id
+  `;
+  const whereClause = `WHERE ${conditions.join(' AND ')}`;
+
+  // Dynamic column headers: categories + service types with data in the period
+  const columnsQuery = `
+    SELECT DISTINCT
+      sc.id               AS category_id,
+      sc.name             AS category_name,
+      st.id               AS service_type_id,
+      st.service_type_name
+    ${baseFrom}
+    ${whereClause}
+    ORDER BY sc.name, st.service_type_name
+  `;
+
+  // Count distinct employees
+  const countQuery = `
+    SELECT COUNT(DISTINCT t.employee_id) AS total
+    ${baseFrom}
+    ${whereClause}
+  `;
+
+  // CTE: paged employee list. Main SELECT: employee × service_type hours,
+  // with the fixed 176-hr monthly_capacity the utilization % is computed
+  // against (same literal getMonthlyResourceUtilization uses).
+  const dataQuery = `
+    WITH emp_page AS (
+      SELECT DISTINCT e.id AS employee_id, e.full_name
+      ${baseFrom}
+      ${whereClause}
+      ORDER BY e.full_name
+      LIMIT :limit OFFSET :offset
+    )
+    SELECT
+      e.id                      AS employee_id,
+      e.employee_code,
+      e.full_name,
+      176                       AS monthly_capacity,
+      st.id                     AS service_type_id,
+      st.service_type_name,
+      sc.id                     AS category_id,
+      sc.name                   AS category_name,
+      ROUND(SUM(${hoursCol})::NUMERIC, 4) AS hours
+    ${baseFrom}
+    JOIN emp_page ep  ON ep.employee_id = e.id
+    ${whereClause}
+    GROUP BY
+      e.id, e.employee_code, e.full_name, st.id, st.service_type_name, sc.id, sc.name
+    ORDER BY e.full_name, sc.name, st.service_type_name
+  `;
+
+  const [columns, countResult, rows] = await Promise.all([
+    sequelize.query(columnsQuery, { replacements, type: QueryTypes.SELECT }),
+    sequelize.query(countQuery, { replacements, type: QueryTypes.SELECT }),
+    sequelize.query(dataQuery, { replacements, type: QueryTypes.SELECT }),
+  ]);
+
+  return {
+    columns,
+    rows,
+    count: parseInt(countResult[0].total, 10),
+  };
+}
+
 async function getResourseProjectUtilizationReport(filters) {
   const {
     month,
@@ -2837,6 +2993,7 @@ module.exports = {
   getInvoicePOSummary,
   getResourceUtilization,
   getMonthlyResourceUtilization,
+  getResourceMonthlyUtilization,
   getClientCostAnalyticsHours,
   getClientCostAnalyticsCost,
   getClientCategoryCostMatrixReport,

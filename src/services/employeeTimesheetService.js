@@ -11,7 +11,7 @@ const servicePOHierarchyDTO = require('../dtos/servicePOHierarchyDTO');
 const dateHelper = require('../helpers/dateHelper');
 const { calculateHoursFromTimes, assertNoOverlappingEntries, sumHours } = require('../helpers/workLogTimeHelper');
 const logger = require('../utils/logger');
-const managerEmployeeMappingRepository = require('../repositories/managerEmployeeMappingRepository');
+const employeeServicePOMappingService = require('./employeeServicePOMappingService');
 const emailLogService = require('./emailLogService');
 const { buildApprovalReminderEmailSubject, buildApprovalReminderEmailHtml } = require('../utils/emailTemplates');
 const frontendConfig = require('../config/frontend.config');
@@ -1408,24 +1408,35 @@ const getMappedProjects = async (employeeId, companyId) => {
 
 /**
  * POST /employee-timesheets/remind-approval — "Remind for Approval" feature.
- * Employee-initiated: sends a reminder email to the CALLER's own active
- * PRIMARY Manager (see managerEmployeeMappingRepository.
- * findActivePrimaryManagerForEmployee) that their work logs/timesheet are
- * pending approval. `employeeId`/`employeeName` always come from the
- * authenticated caller's own token/session (req.employeeId, req.user) —
- * never from the request body, and this never resolves any OTHER
- * employee's manager.
+ * Employee-initiated: sends a reminder email to every Project Manager
+ * mapped (via the existing employee_servicepo_mapping table — see
+ * employeeServicePOMappingService.getProjectManagersForServicePOs) to a
+ * Service PO the caller has PENDING work against. This REPLACES the
+ * previous Primary-Manager-only recipient logic as part of the Timesheet
+ * Approval redesign — Project Manager approval is now Service-PO-based,
+ * not manager_employee_mappings-based, and Team Lead/Primary Manager is no
+ * longer notified by this reminder. `employeeId`/`employeeName` always come
+ * from the authenticated caller's own token/session (req.employeeId,
+ * req.user) — never from the request body, and this never resolves any
+ * OTHER employee's approver.
+ *
+ * A Project Manager mapped to more than one of the caller's pending Service
+ * POs is emailed exactly ONCE per call (getProjectManagersForServicePOs
+ * dedupes by employee id). Uses the SAME email template/provider as before,
+ * once per recipient — if some recipients fail to send, the reminder still
+ * succeeds as long as at least one email went out.
  *
  * Purely a notification: this function only READS employee_work_logs (via
- * getPendingApprovalSummary) — it never creates, duplicates, or changes the
- * status of a work log, regardless of how many times it's called.
+ * getPendingApprovalSummary/getPendingServicePOIds) — it never creates,
+ * duplicates, or changes the status of a work log, regardless of how many
+ * times it's called.
  *
  * @param {number} employeeId - req.employeeId (authenticated caller)
  * @param {string} employeeName - req.user.full_name (authenticated caller)
  * @param {number} companyId
- * @returns {Promise<{ message: string, managerName: string, pendingCount: number, period: string|null }>}
- * @throws {Error} statusCode 400 — no active PRIMARY manager assigned, manager has no email, or nothing is currently pending approval
- * @throws {Error} statusCode 502 — the Company Email API failed to accept the email (work log data is untouched either way)
+ * @returns {Promise<{ message: string, recipients: {name: string}[], pendingCount: number, period: string|null }>}
+ * @throws {Error} statusCode 400 — nothing pending, or no Project Manager is mapped to the relevant Service PO(s)/has an email configured
+ * @throws {Error} statusCode 502 — the Company Email API failed to accept EVERY reminder email (work log data is untouched either way)
  */
 const remindPrimaryManagerForApproval = async (employeeId, employeeName, companyId) => {
   const summary = await employeeWorkLogRepository.getPendingApprovalSummary(employeeId, companyId);
@@ -1433,13 +1444,16 @@ const remindPrimaryManagerForApproval = async (employeeId, employeeName, company
     throw badRequestError('No work logs are currently pending approval for this employee.');
   }
 
-  const mapping = await managerEmployeeMappingRepository.findActivePrimaryManagerForEmployee(employeeId);
-  const manager = mapping && mapping.manager;
-  if (!manager || manager.status !== 'active') {
-    throw badRequestError('Primary manager is not assigned for this employee.');
-  }
-  if (!manager.email) {
-    throw badRequestError('Primary manager does not have an email address configured.');
+  const pendingServicePOIds = await employeeWorkLogRepository.getPendingServicePOIds(employeeId);
+  // A pending Centralised-PO entry (Leaves/On Bench/Training/HR-Admin) has no
+  // genuine Project Manager of its own — route it through THIS employee's
+  // own real project's Project Manager(s) instead (see
+  // resolveApprovalRoutingServicePOIds's own doc comment).
+  const routingServicePOIds = await employeeServicePOMappingService.resolveApprovalRoutingServicePOIds(employeeId, pendingServicePOIds);
+  const projectManagers = await employeeServicePOMappingService.getProjectManagersForServicePOs(routingServicePOIds);
+  const recipients = projectManagers.filter((pm) => !!pm.email);
+  if (recipients.length === 0) {
+    throw badRequestError('No Project Manager with an email address is currently mapped to the Service PO(s) this work is pending against.');
   }
 
   const period = summary.minDate && summary.maxDate
@@ -1450,44 +1464,56 @@ const remindPrimaryManagerForApproval = async (employeeId, employeeName, company
 
   const approvalUrl = frontendConfig.getApprovalUrl(employeeId);
   const subject = buildApprovalReminderEmailSubject(employeeName);
-  const html = buildApprovalReminderEmailHtml({
-    employeeName,
-    managerName: manager.full_name,
-    approvalUrl,
-    period,
-    pendingCount: summary.count,
+
+  const sendResults = await Promise.allSettled(
+    recipients.map((manager) => {
+      const html = buildApprovalReminderEmailHtml({
+        employeeName,
+        managerName: manager.full_name,
+        approvalUrl,
+        period,
+        pendingCount: summary.count,
+      });
+      return emailLogService.sendAndLog({
+        to: manager.email,
+        subject,
+        html,
+        mailType: emailLogService.MAIL_TYPES.APPROVAL_REMINDER,
+        companyId,
+        triggeredByEmployeeId: employeeId,
+        relatedEmployeeId: employeeId,
+      });
+    })
+  );
+
+  const sent = [];
+  sendResults.forEach((result, index) => {
+    const manager = recipients[index];
+    if (result.status === 'fulfilled') {
+      sent.push(manager);
+    } else {
+      logger.error('Failed to send approval reminder email', {
+        employeeId,
+        managerId: manager.id,
+        error: result.reason && result.reason.message,
+      });
+    }
   });
 
-  try {
-    await emailLogService.sendAndLog({
-      to: manager.email,
-      subject,
-      html,
-      mailType: emailLogService.MAIL_TYPES.APPROVAL_REMINDER,
-      companyId,
-      triggeredByEmployeeId: employeeId,
-      relatedEmployeeId: employeeId,
-    });
-  } catch (err) {
-    logger.error('Failed to send approval reminder email', {
-      employeeId,
-      managerId: manager.id,
-      error: err.message,
-    });
+  if (sent.length === 0) {
     throw emailDeliveryError('Unable to send reminder email. Please try again.');
   }
 
   logger.info('Approval reminder email sent', {
     employeeId,
     employeeName,
-    managerId: manager.id,
-    managerName: manager.full_name,
+    recipientIds: sent.map((m) => m.id),
     pendingCount: summary.count,
   });
 
   return {
-    message: 'Reminder sent to the primary manager.',
-    managerName: manager.full_name,
+    message: `Reminder sent to ${sent.length} Project Manager${sent.length === 1 ? '' : 's'}.`,
+    recipients: sent.map((m) => ({ name: m.full_name })),
     pendingCount: summary.count,
     period,
   };

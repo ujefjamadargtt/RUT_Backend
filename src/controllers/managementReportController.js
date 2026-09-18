@@ -39,6 +39,29 @@ const getEmployeeCapacityForecast = buildHandler('Employee Capacity & Bench Fore
 const getServicePOTimelineRisk = buildHandler('Service PO Budget & Timeline Risk report', managementReportService.getServicePOTimelineRisk);
 const getDeliveryHeadPerformance = buildHandler('Delivery Head Performance report', managementReportService.getDeliveryHeadPerformance);
 const getInvoiceRealizationTrend = buildHandler('Invoice Realization / Billing Efficiency report', managementReportService.getInvoiceRealizationTrend);
+const getPMWiseUtilization = buildHandler('Project Manager-wise Utilization report', managementReportService.getPMWiseUtilization);
+const getProjectWiseUtilization = buildHandler('Project-wise Utilization report', managementReportService.getProjectWiseUtilization);
+const getResourceWiseBench = buildHandler('Resource-wise Bench % report', managementReportService.getResourceWiseBench);
+
+/**
+ * Month-wise Bench is a small, fixed-size result (one row per calendar
+ * month in the requested range, never paginated) — same reasoning as
+ * getServiceLineBusinessMix below, uses sendSuccess directly rather than
+ * the paginated buildHandler/sendPaginated helper.
+ */
+async function getMonthWiseBench(req, res, next) {
+  try {
+    const filters = { ...req.body, ...req.query };
+    const result = await managementReportService.getMonthWiseBench(filters, req.companyIds);
+    return sendSuccess(res, result, 'Month-wise Bench report fetched successfully.');
+  } catch (err) {
+    if (err.statusCode) {
+      return sendError(res, err.message, err.statusCode);
+    }
+    logger.error('getMonthWiseBench error', { error: err.message, stack: err.stack });
+    next(err);
+  }
+}
 
 /**
  * Report 10 is not paginated (small, fixed-size result set — one row per
@@ -70,4 +93,8 @@ module.exports = {
   getDeliveryHeadPerformance,
   getInvoiceRealizationTrend,
   getServiceLineBusinessMix,
+  getPMWiseUtilization,
+  getProjectWiseUtilization,
+  getMonthWiseBench,
+  getResourceWiseBench,
 };

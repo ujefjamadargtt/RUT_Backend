@@ -63,7 +63,13 @@ router.get(
   authenticate.authenticateIdentity,
   validate(listMyEmployeesQuerySchema, 'query'),
   resolveMyTeamBusinessUnitScope,
-  authorize('manager.view_mapped_employees'),
+  // Project Manager reaches this via its OWN direct capability
+  // (servicepo.view_mapped_employees — see database/migrations/
+  // 20260836_seed_target_roles_and_capabilities.sql), not by inheriting
+  // Team Lead's manager.view_mapped_employees — see
+  // managerSelfServiceService.getMyEmployees for the Service-PO-based scope
+  // this now resolves to for a Project Manager caller.
+  authorize(['manager.view_mapped_employees', 'servicepo.view_mapped_employees']),
   controller.getMyEmployees
 );
 
@@ -115,7 +121,7 @@ router.get(
 router.get(
   '/timesheets',
   authenticate,
-  authorize('manager.view_mapped_employees'),
+  authorize(['manager.view_mapped_employees', 'servicepo.view_mapped_employees']),
   validate(listMyTeamTimesheetsQuerySchema, 'query'),
   controller.getTimesheets
 );
@@ -171,7 +177,7 @@ router.get(
 router.get(
   '/timesheets/approval-summary',
   authenticate,
-  authorize('manager.view_mapped_employees'),
+  authorize(['manager.view_mapped_employees', 'servicepo.view_mapped_employees']),
   validate(approvalSummaryQuerySchema, 'query'),
   controller.getApprovalSummary
 );
@@ -208,7 +214,14 @@ router.get(
 router.put(
   '/timesheets/:id/approve',
   authenticate,
-  authorize('manager.approve_timesheets'),
+  // Project Manager reaches this via its OWN direct capability
+  // (servicepo.approve_timesheets — already seeded, previously unused), NOT
+  // by inheriting Team Lead's manager.approve_timesheets — decoupled so a
+  // future change to Team Lead's capability can never silently break
+  // Project Manager approval. See managerSelfServiceService.approveTimesheet
+  // /assertOwnEmployeeForApproval for the Service-PO-based scope this now
+  // enforces for a Project Manager caller.
+  authorize(['manager.approve_timesheets', 'servicepo.approve_timesheets']),
   controller.approveTimesheet
 );
 
@@ -253,7 +266,7 @@ router.put(
 router.put(
   '/timesheets/:id/reject',
   authenticate,
-  authorize('manager.approve_timesheets'),
+  authorize(['manager.approve_timesheets', 'servicepo.approve_timesheets']),
   validate(rejectWorkLogSchema),
   controller.rejectWorkLogEntry
 );
@@ -303,7 +316,7 @@ router.put(
 router.post(
   '/timesheets/approve',
   authenticate,
-  authorize('manager.approve_timesheets'),
+  authorize(['manager.approve_timesheets', 'servicepo.approve_timesheets']),
   validate(bulkApproveTimesheetsSchema),
   controller.bulkApproveTimesheets
 );

@@ -34,8 +34,7 @@ test('autoMapCentralisedServicePOs: 0 active Centralised POs -> no insert attemp
 });
 
 test('autoMapCentralisedServicePOs: 3 active Centralised POs -> one bulk insert with exactly 3 records', async () => {
-  servicePORepository.getActiveCentralisedPOIds = async (companyId) => {
-    assert.equal(companyId, 10);
+  servicePORepository.getActiveCentralisedPOIds = async () => {
     return [{ id: 101, company_id: 10 }, { id: 102, company_id: 10 }, { id: 103, company_id: 10 }];
   };
 

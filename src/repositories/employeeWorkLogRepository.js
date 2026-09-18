@@ -66,13 +66,13 @@ function buildIncludes() {
  * session-scoped lookup would silently miss the other BU's rows. Every OTHER
  * caller (getEntries, managerSelfServiceService.getTimesheets) still passes
  * a real companyId and keeps its existing BU-filtered behavior unchanged.
- * @param {object} filters - { employeeId, startDate, endDate, companyId?, status, poId, subProjectId }
+ * @param {object} filters - { employeeId, startDate, endDate, companyId?, status, poId, poIds?, subProjectId }
  * @param {object} pagination - { limit, offset }
  * @param {object} sort - { sortBy, sortOrder }
  * @returns {Promise<{ rows: EmployeeWorkLog[], count: number }>}
  */
 const findAll = async (filters = {}, pagination = {}, sort = {}) => {
-  const { employeeId, startDate, endDate, companyId, status, poId, subProjectId } = filters;
+  const { employeeId, startDate, endDate, companyId, status, poId, poIds, subProjectId } = filters;
   const { limit = 20, offset = 0 } = pagination;
 
   let { sortBy = 'work_date', sortOrder = 'DESC' } = sort;
@@ -83,7 +83,17 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
   if (companyId != null) where.company_id = companyId;
   if (employeeId) where.employee_id = parseInt(employeeId, 10);
   if (status) where.status = status;
-  if (poId) where.service_po_id = parseInt(poId, 10);
+  // poIds (a Project Manager's own mapped Service PO ids — see
+  // managerSelfServiceService.assertOwnEmployeeForApproval) restricts this
+  // caller's OWN authorized scope; an explicit poId query filter must never
+  // be able to widen past it, so an out-of-scope poId is forced to match
+  // nothing rather than silently ignored.
+  if (poId) {
+    const parsedPoId = parseInt(poId, 10);
+    where.service_po_id = (poIds && poIds.length && !poIds.includes(parsedPoId)) ? -1 : parsedPoId;
+  } else if (poIds && poIds.length) {
+    where.service_po_id = { [Op.in]: poIds };
+  }
   if (subProjectId) where.sub_project_id = parseInt(subProjectId, 10);
   if (startDate) where.work_date = { ...where.work_date, [Op.gte]: startDate };
   if (endDate) where.work_date = { ...where.work_date, [Op.lte]: endDate };
@@ -740,13 +750,26 @@ const getWorkLogTimeReportRows = async ({ employeeIds, startDate, endDate, servi
  * check and its email's optional Period/Pending-count context). Read-only;
  * never touches `status`.
  *
+ * Deliberately NOT company/BU-scoped (companyId accepted but unused) — same
+ * reasoning as findForApprovalSummary()/findForApprovalSummaryByEmployees()
+ * below: employeeId already fully secures this to the caller's own rows, and
+ * scoping by the caller's currently-ACTIVE session BU previously undercounted
+ * (or entirely missed) an employee's pending work logged against a Service
+ * PO owned by a DIFFERENT Business Unit than the one currently selected —
+ * confirmed live: a cross-BU employee with pending entries on 2 different
+ * BUs' Service POs only had the entries matching the active session's BU
+ * counted here, so "Remind for Approval" silently 400'd ("nothing pending")
+ * or under-reported pendingCount whenever the active BU wasn't the one with
+ * pending work. See getPendingServicePOIds() below, which had the identical
+ * bug and is fixed the same way — both feed the same reminder action.
+ *
  * @param {number} employeeId
- * @param {number} companyId
+ * @param {number} [companyId] - unused, kept for call-site compatibility
  * @returns {Promise<{ count: number, minDate: string|null, maxDate: string|null }>}
  */
 const getPendingApprovalSummary = async (employeeId, companyId) => {
   const row = await EmployeeWorkLog.findOne({
-    where: { employee_id: employeeId, company_id: companyId, status: 'pending' },
+    where: { employee_id: employeeId, status: 'pending' },
     attributes: [
       [fn('COUNT', col('id')), 'count'],
       [fn('MIN', col('work_date')), 'minDate'],
@@ -761,10 +784,15 @@ const getPendingApprovalSummary = async (employeeId, companyId) => {
   };
 };
 
-const findForApprovalSummary = async ({ employeeId, startDate, endDate }) => {
+const findForApprovalSummary = async ({ employeeId, startDate, endDate, servicePoIds }) => {
   const where = { employee_id: employeeId };
   if (startDate) where.work_date = { ...where.work_date, [Op.gte]: startDate };
   if (endDate) where.work_date = { ...where.work_date, [Op.lte]: endDate };
+  // servicePoIds — a Project Manager's own mapped Service PO ids (see
+  // managerSelfServiceService.assertOwnEmployeeForApproval) — restricts the
+  // buckets to entries under a PO this caller actually manages; omitted for
+  // every other tier (Team Lead/Admin/BU Admin), whose behavior is unchanged.
+  if (servicePoIds && servicePoIds.length) where.service_po_id = { [Op.in]: servicePoIds };
 
   return EmployeeWorkLog.findAll({
     where,
@@ -820,13 +848,24 @@ const findForApprovalSummaryByEmployees = async ({ employeeIds, startDate, endDa
  * @param {number} employeeId
  * @param {string[]} dates - "YYYY-MM-DD"
  * @param {object} [transaction]
+ * @param {number[]|null} [servicePoIds] - when given (a Project Manager
+ *   caller — see managerSelfServiceService.bulkApproveTimesheets), only rows
+ *   whose service_po_id is one of these are touched, so a Project Manager's
+ *   bulk-approve can never cross into a Service PO they don't manage even
+ *   when the employee also logged work against one that isn't theirs.
+ *   Omitted (null) for every other tier — behavior unchanged.
  * @returns {Promise<number>} rows updated
  */
-const approveByEmployeeAndDates = async (employeeId, dates, transaction = null) => {
+const approveByEmployeeAndDates = async (employeeId, dates, transaction = null, servicePoIds = null) => {
   const [count] = await EmployeeWorkLog.update(
     { status: 'approved' },
     {
-      where: { employee_id: employeeId, work_date: { [Op.in]: dates }, status: 'pending' },
+      where: {
+        employee_id: employeeId,
+        work_date: { [Op.in]: dates },
+        status: 'pending',
+        ...(servicePoIds && servicePoIds.length ? { service_po_id: { [Op.in]: servicePoIds } } : {}),
+      },
       ...(transaction ? { transaction } : {}),
     }
   );
@@ -842,9 +881,11 @@ const approveByEmployeeAndDates = async (employeeId, dates, transaction = null) 
  * @param {number} employeeId
  * @param {Array<{ month: number, year: number }>} months
  * @param {object} [transaction]
+ * @param {number[]|null} [servicePoIds] - see approveByEmployeeAndDates's own
+ *   doc comment — same Project-Manager-only scoping, same reasoning.
  * @returns {Promise<number>} rows updated
  */
-const approveByEmployeeAndMonths = async (employeeId, months, transaction = null) => {
+const approveByEmployeeAndMonths = async (employeeId, months, transaction = null, servicePoIds = null) => {
   const monthYearConditions = months.map(({ month, year }) => {
     const monthNum = parseInt(month, 10);
     const yearNum = parseInt(year, 10);
@@ -857,7 +898,12 @@ const approveByEmployeeAndMonths = async (employeeId, months, transaction = null
   const [count] = await EmployeeWorkLog.update(
     { status: 'approved' },
     {
-      where: { employee_id: employeeId, status: 'pending', [Op.or]: monthYearConditions },
+      where: {
+        employee_id: employeeId,
+        status: 'pending',
+        [Op.or]: monthYearConditions,
+        ...(servicePoIds && servicePoIds.length ? { service_po_id: { [Op.in]: servicePoIds } } : {}),
+      },
       ...(transaction ? { transaction } : {}),
     }
   );
@@ -1183,6 +1229,80 @@ const getMonthEntryModeSummary = async (employeeId, startDate, endDate, companyI
   };
 };
 
+/**
+ * Distinct employee ids with AT LEAST ONE employee_work_logs row against any
+ * of the given Service PO ids — the Project Manager "My Employees"
+ * derivation (see managerSelfServiceService.getMyEmployees): a Project
+ * Manager's employee list is every Employee who has logged work against one
+ * of their mapped Service POs (employeeServicePOMappingService.
+ * getProjectManagerServicePOIds), not manager_employee_mappings.
+ *
+ * @param {number[]} servicePoIds
+ * @returns {Promise<number[]>}
+ */
+const findDistinctEmployeeIdsByServicePOIds = async (servicePoIds) => {
+  if (!servicePoIds || servicePoIds.length === 0) return [];
+  const rows = await EmployeeWorkLog.findAll({
+    attributes: ['employee_id'],
+    where: { service_po_id: { [Op.in]: servicePoIds } },
+    group: ['employee_id'],
+    raw: true,
+  });
+  return rows.map((r) => r.employee_id);
+};
+
+/**
+ * Whether this employee has AT LEAST ONE employee_work_logs row against any
+ * of the given Service PO ids — the "is this Employee even mine" check for
+ * a Project Manager caller (see managerSelfServiceService.
+ * assertOwnEmployeeForApproval), the Service-PO-based analog of
+ * managerEmployeeMappingRepository.findByManagerAndEmployee.
+ *
+ * @param {number} employeeId
+ * @param {number[]} servicePoIds
+ * @returns {Promise<boolean>}
+ */
+const existsForEmployeeAndServicePOIds = async (employeeId, servicePoIds) => {
+  if (!servicePoIds || servicePoIds.length === 0) return false;
+  const row = await EmployeeWorkLog.findOne({
+    where: { employee_id: employeeId, service_po_id: { [Op.in]: servicePoIds } },
+    attributes: ['id'],
+  });
+  return !!row;
+};
+
+/**
+ * Distinct Service PO ids this employee currently has a 'pending'
+ * employee_work_logs row against — feeds the Timesheet Approval Reminder's
+ * new Project-Manager recipient resolution (see employeeTimesheetService.
+ * remindPrimaryManagerForApproval / employeeServicePOMappingService.
+ * getProjectManagersForServicePOs), replacing the old single-PRIMARY-manager
+ * lookup.
+ *
+ * Deliberately NOT company/BU-scoped — same reasoning as
+ * getPendingApprovalSummary() above (and every other Employee-facing
+ * aggregate in this file): employeeId already fully secures this, and a
+ * companyId filter previously dropped an employee's pending Service PO(s)
+ * that live under a DIFFERENT Business Unit than the caller's currently
+ * active session — confirmed live: an employee pending on 2 Service POs
+ * under 2 different BUs only had ONE of them returned here, so only that
+ * one Service PO's Project Manager(s) ever got reminded, even though the
+ * (correctly unscoped) Timesheet Approval Status Report showed both as
+ * pending.
+ *
+ * @param {number} employeeId
+ * @returns {Promise<number[]>}
+ */
+const getPendingServicePOIds = async (employeeId) => {
+  const rows = await EmployeeWorkLog.findAll({
+    attributes: ['service_po_id'],
+    where: { employee_id: employeeId, status: 'pending' },
+    group: ['service_po_id'],
+    raw: true,
+  });
+  return rows.map((r) => r.service_po_id);
+};
+
 module.exports = {
   findAll,
   findById,
@@ -1219,4 +1339,7 @@ module.exports = {
   existsForServicePOOrHierarchy,
   existsForHierarchyNodes,
   getPendingApprovalSummary,
+  findDistinctEmployeeIdsByServicePOIds,
+  existsForEmployeeAndServicePOIds,
+  getPendingServicePOIds,
 };

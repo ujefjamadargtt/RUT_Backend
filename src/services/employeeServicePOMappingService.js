@@ -70,7 +70,9 @@ const assign = async (employeeId, servicePOId, userId, companyId) => {
     throw notFoundError(`Employee #${employeeId} was not found in this company.`);
   }
 
-  const servicePO = await servicePORepository.findById(servicePOId, companyId, userId);
+  // includeCentralised: true — a Centralised Service PO must be assignable
+  // regardless of company scope or who created it (decided design).
+  const servicePO = await servicePORepository.findById(servicePOId, companyId, userId, null, null, true);
   if (!servicePO) {
     throw notFoundError(`Service PO #${servicePOId} was not found in this company.`);
   }
@@ -111,32 +113,17 @@ const assign = async (employeeId, servicePOId, userId, companyId) => {
 };
 
 /**
- * Auto-map a newly-created Employee to every active Centralised Service PO
- * applicable to their company AND owner — called from every backend
- * Employee-creation path (employeeService.create, employeeImportService.
- * importEmployees), inside the SAME transaction as the Employee insert, so a
- * mapping failure rolls back the whole employee creation rather than
- * leaving a partial record.
+ * Auto-map a newly-created Employee to every active Centralised Service
+ * PO — called from every backend Employee-creation path (employeeService.
+ * create, employeeImportService.importEmployees), inside the SAME
+ * transaction as the Employee insert, so a mapping failure rolls back the
+ * whole employee creation rather than leaving a partial record.
  *
- * "Applicable" covers two kinds of Centralised PO (see
- * servicePORepository.getActiveCentralisedPOIds()):
- * - Scoped to this SAME company (company_id matches) — original behavior,
- *   unchanged; ownership is already structurally guaranteed by the exact
- *   company_id match itself (Companies only ever belong to one Entity/Admin).
- * - With NO Business Unit at all (company_id NULL) — NOT global. A BU-less
- *   Centralised PO is still owned by whichever Admin/Entity Admin created
- *   it (its own `created_by`), the same "company-less record ownership is
- *   exact created_by-hierarchy equality, never a blanket match" rule every
- *   other company-less resource in this codebase already follows (see
- *   companyAccessControlService.resolveCompanyIdsOwnedByCreator()'s doc
- *   comment). Concretely: it's applicable to this new Employee only if
- *   either (a) the Employee's own `companyId` falls within the SAME Admin/
- *   Entity Admin ownership hierarchy the PO's creator belongs to, or (b) the
- *   Employee ALSO has no Business Unit at all, in which case it's
- *   applicable only when the PO's `created_by` is this SAME creating actor
- *   (`userId`) — exact equality, no cascade, mirroring
- *   resolveActorRecordAccessScope()'s "company_id IS NULL AND created_by =
- *   them" rule.
+ * By decided design, a Centralised Service PO is BU-less and is for every
+ * Employee — regardless of the new Employee's own Business Unit, and
+ * regardless of which Admin created the PO. servicePORepository.
+ * getActiveCentralisedPOIds() already returns every is_centralised
+ * candidate; every one of them is applicable here unconditionally.
  *
  * Each mapping row's own company_id is set to that PO's own company_id
  * (null for a BU-less PO), not the employee's — same "the Service PO owns
@@ -157,31 +144,10 @@ const assign = async (employeeId, servicePOId, userId, companyId) => {
  * @returns {Promise<void>}
  */
 const autoMapCentralisedServicePOs = async (employeeId, companyId, userId, transaction) => {
-  const candidates = await servicePORepository.getActiveCentralisedPOIds(companyId);
+  const candidates = await servicePORepository.getActiveCentralisedPOIds();
   if (!candidates.length) return;
 
-  const applicable = [];
-  for (const po of candidates) {
-    if (po.company_id !== null) {
-      // Matched this exact company — ownership already guaranteed
-      // structurally, same as before this fix.
-      applicable.push(po);
-      continue;
-    }
-
-    // BU-less Centralised PO — must belong to the SAME Admin/Entity Admin
-    // ownership hierarchy as this new Employee, not reach every employee
-    // on the platform just because it has no Business Unit.
-    if (companyId != null) {
-      const ownedCompanyIds = await companyAccessControlService.resolveCompanyIdsOwnedByCreator(po.created_by);
-      if (ownedCompanyIds.includes(companyId)) applicable.push(po);
-    } else if (po.created_by === userId) {
-      applicable.push(po);
-    }
-  }
-  if (!applicable.length) return;
-
-  const records = applicable.map(({ id: service_po_id, company_id }) => ({
+  const records = candidates.map(({ id: service_po_id, company_id }) => ({
     company_id,
     employee_id: employeeId,
     service_po_id,
@@ -195,7 +161,7 @@ const autoMapCentralisedServicePOs = async (employeeId, companyId, userId, trans
   logger.info('Employee auto-mapped to Centralised Service POs', {
     employeeId,
     companyId,
-    servicePOIds: applicable.map((p) => p.id),
+    servicePOIds: candidates.map((p) => p.id),
   });
 };
 
@@ -204,25 +170,17 @@ const autoMapCentralisedServicePOs = async (employeeId, companyId, userId, trans
  * eligible Employee — the mirror of autoMapCentralisedServicePOs() above,
  * in the other direction: that one runs at EMPLOYEE-creation time and
  * reaches existing Centralised POs; this one runs at Service-PO-creation
- * time and reaches existing Employees. Same ownership rule, viewed from the
- * PO's side (see servicePOService.create()'s doc comment for how
- * `companyId` itself is resolved for a Centralised PO):
+ * time and reaches existing Employees.
  *
- * - Scoped to one company (companyId != null): every ACTIVE Employee
- *   actually assigned (employee_business_units, status 'active') to that
- *   SAME Business Unit — ownership is already structurally guaranteed by
- *   the exact match, same as the original direction's per-company branch.
- * - BU-less (companyId == null): this new PO is owned by the CREATING
- *   actor's (userId's) own Admin/Entity Admin ownership hierarchy, not
- *   every Employee on the platform — same "company-less record ownership
- *   is exact created_by-hierarchy equality, never a blanket match" rule.
- *   Applicable Employees are (a) every active Employee assigned to ANY
- *   Business Unit within that hierarchy
- *   (companyAccessControlService.resolveCompanyIdsOwnedByCreator(userId)),
- *   plus (b) every active, genuinely unassigned Employee (no
- *   employee_business_units row, no legacy company_id either) whose own
- *   `created_by` is this SAME creating actor — exact equality, mirroring
- *   autoMapCentralisedServicePOs()'s own BU-less rule from the other side.
+ * By decided design, a Centralised Service PO is BU-less and is for every
+ * Employee:
+ * - BU-less (companyId == null, the normal case for a Centralised PO): every
+ *   active, non-deleted Employee platform-wide (employeeRepository.
+ *   findAllActiveIds()) — not scoped to the creating actor's own ownership
+ *   hierarchy.
+ * - Scoped to one company (companyId != null — a legacy/edge case): every
+ *   ACTIVE Employee actually assigned (employee_business_units, status
+ *   'active') to that SAME Business Unit, unchanged from before.
  *
  * Each mapping row's own company_id is set to this PO's own company_id
  * (null for a BU-less PO), same "the Service PO owns the mapping's
@@ -251,22 +209,8 @@ const autoMapExistingEmployeesToCentralisedServicePO = async (servicePOId, compa
   if (companyId != null) {
     employeeIds = await employeeBusinessUnitRepository.findActiveEmployeeIdsByBusinessUnitIds([companyId]);
   } else {
-    const ownedCompanyIds = await companyAccessControlService.resolveCompanyIdsOwnedByCreator(userId);
-    const withinHierarchy = ownedCompanyIds.length > 0
-      ? await employeeBusinessUnitRepository.findActiveEmployeeIdsByBusinessUnitIds(ownedCompanyIds)
-      : [];
-
-    const unassignedCandidates = await employeeRepository.findActiveUnassignedByCreator(userId);
-    let unassignedIds = [];
-    if (unassignedCandidates.length > 0) {
-      const buRows = await employeeBusinessUnitRepository.findBusinessUnitsByEmployeeIds(
-        unassignedCandidates.map((e) => e.id)
-      );
-      const withBU = new Set(buRows.map((row) => row.employee_id));
-      unassignedIds = unassignedCandidates.map((e) => e.id).filter((id) => !withBU.has(id));
-    }
-
-    employeeIds = [...new Set([...withinHierarchy, ...unassignedIds])];
+    const allActive = await employeeRepository.findAllActiveIds();
+    employeeIds = allActive.map((e) => e.id);
   }
 
   if (!employeeIds.length) return;
@@ -381,7 +325,9 @@ const getEmployeeMappings = async (employeeId, companyId, status) => {
  */
 const getServicePOEmployees = async (servicePOId, authContext, status) => {
   const companyId = await resolveEmployeeMappingScope(authContext);
-  const po = await servicePORepository.findById(servicePOId, companyId, authContext.employeeId);
+  // includeCentralised: true — a Centralised Service PO must be viewable
+  // regardless of company scope or who created it (decided design).
+  const po = await servicePORepository.findById(servicePOId, companyId, authContext.employeeId, null, null, true);
   if (!po) {
     throw notFoundError(`Service PO #${servicePOId} was not found.`);
   }
@@ -413,6 +359,127 @@ function hasUnrestrictedServicePOVisibility(roleNames = []) {
     return UNRESTRICTED_SERVICE_PO_ROLE_FRAGMENTS.some((fragment) => normalized.includes(fragment));
   });
 }
+
+/**
+ * The Service PO ids a Project Manager is the approver of, for the
+ * Timesheet Approval redesign — REUSES the existing employee_servicepo_mapping
+ * table as-is (no new PM<->PO table): an Employee holding the Project
+ * Manager role who is actively mapped to a Service PO IS that PO's Project
+ * Manager/approver. Every consumer of the new approval-routing logic
+ * (managerSelfServiceService.assertOwnEmployeeForApproval/getMyEmployees,
+ * pmDashboardService's pending_approvals scoping) calls this same function
+ * rather than re-deriving the relationship.
+ *
+ * EXCLUDES Centralised Service POs (Leaves, On Bench, Training & Upskilling,
+ * HR and Admin Activity, etc.) — confirmed live bug: a Centralised PO is
+ * auto-mapped to EVERY Employee at creation time (see
+ * autoMapCentralisedServicePOs()), so a Project Manager ends up with an
+ * active employee_servicepo_mapping row against it regardless of any real
+ * project involvement. Counting those toward "which POs is this Project
+ * Manager the approver of" ballooned their My-Employees/approval scope to
+ * every employee who ever logged a Leave/Bench/Training/HR-Admin hour
+ * company-wide, instead of just the handful of people genuinely on their
+ * actual project(s).
+ *
+ * Role-agnostic despite the name: it just resolves ANY employee's own
+ * active, non-Centralised Service PO mapping ids. Reused as-is by
+ * resolveApprovalRoutingServicePOIds() below for a plain Employee (not a
+ * Project Manager) to find THEIR OWN real project(s), so a single function
+ * covers both "which POs is this Project Manager the approver of" and
+ * "which real project(s) is this Employee actually on."
+ *
+ * @param {number} employeeId
+ * @returns {Promise<number[]>}
+ */
+const getProjectManagerServicePOIds = async (employeeId) => {
+  const mappings = await employeeServicePOMappingRepository.findAllByEmployee(employeeId, 'active');
+  const allPoIds = mappings.map((m) => m.service_po_id);
+  if (allPoIds.length === 0) return [];
+
+  const centralisedIds = new Set(await servicePORepository.findCentralisedIdsAmong(allPoIds));
+  return allPoIds.filter((id) => !centralisedIds.has(id));
+};
+
+/**
+ * Resolve the Service PO ids whose Project Manager(s) should be notified
+ * for a given Employee's pending work (the Timesheet Approval Reminder —
+ * see employeeTimesheetService.remindPrimaryManagerForApproval).
+ *
+ * A Centralised PO (Leaves, On Bench, Training & Upskilling, HR and Admin
+ * Activity, etc.) has no genuine Project Manager of its own — it's
+ * auto-mapped to every Employee — so a pending entry against one is instead
+ * routed through THIS SAME Employee's own real (non-Centralised) Service
+ * PO mapping(s): if I'm mapped to Ambulance Tracker and I log a Leave, my
+ * Leave entry should reach Ambulance Tracker's own Project Manager(s), not
+ * go unrouted (and definitely not reach every Project Manager in the
+ * company who happens to be auto-mapped to "Leaves" too).
+ *
+ * @param {number} employeeId
+ * @param {number[]} pendingServicePOIds - see employeeWorkLogRepository.getPendingServicePOIds
+ * @returns {Promise<number[]>}
+ */
+const resolveApprovalRoutingServicePOIds = async (employeeId, pendingServicePOIds) => {
+  if (!pendingServicePOIds || pendingServicePOIds.length === 0) return [];
+
+  const centralisedIds = new Set(await servicePORepository.findCentralisedIdsAmong(pendingServicePOIds));
+  const nonCentralisedIds = pendingServicePOIds.filter((id) => !centralisedIds.has(id));
+  if (centralisedIds.size === 0) return nonCentralisedIds;
+
+  const employeeRealPOIds = await getProjectManagerServicePOIds(employeeId);
+  return [...new Set([...nonCentralisedIds, ...employeeRealPOIds])];
+};
+
+/**
+ * The active, Project-Manager-role-holding Employees mapped to ANY of the
+ * given Service PO ids — the reverse of getProjectManagerServicePOIds()
+ * above. Used by the Timesheet Approval Reminder
+ * (employeeTimesheetService.remindPrimaryManagerForApproval) to find every
+ * Project Manager who should be notified about an Employee's pending work.
+ * Deduplicated by employee id — a Project Manager mapped to more than one of
+ * the given Service POs is returned exactly once.
+ *
+ * Reuses hasUnrestrictedServicePOVisibility() above (the same "does this
+ * Employee hold the Project Manager role" check already used for the
+ * Service PO mapping screen) rather than a second role-matching rule.
+ *
+ * EXCLUDES Centralised Service POs from `servicePoIds` before resolving —
+ * same reasoning as getProjectManagerServicePOIds() above, applied in the
+ * reverse direction: since a Centralised PO (Leaves, On Bench, etc.) is
+ * auto-mapped to every Employee, "find the Project Manager(s) of this PO"
+ * would otherwise return every Project-Manager-role Employee in the
+ * company for a pending Leave/Bench entry, flooding unrelated PMs with a
+ * reminder that has nothing to do with their actual project.
+ *
+ * @param {number[]} servicePoIds
+ * @returns {Promise<Array<{ id: number, full_name: string, email: string, status: string }>>}
+ */
+const getProjectManagersForServicePOs = async (servicePoIds) => {
+  if (!servicePoIds || servicePoIds.length === 0) return [];
+
+  const centralisedIds = new Set(await servicePORepository.findCentralisedIdsAmong(servicePoIds));
+  const nonCentralisedPoIds = servicePoIds.filter((id) => !centralisedIds.has(id));
+  if (nonCentralisedPoIds.length === 0) return [];
+
+  const mappings = await employeeServicePOMappingRepository.findByServicePOs(nonCentralisedPoIds, 'active');
+  const candidateById = new Map();
+  for (const mapping of mappings) {
+    if (mapping.employee && !candidateById.has(mapping.employee.id)) {
+      candidateById.set(mapping.employee.id, mapping.employee);
+    }
+  }
+  if (candidateById.size === 0) return [];
+
+  const candidates = [...candidateById.values()];
+  const roleLists = await Promise.all(
+    candidates.map((employee) => employeeRoleRepository.findRolesByEmployeeId(employee.id))
+  );
+
+  return candidates.filter((employee, index) => {
+    if (employee.status !== 'active') return false;
+    const roleNames = roleLists[index].map((role) => role.role_name);
+    return hasUnrestrictedServicePOVisibility(roleNames);
+  });
+};
 
 /**
  * Resolve the target Employee for the mapping screen — same resolution
@@ -801,7 +868,9 @@ const getEmployeeOptionsForServicePO = async (servicePOId, authContext, options 
   // within their own managed set without X-Company-Id having been set to
   // that exact BU first.
   const tenantScope = await resolveEmployeeMappingScope(authContext);
-  const po = await servicePORepository.findById(servicePOId, tenantScope, authContext.employeeId);
+  // includeCentralised: true — a Centralised Service PO must be viewable
+  // regardless of company scope or who created it (decided design).
+  const po = await servicePORepository.findById(servicePOId, tenantScope, authContext.employeeId, null, null, true);
   if (!po) {
     throw notFoundError(`Service PO #${servicePOId} was not found.`);
   }
@@ -901,6 +970,9 @@ module.exports = {
   deactivateMapping,
   getEmployeeMappings,
   getServicePOEmployees,
+  getProjectManagerServicePOIds,
+  getProjectManagersForServicePOs,
+  resolveApprovalRoutingServicePOIds,
   hasUnrestrictedServicePOVisibility,
   getServicePOOptionsForEmployee,
   saveEmployeeServicePOMappings,

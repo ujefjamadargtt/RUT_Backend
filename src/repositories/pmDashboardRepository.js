@@ -329,7 +329,15 @@ async function getTeamCapacity(filters) {
 // ---------------------------------------------------------------------------
 /**
  * @param {object} filters
- * @param {number[]} filters.employeeIds
+ * @param {number[]} [filters.employeeIds] - the dashboard's own wide,
+ *   team_mappings-aware team scope (Admin/Entity Admin/BU Admin/Project
+ *   Admin callers — unchanged behavior)
+ * @param {number[]} [filters.servicePoIds] - a Project Manager's own mapped
+ *   Service PO ids (see pmDashboardService.resolvePendingApprovalScope) —
+ *   when given, pending approvals are scoped to these POs instead of
+ *   `employeeIds`, matching what that Project Manager can actually approve
+ *   under the Service-PO-based Timesheet Approval redesign. At least one of
+ *   employeeIds/servicePoIds must be given.
  * @param {number} filters.monthNum
  * @param {number} filters.yearNum
  * @param {number} filters.limit
@@ -337,16 +345,28 @@ async function getTeamCapacity(filters) {
  * @returns {Promise<{ rows: object[], count: number }>}
  */
 async function getPendingApprovals(filters) {
-  const { employeeIds, monthNum, yearNum, limit, offset } = filters;
-  if (!employeeIds || employeeIds.length === 0) {
+  const { employeeIds, servicePoIds, monthNum, yearNum, limit, offset } = filters;
+  const hasEmployeeScope = employeeIds && employeeIds.length > 0;
+  const hasServicePOScope = servicePoIds && servicePoIds.length > 0;
+  if (!hasEmployeeScope && !hasServicePOScope) {
     return { rows: [], count: 0 };
   }
 
-  const replacements = { employeeIds, monthNum, yearNum, limit, offset };
-  const whereClause = `
-    WHERE ewl.employee_id IN (:employeeIds) AND ewl.status = 'pending'
-      AND EXTRACT(MONTH FROM ewl.work_date) = :monthNum AND EXTRACT(YEAR FROM ewl.work_date) = :yearNum
-  `;
+  const replacements = { monthNum, yearNum, limit, offset };
+  const conditions = [
+    "ewl.status = 'pending'",
+    'EXTRACT(MONTH FROM ewl.work_date) = :monthNum',
+    'EXTRACT(YEAR FROM ewl.work_date) = :yearNum',
+  ];
+  if (hasEmployeeScope) {
+    conditions.push('ewl.employee_id IN (:employeeIds)');
+    replacements.employeeIds = employeeIds;
+  }
+  if (hasServicePOScope) {
+    conditions.push('ewl.service_po_id IN (:servicePoIds)');
+    replacements.servicePoIds = servicePoIds;
+  }
+  const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
   const dataQuery = `
     SELECT

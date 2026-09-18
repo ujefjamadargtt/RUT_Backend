@@ -6,6 +6,7 @@ const assert = require('node:assert/strict');
 const {
   resolvePeriod,
   resolvePreviousPeriod,
+  resolvePendingApprovalScope,
   computeRiskFlag,
   tallyProjectStatusBreakdown,
   sumHealthBuckets,
@@ -13,6 +14,35 @@ const {
   AT_RISK_HEALTH_STATUSES,
   PREVIOUS_PERIOD_UNAVAILABLE_FIELDS,
 } = require('../src/services/pmDashboardService');
+const employeeServicePOMappingService = require('../src/services/employeeServicePOMappingService');
+
+// Timesheet Approval redesign: the PM Dashboard's "pending_approvals"
+// KPI/list must follow the NEW Service-PO-based approval scope for a
+// Project Manager (hierarchy_rank 6) caller, while every other tier
+// (Admin/Entity Admin/BU Admin/Project Admin) keeps using the dashboard's
+// existing, wider team_mappings-aware employeeIds — unchanged.
+test('resolvePendingApprovalScope: Project Manager (rank 6) gets Service-PO-scoped, not the dashboard\'s wide employeeIds', async () => {
+  const original = employeeServicePOMappingService.getProjectManagerServicePOIds;
+  try {
+    employeeServicePOMappingService.getProjectManagerServicePOIds = async (employeeId) => {
+      assert.equal(employeeId, 501);
+      return [201, 202];
+    };
+
+    const scope = await resolvePendingApprovalScope({ hierarchyRank: 6, employeeId: 501 }, [101, 102, 103]);
+
+    assert.deepEqual(scope, { employeeIds: null, servicePoIds: [201, 202] });
+  } finally {
+    employeeServicePOMappingService.getProjectManagerServicePOIds = original;
+  }
+});
+
+test('resolvePendingApprovalScope: every non-Project-Manager tier keeps the dashboard\'s existing wide employeeIds unchanged', async () => {
+  for (const hierarchyRank of [1, 2, 3, 4, 5, 7, null]) {
+    const scope = await resolvePendingApprovalScope({ hierarchyRank, employeeId: 999 }, [101, 102, 103]);
+    assert.deepEqual(scope, { employeeIds: [101, 102, 103], servicePoIds: null }, `rank ${hierarchyRank} must be unaffected`);
+  }
+});
 
 test('resolvePeriod defaults to the current server month/year when omitted', () => {
   const now = new Date();

@@ -171,11 +171,11 @@ test('update(): flips an existing PO from centralised to non-centralised — exi
 // ── servicePORepository.getActiveCentralisedPOIds ──────────────────────
 // Direct repository-level check that the query filters by is_centralised,
 // excludes soft-deleted rows, reuses the exact same "active" status set
-// getActivePOs() already uses ('in-progress'|'on-hold'|'pending'), and
-// matches BOTH this company's own Centralised POs AND any BU-less
-// (company_id NULL) Centralised PO.
+// getActivePOs() already uses ('in-progress'|'on-hold'|'pending'), and —
+// by decided design — is NOT scoped to any company at all: a Centralised
+// Service PO is for every Employee/Business Unit, platform-wide.
 
-test('getActiveCentralisedPOIds(): queries is_centralised=true, is_deleted=false, the shared active-status set, and (companyId OR NULL), returning {id, company_id, created_by} triples', async () => {
+test('getActiveCentralisedPOIds(): queries is_centralised=true, is_deleted=false, the shared active-status set, with no company_id condition, returning {id, company_id, created_by} triples', async () => {
   const { Op } = require('sequelize');
   const { ServicePO } = require('../src/models');
   const originalFindAll = ServicePO.findAll;
@@ -186,13 +186,70 @@ test('getActiveCentralisedPOIds(): queries is_centralised=true, is_deleted=false
     return [{ id: 101, company_id: 10, created_by: 5 }, { id: 102, company_id: null, created_by: 5 }];
   };
 
-  const pos = await servicePORepository.getActiveCentralisedPOIds(10);
+  const pos = await servicePORepository.getActiveCentralisedPOIds();
 
   assert.deepEqual(pos, [{ id: 101, company_id: 10, created_by: 5 }, { id: 102, company_id: null, created_by: 5 }]);
-  assert.deepEqual(capturedArgs.where[Op.or], [{ company_id: 10 }, { company_id: null }]);
+  assert.equal(capturedArgs.where.company_id, undefined);
   assert.equal(capturedArgs.where.is_centralised, true);
   assert.equal(capturedArgs.where.is_deleted, false);
   assert.deepEqual(capturedArgs.where.status[Op.in], ['in-progress', 'on-hold', 'pending']);
+
+  ServicePO.findAll = originalFindAll;
+});
+
+// ── servicePORepository.getEligibleForMapping ───────────────────────────
+// Regression coverage for a live incident: mapping a BU-less Centralised
+// PO to an Employee holding Project Manager (unrestricted=true) failed
+// with "not eligible" because the strict company_id match in companyScope()
+// never matches a NULL row. A Centralised PO must be eligible regardless of
+// the caller's own company scope or the `unrestricted` flag.
+
+test('getEligibleForMapping(): a Centralised PO (company_id: null) is eligible for an UNRESTRICTED (Project Manager) caller even though the caller\'s own companyId never matches NULL', async () => {
+  const { Op } = require('sequelize');
+  const { ServicePO } = require('../src/models');
+  const originalFindAll = ServicePO.findAll;
+
+  let capturedWhere;
+  ServicePO.findAll = async (args) => {
+    capturedWhere = args.where;
+    // Simulate the real DB matching either branch of the OR.
+    return [{ id: 999, service_po_name: 'On Bench', company_id: null, is_centralised: true }];
+  };
+
+  const pos = await servicePORepository.getEligibleForMapping({
+    companyId: 40, // the caller's OWN scope — deliberately does not include null
+    createdBy: 1,
+    unrestricted: true, // Project Manager/Delivery Head — skips the BU-or clause entirely
+    businessUnitIds: [],
+  });
+
+  assert.equal(capturedWhere.is_centralised, undefined); // not a top-level filter — OR'd in below
+  assert.ok(Array.isArray(capturedWhere[Op.or]));
+  assert.ok(capturedWhere[Op.or].some((clause) => clause.is_centralised === true));
+  assert.deepEqual(pos, [{ id: 999, service_po_name: 'On Bench', company_id: null, is_centralised: true }]);
+
+  ServicePO.findAll = originalFindAll;
+});
+
+test('getEligibleForMapping(): a Centralised PO (company_id: null) is eligible for a RESTRICTED caller even when it is not in businessUnitIds', async () => {
+  const { Op } = require('sequelize');
+  const { ServicePO } = require('../src/models');
+  const originalFindAll = ServicePO.findAll;
+
+  let capturedWhere;
+  ServicePO.findAll = async (args) => {
+    capturedWhere = args.where;
+    return [];
+  };
+
+  await servicePORepository.getEligibleForMapping({
+    companyId: 40,
+    createdBy: 1,
+    unrestricted: false,
+    businessUnitIds: [27], // the target Employee's own BU — does NOT include the PO's company_id (irrelevant now)
+  });
+
+  assert.ok(capturedWhere[Op.or].some((clause) => clause.is_centralised === true));
 
   ServicePO.findAll = originalFindAll;
 });

@@ -6,8 +6,16 @@ const employeeAccessControlService = require('./employeeAccessControlService');
 const employeeRepository = require('../repositories/employeeRepository');
 const managerEmployeeMappingRepository = require('../repositories/managerEmployeeMappingRepository');
 const employeeWorkLogComplianceService = require('./employeeWorkLogComplianceService');
+const employeeServicePOMappingService = require('./employeeServicePOMappingService');
 const pmDashboardRepository = require('../repositories/pmDashboardRepository');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
+
+// Project Manager (hierarchy_rank 6) — see resolvePendingApprovalScope()
+// below. Deliberately does NOT touch resolveTeamEmployeeIds() (team_size,
+// Team Capacity, Monthly Hours Trend) — only the approval-specific
+// pending_approvals KPI/list is redefined for this tier; every other metric
+// on this dashboard keeps its existing, wider team scope unchanged.
+const PROJECT_MANAGER_RANK = 6;
 
 /**
  * Project Manager Dashboard Service
@@ -127,6 +135,29 @@ async function resolveTeamEmployeeIds(authContext, companyIds) {
   return [...employeeIds];
 }
 
+/**
+ * The scope pmDashboardRepository.getPendingApprovals() should actually use
+ * for the "pending_approvals" KPI/list — per the Timesheet Approval
+ * redesign, a Project Manager's approval scope is now Service-PO-based
+ * (managerSelfServiceService.assertOwnEmployeeForApproval), not the wider
+ * team_mappings-aware `employeeIds` this dashboard's OTHER metrics use (see
+ * resolveTeamEmployeeIds()'s own doc comment — that resolver is deliberately
+ * left untouched). For every other caller reachable here (Admin/Entity
+ * Admin/BU Admin/Project Admin — see pmDashboard.routes.js), pending
+ * approvals keeps using the existing `employeeIds`, unchanged.
+ *
+ * @param {object} authContext - { hierarchyRank, employeeId, ... }
+ * @param {number[]} employeeIds - this dashboard's own resolveTeamEmployeeIds() result
+ * @returns {Promise<{ employeeIds: number[]|null, servicePoIds: number[]|null }>}
+ */
+async function resolvePendingApprovalScope(authContext, employeeIds) {
+  if (authContext.hierarchyRank === PROJECT_MANAGER_RANK) {
+    const servicePoIds = await employeeServicePOMappingService.getProjectManagerServicePOIds(authContext.employeeId);
+    return { employeeIds: null, servicePoIds };
+  }
+  return { employeeIds, servicePoIds: null };
+}
+
 function resolveAsOfDate(query) {
   return query.asOfDate ? new Date(query.asOfDate) : new Date();
 }
@@ -224,6 +255,7 @@ async function getSummary(query, authContext, companyIds) {
   const { prevMonthNum, prevYearNum, prevAsOfDate } = resolvePreviousPeriod(monthNum, yearNum);
 
   const employeeIds = await resolveTeamEmployeeIds(authContext, companyIds);
+  const pendingApprovalScope = await resolvePendingApprovalScope(authContext, employeeIds);
 
   const [
     portfolio,
@@ -253,7 +285,7 @@ async function getSummary(query, authContext, companyIds) {
       limit: 100000, offset: 0, companyIds,
     }),
     employeeWorkLogComplianceService.getReport({ month: monthNum, year: yearNum, limit: 1 }, authContext, companyIds),
-    pmDashboardRepository.getPendingApprovals({ employeeIds, monthNum, yearNum, limit: 1, offset: 0 }),
+    pmDashboardRepository.getPendingApprovals({ ...pendingApprovalScope, monthNum, yearNum, limit: 1, offset: 0 }),
     pmDashboardRepository.getTeamCapacity({
       employeeIds, monthNum, yearNum,
       benchThresholdHours: DEFAULT_BENCH_THRESHOLD_HOURS,
@@ -269,11 +301,11 @@ async function getSummary(query, authContext, companyIds) {
       limit: 100000, offset: 0, companyIds,
     }),
     employeeWorkLogComplianceService.getReport({ month: prevMonthNum, year: prevYearNum, limit: 1 }, authContext, companyIds),
-    // Same current `employeeIds` (team roster has no history — see
+    // Same current pendingApprovalScope (team/PO roster has no history — see
     // PREVIOUS_PERIOD_UNAVAILABLE_FIELDS above) against the previous
-    // period's pending/capacity data — "how did THIS team's numbers look
-    // last month," not "who was on the team last month."
-    pmDashboardRepository.getPendingApprovals({ employeeIds, monthNum: prevMonthNum, yearNum: prevYearNum, limit: 1, offset: 0 }),
+    // period's pending/capacity data — "how did THIS scope's numbers look
+    // last month," not "who was on the team/which POs were mapped last month."
+    pmDashboardRepository.getPendingApprovals({ ...pendingApprovalScope, monthNum: prevMonthNum, yearNum: prevYearNum, limit: 1, offset: 0 }),
     pmDashboardRepository.getTeamCapacity({
       employeeIds, monthNum: prevMonthNum, yearNum: prevYearNum,
       benchThresholdHours: DEFAULT_BENCH_THRESHOLD_HOURS,
@@ -427,10 +459,11 @@ async function getActionRequired(query, authContext, companyIds) {
   const varianceThresholdPct = resolveVarianceThresholdPct(query);
 
   const employeeIds = await resolveTeamEmployeeIds(authContext, companyIds);
+  const pendingApprovalScope = await resolvePendingApprovalScope(authContext, employeeIds);
 
   const [complianceReport, pendingApprovals, projectRollup, teamCapacity] = await Promise.all([
     employeeWorkLogComplianceService.getReport({ month: monthNum, year: yearNum, limit: ACTION_REQUIRED_CAP }, authContext, companyIds),
-    pmDashboardRepository.getPendingApprovals({ employeeIds, monthNum, yearNum, limit: ACTION_REQUIRED_CAP, offset: 0 }),
+    pmDashboardRepository.getPendingApprovals({ ...pendingApprovalScope, monthNum, yearNum, limit: ACTION_REQUIRED_CAP, offset: 0 }),
     pmDashboardRepository.getProjectRollup({
       monthNum, yearNum,
       asOfDate: asOfDate.toISOString().slice(0, 10),
@@ -525,6 +558,7 @@ module.exports = {
   getActionRequired,
   getMonthlyHoursTrend,
   // Exported for testing
+  resolvePendingApprovalScope,
   resolvePeriod,
   resolvePreviousPeriod,
   computeRiskFlag,

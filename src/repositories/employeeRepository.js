@@ -503,6 +503,22 @@ const findActiveUnassignedByCreator = async (createdBy) => {
 };
 
 /**
+ * Every active, non-deleted Employee's id, platform-wide — candidate list
+ * for employeeServicePOMappingService.autoMapExistingEmployeesToCentralisedServicePO()
+ * when the new Service PO is a genuinely BU-less Centralised PO: by decided
+ * design, a Centralised PO is for every Employee, not scoped to its
+ * creator's own ownership hierarchy (see that function's doc comment).
+ * @returns {Promise<{id: number}[]>}
+ */
+const findAllActiveIds = async () => {
+  return Employee.findAll({
+    where: { status: 'active', is_deleted: false },
+    attributes: ['id'],
+    raw: true,
+  });
+};
+
+/**
  * Fetch a paginated, filtered, sorted list of Employees holding one role,
  * scoped to whoever created them — Admin's "View Entity Admins"/Platform
  * Admin's "View Admins" module's data source. Admin/Entity Admin/Platform
@@ -655,4 +671,5 @@ module.exports = {
   findAllForImport,
   findAllEmails,
   findActiveUnassignedByCreator,
+  findAllActiveIds,
 };

@@ -35,7 +35,7 @@ function restoreModel() {
   ServicePO.findOne = ORIGINAL_MODEL.findOne;
 }
 
-test('findAll(): mappedServicePOIds omitted (null) -> normal BU-based company_id scope, completely unaffected', async () => {
+test('findAll(): mappedServicePOIds omitted (null) -> normal BU-based company_id scope, plus Centralised POs unconditionally', async () => {
   let capturedWhere;
   ServicePO.findAndCountAll = async ({ where }) => {
     capturedWhere = where;
@@ -44,11 +44,13 @@ test('findAll(): mappedServicePOIds omitted (null) -> normal BU-based company_id
 
   await servicePORepository.findAll({ companyId: 10 }, {}, {});
 
-  assert.deepEqual(capturedWhere[Op.and][0], { company_id: 10 });
+  assert.deepEqual(capturedWhere[Op.and][0], {
+    [Op.or]: [{ company_id: 10 }, { is_centralised: true }],
+  });
   restoreModel();
 });
 
-test('findAll(): mappedServicePOIds given (non-null) OVERRIDES companyId/centralisedOwnerIds entirely, never unions', async () => {
+test('findAll(): mappedServicePOIds given (non-null) OVERRIDES companyId/centralisedOwnerIds entirely (never unions with the normal BU scope), but a Centralised PO still shows regardless (decided design)', async () => {
   let capturedWhere;
   ServicePO.findAndCountAll = async ({ where }) => {
     capturedWhere = where;
@@ -59,11 +61,13 @@ test('findAll(): mappedServicePOIds given (non-null) OVERRIDES companyId/central
     { companyId: 10, createdBy: 900, centralisedOwnerIds: [5, 6], mappedServicePOIds: [1, 2, 3] }, {}, {}
   );
 
-  assert.deepEqual(capturedWhere[Op.and][0], { id: { [Op.in]: [1, 2, 3] } });
+  assert.deepEqual(capturedWhere[Op.and][0], {
+    [Op.or]: [{ id: { [Op.in]: [1, 2, 3] } }, { is_centralised: true }],
+  });
   restoreModel();
 });
 
-test('findAll(): mappedServicePOIds given as an EMPTY array (qualifying role, zero active mappings) -> matches nothing, not "fall back to BU scope"', async () => {
+test('findAll(): mappedServicePOIds given as an EMPTY array (qualifying role, zero active mappings) -> matches no normal PO, but Centralised POs still show', async () => {
   let capturedWhere;
   ServicePO.findAndCountAll = async ({ where }) => {
     capturedWhere = where;
@@ -72,7 +76,9 @@ test('findAll(): mappedServicePOIds given as an EMPTY array (qualifying role, ze
 
   await servicePORepository.findAll({ companyId: 10, mappedServicePOIds: [] }, {}, {});
 
-  assert.deepEqual(capturedWhere[Op.and][0], { id: { [Op.in]: [] } });
+  assert.deepEqual(capturedWhere[Op.and][0], {
+    [Op.or]: [{ id: { [Op.in]: [] } }, { is_centralised: true }],
+  });
   restoreModel();
 });
 

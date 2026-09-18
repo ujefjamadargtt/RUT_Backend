@@ -21,18 +21,17 @@ function restore() {
   companyAccessControlService.resolveCompanyIdsOwnedByCreator = ORIGINAL.resolveCompanyIdsOwnedByCreator;
 }
 
-test('autoMapCentralisedServicePOs(): a BU-less Centralised PO OWNED BY THE SAME ADMIN is mapped with company_id: null, a per-company one keeps its own company_id', async () => {
-  servicePORepository.getActiveCentralisedPOIds = async (companyId) => {
-    assert.equal(companyId, 10);
-    return [
-      { id: 501, company_id: 10, created_by: 5 },   // this company's own centralised PO
-      { id: 999, company_id: null, created_by: 5 }, // BU-less centralised PO, created by Admin 5 (who also owns company 10)
-    ];
-  };
-  companyAccessControlService.resolveCompanyIdsOwnedByCreator = async (creatorEmployeeId) => {
-    assert.equal(creatorEmployeeId, 5);
-    return [10, 11]; // Admin 5 owns companies 10 and 11
-  };
+// Decided design: a Centralised Service PO is BU-less and is for every
+// Employee — regardless of the new Employee's own Business Unit, and
+// regardless of which Admin/BU Admin created the PO. No creator-ownership
+// restriction applies (see servicePORepository.getActiveCentralisedPOIds()
+// and employeeServicePOMappingService.autoMapCentralisedServicePOs()).
+
+test('autoMapCentralisedServicePOs(): every active Centralised PO is mapped, a per-company one keeps its own company_id, a BU-less one maps as null', async () => {
+  servicePORepository.getActiveCentralisedPOIds = async () => [
+    { id: 501, company_id: 10, created_by: 5 },   // a legacy per-company centralised PO
+    { id: 999, company_id: null, created_by: 5 }, // BU-less centralised PO
+  ];
 
   let capturedRecords;
   employeeServicePOMappingRepository.bulkCreate = async (records) => {
@@ -53,36 +52,30 @@ test('autoMapCentralisedServicePOs(): a BU-less Centralised PO OWNED BY THE SAME
   restore();
 });
 
-test('autoMapCentralisedServicePOs(): a BU-less Centralised PO owned by a DIFFERENT Admin is NOT mapped (the cross-Admin visibility bug)', async () => {
+test('autoMapCentralisedServicePOs(): a BU-less Centralised PO created by a DIFFERENT Admin is STILL mapped (no creator restriction, by decided design)', async () => {
   servicePORepository.getActiveCentralisedPOIds = async () => [
-    { id: 999, company_id: null, created_by: 6 }, // created by a DIFFERENT Admin (6), who does NOT own company 10
+    { id: 999, company_id: null, created_by: 6 }, // created by a DIFFERENT Admin than the one creating this Employee
   ];
-  companyAccessControlService.resolveCompanyIdsOwnedByCreator = async (creatorEmployeeId) => {
-    assert.equal(creatorEmployeeId, 6);
-    return [42]; // Admin 6 owns an unrelated company — NOT 10
-  };
 
-  let bulkCreateCalled = false;
+  let capturedRecords;
   employeeServicePOMappingRepository.bulkCreate = async (records) => {
-    bulkCreateCalled = records.length > 0;
+    capturedRecords = records;
     return records;
   };
 
   await employeeServicePOMappingService.autoMapCentralisedServicePOs(77, 10, 1, undefined);
 
-  assert.equal(bulkCreateCalled, false);
+  assert.equal(capturedRecords.length, 1);
+  assert.equal(capturedRecords[0].service_po_id, 999);
 
   restore();
 });
 
-test('autoMapCentralisedServicePOs(): a company-less employee (no BU at all) gets mapped ONLY to a BU-less Centralised PO created by the SAME actor', async () => {
-  servicePORepository.getActiveCentralisedPOIds = async (companyId) => {
-    assert.equal(companyId, null);
-    return [
-      { id: 999, company_id: null, created_by: 1 }, // created by the SAME actor (userId: 1 below)
-      { id: 998, company_id: null, created_by: 2 }, // created by a DIFFERENT actor — must be excluded
-    ];
-  };
+test('autoMapCentralisedServicePOs(): a company-less employee (no BU at all) is mapped to every BU-less Centralised PO regardless of creator', async () => {
+  servicePORepository.getActiveCentralisedPOIds = async () => [
+    { id: 999, company_id: null, created_by: 1 },
+    { id: 998, company_id: null, created_by: 2 }, // a different creator — still included
+  ];
 
   let capturedRecords;
   employeeServicePOMappingRepository.bulkCreate = async (records) => {
@@ -92,16 +85,14 @@ test('autoMapCentralisedServicePOs(): a company-less employee (no BU at all) get
 
   await employeeServicePOMappingService.autoMapCentralisedServicePOs(77, null, 1, undefined);
 
-  assert.equal(capturedRecords.length, 1);
-  assert.equal(capturedRecords[0].service_po_id, 999);
-  assert.equal(capturedRecords[0].company_id, null);
-  assert.equal(capturedRecords[0].employee_id, 77);
+  assert.equal(capturedRecords.length, 2);
+  assert.deepEqual(capturedRecords.map((r) => r.service_po_id).sort(), [998, 999]);
+  assert.ok(capturedRecords.every((r) => r.company_id === null && r.employee_id === 77));
 
   restore();
 });
 
-test('getActiveCentralisedPOIds(): companyId null matches ONLY BU-less Centralised POs, not company-scoped ones', async () => {
-  const { Op } = require('sequelize');
+test('getActiveCentralisedPOIds(): queries is_centralised=true platform-wide, with no company_id condition at all', async () => {
   const { ServicePO } = require('../src/models');
   const originalFindAll = ServicePO.findAll;
 
@@ -111,10 +102,10 @@ test('getActiveCentralisedPOIds(): companyId null matches ONLY BU-less Centralis
     return [];
   };
 
-  await servicePORepository.getActiveCentralisedPOIds(null);
+  await servicePORepository.getActiveCentralisedPOIds();
 
-  assert.equal(capturedWhere.company_id, null);
-  assert.equal(capturedWhere[Op.or], undefined);
+  assert.equal(capturedWhere.is_centralised, true);
+  assert.equal(capturedWhere.company_id, undefined);
 
   ServicePO.findAll = originalFindAll;
 });

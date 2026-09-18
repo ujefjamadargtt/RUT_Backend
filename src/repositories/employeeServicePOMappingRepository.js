@@ -277,6 +277,41 @@ const findByServicePO = async (servicePOId, status) => {
 };
 
 /**
+ * Every active mapping row for ANY of the given Service PO ids, with the
+ * mapped Employee's id/full_name/email/status — the Timesheet Approval
+ * Reminder's Project-Manager recipient resolution (see
+ * employeeServicePOMappingService.getProjectManagersForServicePOs): given
+ * the distinct Service PO ids an Employee has pending work against, find
+ * every Employee mapped to any of them in ONE query (not one per PO), then
+ * filter down to the ones holding the Project Manager role.
+ *
+ * Deliberately NOT company-scoped — same reasoning as findByServicePO()
+ * above (a Centralised, BU-less PO's mapping rows carry company_id: null);
+ * the caller already narrows `servicePoIds` to specific, already-relevant
+ * POs before calling this.
+ *
+ * @param {number[]} servicePoIds
+ * @param {string} [status]
+ * @returns {Promise<EmployeeServicePOMapping[]>}
+ */
+const findByServicePOs = async (servicePoIds, status) => {
+  if (!servicePoIds || servicePoIds.length === 0) return [];
+  const where = { service_po_id: { [Op.in]: servicePoIds } };
+  if (status) where.status = status;
+
+  return EmployeeServicePOMapping.findAll({
+    where,
+    include: [
+      {
+        model: Employee,
+        as: 'employee',
+        attributes: ['id', 'employee_code', 'full_name', 'email', 'status'],
+      },
+    ],
+  });
+};
+
+/**
  * Find every mapping row (any status) for one Employee, narrowed to a
  * specific set of Service PO ids — the diff-sync base query for
  * employeeServicePOMappingService.saveEmployeeServicePOMappings(). Callers
@@ -323,6 +358,7 @@ module.exports = {
   findAllByEmployee,
   findAllByEmployeeWithProject,
   findByServicePO,
+  findByServicePOs,
   findByEmployeeAndPOIds,
   bulkUpdateStatus,
 };

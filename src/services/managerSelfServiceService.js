@@ -6,6 +6,7 @@ const managerEmployeeMappingRepository = require('../repositories/managerEmploye
 const managerServicePOMappingRepository = require('../repositories/managerServicePOMappingRepository');
 const employeeServicePOMappingRepository = require('../repositories/employeeServicePOMappingRepository');
 const employeeServicePOMappingService = require('./employeeServicePOMappingService');
+const servicePORepository = require('../repositories/servicePORepository');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
 const employeeRepository = require('../repositories/employeeRepository');
 const { createAuditLog } = require('../middlewares/auditLog');
@@ -15,6 +16,13 @@ const logger = require('../utils/logger');
 const ADMIN_TIER_MAX_RANK = 3;
 // BU Admin (4) — scoped to their own Business Units, verified via employeeRepository.findById(id, companyId).
 const BU_ADMIN_RANK = 4;
+// Project Manager (6) — Timesheet Approval scope is Service-PO-based (see
+// assertOwnEmployeeForApproval/getMyEmployees below), NOT manager_employee_
+// mappings-based. Project Admin (5) and Team Lead (7) are deliberately left
+// out of this constant and keep using the original manager_employee_mappings
+// path unchanged — Project Admin is explicitly out of scope for this
+// redesign, and Team Lead's backend approval logic must remain untouched.
+const PROJECT_MANAGER_RANK = 6;
 
 /**
  * Manager Self-Service — a Manager's own view of their delegated Employees
@@ -66,10 +74,24 @@ const getMyEmployees = async (managerUserId, companyIds, hierarchyRank, explicit
   // same as Admin tier but scoped to their own BUs (enforced by the
   // companyIds filter at the bottom rather than by a mapping check).
   const isAdminOrBuAdminTier = hierarchyRank != null && hierarchyRank <= 4;
+  const isProjectManagerTier = hierarchyRank === PROJECT_MANAGER_RANK;
   let mappings = [];
   let employeeWhere = { status: 'active', is_deleted: false };
 
-  if (!isAdminOrBuAdminTier) {
+  if (isProjectManagerTier) {
+    // Project Manager "My Employees" is Service-PO-based, not
+    // manager_employee_mappings-based: every Employee who has logged work
+    // against a Service PO this Project Manager is mapped to, via the
+    // EXISTING employee_servicepo_mapping table (see
+    // employeeServicePOMappingService.getProjectManagerServicePOIds — no
+    // new PM<->PO table). mapping_type stays null for these employees
+    // below (mappings is left empty) since that concept doesn't apply here.
+    const poIds = await employeeServicePOMappingService.getProjectManagerServicePOIds(managerUserId);
+    if (poIds.length === 0) return [];
+    const employeeIds = await employeeWorkLogRepository.findDistinctEmployeeIdsByServicePOIds(poIds);
+    if (employeeIds.length === 0) return [];
+    employeeWhere = { id: employeeIds };
+  } else if (!isAdminOrBuAdminTier) {
     // Do not restrict manager_employee_mappings.company_id here. Historic
     // mapping rows may have NULL company_id, while the Employee's active
     // employee_business_units membership is the authoritative BU assignment.
@@ -126,10 +148,11 @@ const getMyEmployees = async (managerUserId, companyIds, hierarchyRank, explicit
     return withMeta.filter((employee) => employee.business_unit_ids.some((id) => selectedBusinessUnits.has(id)));
   }
 
-  // Manager tier: manager_employee_mappings is ALREADY the security
-  // boundary — employeeWhere above scoped the query to exactly this
-  // Manager's mapped Employees, active-mapping-row by active-mapping-row.
-  // Business Unit is a pure narrowing convenience here, applied ONLY when
+  // Manager tier (Team Lead/Project Admin via manager_employee_mappings, or
+  // Project Manager via Service PO-based employee_work_logs — see above):
+  // employeeWhere already scoped the query to exactly this caller's
+  // authorized Employees. Business Unit is a pure narrowing convenience here,
+  // applied ONLY when
   // the caller explicitly selected one. A mapped Employee whose own
   // Business Unit differs from every Business Unit the MANAGER personally
   // belongs to must still appear by default — the mapping row is what
@@ -206,6 +229,112 @@ async function assertOwnEmployee(managerUserId, employeeId, companyId, hierarchy
   if (!mapping) {
     throw forbiddenError('This Employee is not one of your mapped Employees.');
   }
+}
+
+/**
+ * Approval-specific ownership guard — used ONLY by the Timesheet Approval
+ * read/action functions below (getTimesheets, getApprovalSummary,
+ * approveTimesheet, rejectWorkLogEntry, bulkApproveTimesheets) and by
+ * getMyEmployees above. Deliberately a SEPARATE function from
+ * assertOwnEmployee() (kept completely unmodified above) — Service PO
+ * delegation (assignServicePOToEmployee/getEmployeeServicePOs/
+ * removeServicePOFromEmployee, further below) keeps calling the ORIGINAL
+ * assertOwnEmployee(), so a Project Manager's unrelated Service-PO-delegation
+ * ability is never affected by this Timesheet Approval redesign.
+ *
+ * - Admin / Entity Admin (rank ≤ 3) and BU Admin (rank 4): identical to
+ *   assertOwnEmployee() — unchanged.
+ * - Project Manager (rank 6): Service-PO-based, reusing the EXISTING
+ *   employee_servicepo_mapping table (no new table) — see
+ *   employeeServicePOMappingService.getProjectManagerServicePOIds. When
+ *   `servicePoId` is given (one specific employee_work_logs row being
+ *   approved/rejected), the check is scoped to THAT entry's own Service PO
+ *   — a Project Manager mapped to PO1 but not PO2 must never approve/
+ *   reject/view an Employee's PO2 entries just because they share PO1. When
+ *   omitted (bulk actions spanning a date/month range, or the "is this
+ *   Employee even mine" check for getTimesheets/getApprovalSummary), this
+ *   only confirms the Employee has SOME logged work against one of this
+ *   Project Manager's mapped Service POs.
+ * - Everyone else (Team Lead rank 7, Project Admin rank 5): IDENTICAL to
+ *   assertOwnEmployee()'s manager_employee_mappings check — completely
+ *   unchanged. Project Admin is explicitly out of scope for the
+ *   Project-Manager-specific redesign (left on the old path, same as Team
+ *   Lead) per product decision.
+ *
+ * @param {number} managerUserId
+ * @param {number} employeeId
+ * @param {number} companyId
+ * @param {number|null} hierarchyRank
+ * @param {number[]} [callerBuIds]
+ * @param {number|null} [servicePoId] - the specific entry's Service PO, when known
+ * @returns {Promise<number[]|null>} the Service PO ids the caller may act
+ *   within — for a Project Manager, their own real POs PLUS (once the
+ *   target Employee is confirmed to be genuinely theirs) every Centralised
+ *   PO, so that Employee's own Leave/Bench/Training/HR-Admin entries are
+ *   included too — or null when no Service-PO-based restriction applies
+ *   (every other tier)
+ */
+async function assertOwnEmployeeForApproval(managerUserId, employeeId, companyId, hierarchyRank, callerBuIds = [], servicePoId = null) {
+  if (Number.isInteger(hierarchyRank) && hierarchyRank <= ADMIN_TIER_MAX_RANK) {
+    return null;
+  }
+
+  if (hierarchyRank === BU_ADMIN_RANK) {
+    const scopeIds = callerBuIds.length > 0 ? callerBuIds : [companyId].filter(Boolean);
+    const employee = await employeeRepository.findById(employeeId, scopeIds.length === 1 ? scopeIds[0] : scopeIds);
+    if (!employee) {
+      throw forbiddenError('This Employee is not one of your mapped Employees.');
+    }
+    return null;
+  }
+
+  if (hierarchyRank === PROJECT_MANAGER_RANK) {
+    const poIds = await employeeServicePOMappingService.getProjectManagerServicePOIds(managerUserId);
+    if (poIds.length === 0) {
+      throw forbiddenError('You are not currently mapped to any Service PO as a Project Manager.');
+    }
+
+    if (servicePoId != null) {
+      if (poIds.includes(servicePoId)) {
+        return poIds;
+      }
+      // Not one of my own real POs — allow ONLY when it's a Centralised PO
+      // (Leaves/On Bench/Training/HR-Admin — auto-mapped to every Employee,
+      // so it has no genuine Project Manager of its own) AND this Employee
+      // has otherwise logged real work against one of MY POs, i.e. they're
+      // genuinely one of my own project's people, not a stranger's Leave
+      // entry I happen to share a Centralised mapping with.
+      const isCentralised = (await servicePORepository.findCentralisedIdsAmong([servicePoId])).length > 0;
+      const isMyEmployee = isCentralised
+        && (await employeeWorkLogRepository.existsForEmployeeAndServicePOIds(employeeId, poIds));
+      if (!isMyEmployee) {
+        throw forbiddenError('This work log entry does not belong to a Service PO you manage.');
+      }
+      return poIds;
+    }
+
+    const hasWork = await employeeWorkLogRepository.existsForEmployeeAndServicePOIds(employeeId, poIds);
+    if (!hasWork) {
+      throw forbiddenError('This Employee has not logged work against any Service PO you manage.');
+    }
+    // This Employee is confirmed to be genuinely mine (real project work
+    // logged against one of my POs) — widen the scope to every Centralised
+    // PO too, so THIS Employee's own Leave/Bench/Training/HR-Admin entries
+    // are visible/approvable alongside their real project work. Safe: every
+    // caller of this return value (getTimesheets/getApprovalSummary/
+    // bulkApproveTimesheets) always further scopes by this SAME employeeId,
+    // so this never leaks a different, unrelated employee's Centralised
+    // entries.
+    const centralisedPOs = await servicePORepository.getActiveCentralisedPOIds();
+    return [...poIds, ...centralisedPOs.map((po) => po.id)];
+  }
+
+  // Team Lead / Project Admin: identical to assertOwnEmployee() — unchanged.
+  const mapping = await managerEmployeeMappingRepository.findByManagerAndEmployee(managerUserId, employeeId, companyId);
+  if (!mapping) {
+    throw forbiddenError('This Employee is not one of your mapped Employees.');
+  }
+  return null;
 }
 
 async function assertGrantedServicePO(managerUserId, servicePOId, companyId) {
@@ -292,9 +421,10 @@ const TIMESHEET_SORT_BY_TO_WORK_LOG_COLUMN = {
  */
 const getTimesheets = async (managerUserId, employeeId, ownEmployeeId, companyId, query, hierarchyRank = null, callerBuIds = []) => {
   let targetEmployeeId;
+  let poIds = null;
 
   if (employeeId) {
-    await assertOwnEmployee(managerUserId, employeeId, companyId, hierarchyRank, callerBuIds);
+    poIds = await assertOwnEmployeeForApproval(managerUserId, employeeId, companyId, hierarchyRank, callerBuIds);
     targetEmployeeId = employeeId;
   } else {
     targetEmployeeId = ownEmployeeId;
@@ -319,6 +449,7 @@ const getTimesheets = async (managerUserId, employeeId, ownEmployeeId, companyId
       startDate: query.startDate,
       endDate: query.endDate,
       poId: query.poId,
+      poIds,
       subProjectId: query.subProjectId,
     },
     { limit, offset: (page - 1) * limit },
@@ -379,7 +510,7 @@ const approveTimesheet = async (managerUserId, id, companyId, actorId, ipAddress
     throw notFoundError(`Work log entry #${id} was not found.`);
   }
 
-  await assertOwnEmployee(managerUserId, entry.employee_id, companyId, hierarchyRank, callerBuIds);
+  await assertOwnEmployeeForApproval(managerUserId, entry.employee_id, companyId, hierarchyRank, callerBuIds, entry.service_po_id);
 
   if (entry.status !== 'pending') {
     throw conflictError(`Only a pending work log entry can be approved (current status: ${entry.status}).`);
@@ -433,9 +564,10 @@ const approveTimesheet = async (managerUserId, id, companyId, actorId, ipAddress
  */
 const getApprovalSummary = async (managerUserId, employeeId, ownEmployeeId, companyId, query, hierarchyRank = null, callerBuIds = []) => {
   let targetEmployeeId;
+  let poIds = null;
 
   if (employeeId) {
-    await assertOwnEmployee(managerUserId, employeeId, companyId, hierarchyRank, callerBuIds);
+    poIds = await assertOwnEmployeeForApproval(managerUserId, employeeId, companyId, hierarchyRank, callerBuIds);
     targetEmployeeId = employeeId;
   } else {
     targetEmployeeId = ownEmployeeId;
@@ -454,6 +586,7 @@ const getApprovalSummary = async (managerUserId, employeeId, ownEmployeeId, comp
     employeeId: targetEmployeeId,
     startDate: query.startDate,
     endDate: query.endDate,
+    servicePoIds: poIds,
   });
 
   // Group rows into buckets — keyed by the date string (daily) or
@@ -535,17 +668,17 @@ const getApprovalSummary = async (managerUserId, employeeId, ownEmployeeId, comp
 const bulkApproveTimesheets = async (managerUserId, body, companyId, actorId, ipAddress, hierarchyRank = null, callerBuIds = []) => {
   const { employee_id: employeeId, dates, months } = body;
 
-  await assertOwnEmployee(managerUserId, employeeId, companyId, hierarchyRank, callerBuIds);
+  const poIds = await assertOwnEmployeeForApproval(managerUserId, employeeId, companyId, hierarchyRank, callerBuIds);
 
   let totalRowsApproved = 0;
   let approved;
 
   await sequelize.transaction(async (transaction) => {
     if (dates) {
-      totalRowsApproved = await employeeWorkLogRepository.approveByEmployeeAndDates(employeeId, dates, transaction);
+      totalRowsApproved = await employeeWorkLogRepository.approveByEmployeeAndDates(employeeId, dates, transaction, poIds);
       approved = dates.map((date) => ({ date }));
     } else {
-      totalRowsApproved = await employeeWorkLogRepository.approveByEmployeeAndMonths(employeeId, months, transaction);
+      totalRowsApproved = await employeeWorkLogRepository.approveByEmployeeAndMonths(employeeId, months, transaction, poIds);
       approved = months.map(({ month, year }) => ({ month, year }));
     }
   });
@@ -595,7 +728,7 @@ const rejectWorkLogEntry = async (managerUserId, id, remark, companyId, actorId,
     throw notFoundError(`Work log entry #${id} was not found.`);
   }
 
-  await assertOwnEmployee(managerUserId, entry.employee_id, companyId, hierarchyRank, callerBuIds);
+  await assertOwnEmployeeForApproval(managerUserId, entry.employee_id, companyId, hierarchyRank, callerBuIds, entry.service_po_id);
 
   if (entry.status !== 'pending') {
     throw conflictError(`Only a pending work log entry can be rejected (current status: ${entry.status}).`);
@@ -732,4 +865,5 @@ module.exports = {
   mapEmployeeToSelf,
   unmapEmployeeFromSelf,
   assertOwnEmployee,
+  assertOwnEmployeeForApproval,
 };

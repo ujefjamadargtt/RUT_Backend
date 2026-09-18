@@ -16,6 +16,7 @@ const ORIGINAL = {
   findActiveEmployeeIdsByBusinessUnitIds: employeeBusinessUnitRepository.findActiveEmployeeIdsByBusinessUnitIds,
   findBusinessUnitsByEmployeeIds: employeeBusinessUnitRepository.findBusinessUnitsByEmployeeIds,
   findActiveUnassignedByCreator: employeeRepository.findActiveUnassignedByCreator,
+  findAllActiveIds: employeeRepository.findAllActiveIds,
   resolveCompanyIdsOwnedByCreator: companyAccessControlService.resolveCompanyIdsOwnedByCreator,
   bulkCreate: employeeServicePOMappingRepository.bulkCreate,
 };
@@ -24,6 +25,7 @@ function restore() {
   employeeBusinessUnitRepository.findActiveEmployeeIdsByBusinessUnitIds = ORIGINAL.findActiveEmployeeIdsByBusinessUnitIds;
   employeeBusinessUnitRepository.findBusinessUnitsByEmployeeIds = ORIGINAL.findBusinessUnitsByEmployeeIds;
   employeeRepository.findActiveUnassignedByCreator = ORIGINAL.findActiveUnassignedByCreator;
+  employeeRepository.findAllActiveIds = ORIGINAL.findAllActiveIds;
   companyAccessControlService.resolveCompanyIdsOwnedByCreator = ORIGINAL.resolveCompanyIdsOwnedByCreator;
   employeeServicePOMappingRepository.bulkCreate = ORIGINAL.bulkCreate;
 }
@@ -62,24 +64,10 @@ test('autoMapExistingEmployeesToCentralisedServicePO: per-company PO -> maps eve
   restore();
 });
 
-test('autoMapExistingEmployeesToCentralisedServicePO: BU-less PO -> maps Employees across the creator\'s owned Business Units PLUS the creator\'s own genuinely-unassigned Employees, deduped', async () => {
-  companyAccessControlService.resolveCompanyIdsOwnedByCreator = async (creatorId) => {
-    assert.equal(creatorId, 1);
-    return [10, 20];
-  };
-  employeeBusinessUnitRepository.findActiveEmployeeIdsByBusinessUnitIds = async (businessUnitIds) => {
-    assert.deepEqual(businessUnitIds, [10, 20]);
-    return [201, 202];
-  };
-  employeeRepository.findActiveUnassignedByCreator = async (createdBy) => {
-    assert.equal(createdBy, 1);
-    return [{ id: 500 }, { id: 501 }];
-  };
-  employeeBusinessUnitRepository.findBusinessUnitsByEmployeeIds = async (employeeIds) => {
-    assert.deepEqual(employeeIds, [500, 501]);
-    // 501 actually has a BU grant (company_id was null but they're not
-    // genuinely unassigned) -> must be excluded.
-    return [{ employee_id: 501, id: 30, name: 'Some BU' }];
+test('autoMapExistingEmployeesToCentralisedServicePO: BU-less PO -> maps EVERY active Employee platform-wide, regardless of creator (decided design)', async () => {
+  employeeRepository.findAllActiveIds = async () => [{ id: 201 }, { id: 202 }, { id: 500 }];
+  companyAccessControlService.resolveCompanyIdsOwnedByCreator = async () => {
+    throw new Error('must not be reached — a BU-less Centralised PO is no longer scoped to the creator\'s own ownership hierarchy');
   };
 
   let capturedRecords;

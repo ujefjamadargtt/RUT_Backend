@@ -341,6 +341,38 @@ async function getMonthlyResourceUtilization(req, res, next) {
   }
 }
 
+/**
+ * GET /api/v1/reports/resource-monthly-utilization
+ *
+ * A NEW report combining the Resource Project Utilization report's
+ * employee/month/client/project/service-type filter scope with the Monthly
+ * Resource Utilization report's billable/non-billable/176-hr-capacity
+ * utilization calculation. Does not modify either source report.
+ *
+ * Query params:
+ *   month (required), year (required), employeeId, clientId, poId
+ *   (alias: projectId), serviceTypeId, search, page, limit
+ */
+async function getResourceMonthlyUtilization(req, res, next) {
+  try {
+    const filters = { ...req.body, ...req.query };
+    const { data, meta, summary, month, year } =
+      await reportService.getResourceMonthlyUtilizationReport(filters, req.companyIds);
+    return sendPaginated(
+      res,
+      { records: data, summary, month, year },
+      meta,
+      'Resource monthly utilization report fetched successfully.'
+    );
+  } catch (err) {
+    if (err.statusCode) {
+      return sendError(res, err.message, err.statusCode);
+    }
+    logger.error('getResourceMonthlyUtilization error', { error: err.message, stack: err.stack });
+    next(err);
+  }
+}
+
 async function getResourseProjectUtilizationReport(req, res, next) {
   try {
     const filters = { ...req.body, ...req.query };
@@ -565,6 +597,7 @@ module.exports = {
   getInvoicePOSummary,
   getResourceUtilization,
   getMonthlyResourceUtilization,
+  getResourceMonthlyUtilization,
   getResourseProjectUtilizationReport,
   getClientServicePOHoursReport,
   getClientCostAnalytics,
