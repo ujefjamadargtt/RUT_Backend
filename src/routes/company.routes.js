@@ -76,7 +76,12 @@ const allowCompanyListing = (req, res, next) => {
  *       - bearerAuth: []
  *     responses:
  *       200:
- *         description: Company list
+ *         description: >
+ *           Company list. Every row includes entity_id and the nested
+ *           entity: { id, entity_name } relation (null entity for a BU with
+ *           no parent Entity) — the BU-scoped path (BU Admin/Project Admin/
+ *           Project Manager) needs this too, since these roles have no
+ *           GET /entities access of their own.
  *       403:
  *         description: Not an Entity Admin, Admin, or mapped BU Admin
  */

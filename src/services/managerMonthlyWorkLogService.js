@@ -15,9 +15,13 @@ const logger = require('../utils/logger');
 /**
  * Manager Monthly Work Log — lets a Manager fill in a Monthly Work Log on
  * behalf of one of their own mapped Employees (Primary or Secondary — see
- * managerSelfServiceService.assertOwnEmployee, reused verbatim here so this
- * never drifts from the same ownership rule every other My Team action
- * already enforces).
+ * managerSelfServiceService.assertOwnEmployeeForApproval, reused verbatim
+ * here so this never drifts from the same ownership rule every other My
+ * Team action already enforces, INCLUDING the Project Manager's
+ * Service-PO-based definition of "my Employee" — a Project Manager has no
+ * manager_employee_mappings row at all, so the plain assertOwnEmployee()
+ * check used to 403 here even for an Employee that legitimately appears in
+ * their own GET /my-team/employees list).
  *
  * Every entry created this way is auto-approved (status: 'approved' at
  * insert, never 'pending') and restricted to the Employee's Main PO only —
@@ -50,7 +54,7 @@ const logger = require('../utils/logger');
  * @returns {Promise<object>} same shape as employeeMonthlyWorkLogService.getMonthlyWorkLog
  */
 const getMonthlyWorkLogForEmployee = async (managerUserId, employeeId, companyId, month, year, hierarchyRank = null, callerBuIds = []) => {
-  await managerSelfServiceService.assertOwnEmployee(managerUserId, employeeId, companyId, hierarchyRank, callerBuIds);
+  await managerSelfServiceService.assertOwnEmployeeForApproval(managerUserId, employeeId, companyId, hierarchyRank, callerBuIds);
 
   return employeeMonthlyWorkLogService.getMonthlyWorkLog(employeeId, companyId, month, year);
 };
@@ -71,7 +75,7 @@ const getMonthlyWorkLogForEmployee = async (managerUserId, employeeId, companyId
  * @returns {Promise<object>} same shape as employeeMonthlyWorkLogService.getMonthlyWorkLog
  */
 const submitMonthlyWorkLogForEmployee = async (managerUserId, employeeId, companyId, data, actorId, ipAddress, hierarchyRank = null, callerBuIds = []) => {
-  await managerSelfServiceService.assertOwnEmployee(managerUserId, employeeId, companyId, hierarchyRank, callerBuIds);
+  await managerSelfServiceService.assertOwnEmployeeForApproval(managerUserId, employeeId, companyId, hierarchyRank, callerBuIds);
 
   const result = await employeeMonthlyWorkLogService.submitMonthlyWorkLog(employeeId, companyId, data, {
     creatorId: actorId,
@@ -110,7 +114,7 @@ const submitMonthlyWorkLogForEmployee = async (managerUserId, employeeId, compan
  * @returns {Promise<void>}
  */
 const deleteMonthlyWorkLogForEmployee = async (managerUserId, employeeId, companyId, month, year, hierarchyRank = null, callerBuIds = []) => {
-  await managerSelfServiceService.assertOwnEmployee(managerUserId, employeeId, companyId, hierarchyRank, callerBuIds);
+  await managerSelfServiceService.assertOwnEmployeeForApproval(managerUserId, employeeId, companyId, hierarchyRank, callerBuIds);
 
   await employeeMonthlyWorkLogService.deleteMonthlyWorkLog(employeeId, companyId, month, year);
 

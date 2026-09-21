@@ -122,12 +122,18 @@ function isReadOnlyBuAdminPeer({ hierarchyRank, roleNames = [], rolePermission }
  * @param {object} authContext
  * @param {number} authContext.userId - req.userId
  * @param {number|null} authContext.employeeId - req.employeeId (caller's own linked Employee, if any)
- * @param {number|null} authContext.companyId - req.companyId (undefined/null for Admin/Entity Admin)
+ * @param {number|null} authContext.companyId - req.companyId (undefined/null for Admin/Entity Admin,
+ *   and for a multi-BU BU-tier caller who omitted X-Company-Id on an endpoint
+ *   that doesn't require it — see employeeBusinessUnits below for that case)
  * @param {number|null} authContext.hierarchyRank - req.hierarchyRank (primary role only)
  * @param {string[]} authContext.roleNames - req.userRoles (primary + active additional roles)
+ * @param {number[]} [authContext.employeeBusinessUnits] - the caller's own mapped Business Unit
+ *   ids, plain numbers (req.employeeBusinessUnits mapped to ids by the controller) — fallback
+ *   scope for the BU Admin/Project Admin/BU-Admin-peer branch below when companyId is unset
+ *   (see resolveEmployeeListCompanyScope.js's doc comment for why that happens)
  * @returns {Promise<object>} a Sequelize `where` fragment; `{}` means unrestricted
  */
-const resolveEmployeeAccessWhere = async ({ userId, employeeId, companyId, hierarchyRank, roleNames = [] }) => {
+const resolveEmployeeAccessWhere = async ({ userId, employeeId, companyId, hierarchyRank, roleNames = [], employeeBusinessUnits = [] }) => {
   // Admin (rank 2) — scoped to their OWN sub-hierarchy, not the whole
   // platform: reuses entityRepository.findIdsOwnedByAdmin() (the same
   // "Entities this Admin owns, transitively via Entity Admins they
@@ -169,7 +175,13 @@ const resolveEmployeeAccessWhere = async ({ userId, employeeId, companyId, hiera
   // gets its own company_id populated — see employeeRepository.js's doc
   // comment on employeeScope() — a bare company_id match would 404/hide them.
   if (hierarchyRank === 4 || hierarchyRank === 5 || isBuAdminPeerRole(hierarchyRank, roleNames)) {
-    return companyId ? employeeRepository.employeeScope(companyId) : { id: -1 };
+    // companyId is unset for a multi-BU caller in this tier who omitted
+    // X-Company-Id on a route that doesn't require it (Employee Master's GET
+    // / — see resolveEmployeeListCompanyScope.js) — fall back to every
+    // Business Unit they're mapped to rather than denying them everything.
+    const scopeIds = companyId != null ? companyId : employeeBusinessUnits;
+    if (!scopeIds || (Array.isArray(scopeIds) && scopeIds.length === 0)) return { id: -1 };
+    return employeeRepository.employeeScope(scopeIds);
   }
 
   // Everyone else (Project Manager, Team Lead, Employee, and anyone holding

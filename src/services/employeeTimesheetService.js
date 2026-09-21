@@ -12,6 +12,7 @@ const dateHelper = require('../helpers/dateHelper');
 const { calculateHoursFromTimes, assertNoOverlappingEntries, sumHours } = require('../helpers/workLogTimeHelper');
 const logger = require('../utils/logger');
 const employeeServicePOMappingService = require('./employeeServicePOMappingService');
+const offDayWorkRequestService = require('./offDayWorkRequestService');
 const emailLogService = require('./emailLogService');
 const { buildApprovalReminderEmailSubject, buildApprovalReminderEmailHtml } = require('../utils/emailTemplates');
 const frontendConfig = require('../config/frontend.config');
@@ -533,6 +534,22 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
       { skipPOCompanyScope: true, skipEmployeeCompanyScope: true }
     );
 
+    // Off-Day Approval Gate — checked against the Service PO's OWN owning
+    // BU (po.company_id), not the caller's active session company, for the
+    // same cross-BU-mapped-employee reason the rest of this loop already
+    // uses skipPOCompanyScope/skipEmployeeCompanyScope. A date this BU
+    // marks off stays blocked for this exact (employee, PO, date) until an
+    // offDayWorkRequestService request for it is 'approved' — see that
+    // file's doc comment.
+    if (await offDayWorkRequestService.isOffDayForCompany(po.company_id, dateStr)) {
+      const approved = await offDayWorkRequestService.hasApprovedRequest(employeeId, line.service_po_id, dateStr);
+      if (!approved) {
+        throw conflictError(
+          `${dateStr} is a day off for this Service PO's Business Unit. Request approval from your Project Manager before logging hours for this date.`
+        );
+      }
+    }
+
     const hierarchyNode = await resolveHierarchyNode(line.hierarchy_node_id, line.service_po_id);
 
     resolvedLines.push({ line, po, hierarchyNode });
@@ -799,6 +816,18 @@ const addTimeEntries = async (employeeId, companyId, data) => {
     companyId,
     { skipPOCompanyScope: true }
   );
+
+  // Off-Day Approval Gate — see replaceDailyEntries's identical check for
+  // why this reads the Service PO's OWN owning BU (po.company_id).
+  if (await offDayWorkRequestService.isOffDayForCompany(po.company_id, dateStr)) {
+    const approved = await offDayWorkRequestService.hasApprovedRequest(employeeId, data.service_po_id, dateStr);
+    if (!approved) {
+      throw conflictError(
+        `${dateStr} is a day off for this Service PO's Business Unit. Request approval from your Project Manager before logging hours for this date.`
+      );
+    }
+  }
+
   const hierarchyNode = await resolveHierarchyNode(data.hierarchy_node_id, data.service_po_id);
 
   const existingRef = await employeeWorkLogRepository.checkDuplicate(

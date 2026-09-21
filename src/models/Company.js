@@ -66,6 +66,21 @@ module.exports = (sequelize) => {
       allowNull: false,
       defaultValue: false,
     },
+    // Which Saturdays count as off, for the Off-Day Approval Gate (see
+    // src/utils/weekOffPolicy.js) — Sunday is always off for every BU, so it
+    // has no column of its own. See database/migrations/
+    // 20260901_add_off_day_work_approval.sql.
+    saturday_off_rule: {
+      type: DataTypes.STRING(10),
+      allowNull: false,
+      defaultValue: 'ALL',
+      validate: {
+        isIn: {
+          args: [['ALL', 'ALT_1_3', 'ALT_2_4', 'NONE']],
+          msg: 'saturday_off_rule must be ALL, ALT_1_3, ALT_2_4, or NONE.',
+        },
+      },
+    },
     created_by: {
       type: DataTypes.INTEGER,
       allowNull: true,

@@ -162,6 +162,35 @@ test('BU Admin / Project Admin / HR with no companyId is denied everything, neve
   assert.deepEqual(where, { id: -1 });
 });
 
+// Regression test for a real bug report: GET /employees (Employee Master)
+// returned "WHERE parameter \"company_id\" has invalid \"undefined\" value"
+// for a BU Admin mapped to more than one Business Unit — resolveCompany.js
+// requires X-Company-Id for a multi-BU caller, but the Employee Master
+// screen deliberately never sends it (see resolveEmployeeListCompanyScope.js
+// and employee.routes.js's GET / doc comment: "X-Company-Id is not read as a
+// filter here"). companyId therefore arrives unset for this tier on that one
+// route, and must fall back to the caller's own employeeBusinessUnits scope
+// instead of the { id: -1 } denial above (which still applies when neither
+// companyId nor employeeBusinessUnits is available at all).
+test('BU Admin / Project Admin / HR with no companyId falls back to their own employeeBusinessUnits scope', async () => {
+  stubEmployeeScopeAsLegacyOnly();
+
+  const where = await resolveEmployeeAccessWhere({
+    userId: 1, employeeId: null, companyId: null, hierarchyRank: 4, roleNames: ['BU Admin'], employeeBusinessUnits: [10, 20],
+  });
+
+  const opIn = Object.getOwnPropertySymbols(where.company_id)[0];
+  assert.deepEqual([...where.company_id[opIn]], [10, 20]);
+  restore();
+});
+
+test('BU Admin / Project Admin / HR with no companyId AND no employeeBusinessUnits is still denied everything', async () => {
+  const where = await resolveEmployeeAccessWhere({
+    userId: 1, employeeId: null, companyId: null, hierarchyRank: 4, roleNames: ['BU Admin'], employeeBusinessUnits: [],
+  });
+  assert.deepEqual(where, { id: -1 });
+});
+
 test('Employee with no mappings and no additional role sees only their own Employee record', async () => {
   stubNoMappings();
   stubEmployeeScopeAsLegacyOnly();

@@ -27,8 +27,8 @@ function stubTeam() {
     ];
   };
   Employee.findAll = async () => [
-    { id: 11, employee_code: 'EMP-0001', full_name: 'John Doe', designation: 'Software Engineer', status: 'active', businessUnits: [{ id: 1, company_name: 'Alpha' }, { id: 2, company_name: 'Beta' }] },
-    { id: 12, employee_code: 'EMP-0002', full_name: 'Jane Doe', designation: 'Designer', status: 'active', businessUnits: [{ id: 3, company_name: 'Gamma' }] },
+    { id: 11, employee_code: 'EMP-0001', full_name: 'John Doe', designation: 'Software Engineer', status: 'active', businessUnits: [{ id: 1, company_name: 'Alpha', entity_id: 100, entity: { id: 100, entity_name: 'Acme' } }, { id: 2, company_name: 'Beta', entity_id: null, entity: null }] },
+    { id: 12, employee_code: 'EMP-0002', full_name: 'Jane Doe', designation: 'Designer', status: 'active', businessUnits: [{ id: 3, company_name: 'Gamma', entity_id: 200, entity: { id: 200, entity_name: 'Zenith' } }] },
   ];
 }
 
@@ -38,8 +38,8 @@ test('getMyEmployees returns every mapped employee and enriches each with BU ids
     const employees = await managerSelfServiceService.getMyEmployees(99, [1, 2, 3]);
 
     assert.deepEqual(employees, [
-      { id: 11, employee_code: 'EMP-0001', full_name: 'John Doe', designation: 'Software Engineer', status: 'active', business_unit_ids: [1, 2], business_units: [{ id: 1, name: 'Alpha' }, { id: 2, name: 'Beta' }], mapping_type: 'PRIMARY' },
-      { id: 12, employee_code: 'EMP-0002', full_name: 'Jane Doe', designation: 'Designer', status: 'active', business_unit_ids: [3], business_units: [{ id: 3, name: 'Gamma' }], mapping_type: 'SECONDARY' },
+      { id: 11, employee_code: 'EMP-0001', full_name: 'John Doe', designation: 'Software Engineer', status: 'active', business_unit_ids: [1, 2], business_units: [{ id: 1, name: 'Alpha', entity_id: 100, entity_name: 'Acme' }, { id: 2, name: 'Beta', entity_id: null, entity_name: null }], mapping_type: 'PRIMARY' },
+      { id: 12, employee_code: 'EMP-0002', full_name: 'Jane Doe', designation: 'Designer', status: 'active', business_unit_ids: [3], business_units: [{ id: 3, name: 'Gamma', entity_id: 200, entity_name: 'Zenith' }], mapping_type: 'SECONDARY' },
     ]);
   } finally {
     restore();
@@ -52,7 +52,7 @@ test('getMyEmployees filters by an EXPLICITLY selected Business Unit while retai
     const employees = await managerSelfServiceService.getMyEmployees(99, [1, 2, 3], null, 2);
 
     assert.deepEqual(employees, [
-      { id: 11, employee_code: 'EMP-0001', full_name: 'John Doe', designation: 'Software Engineer', status: 'active', business_unit_ids: [1, 2], business_units: [{ id: 1, name: 'Alpha' }, { id: 2, name: 'Beta' }], mapping_type: 'PRIMARY' },
+      { id: 11, employee_code: 'EMP-0001', full_name: 'John Doe', designation: 'Software Engineer', status: 'active', business_unit_ids: [1, 2], business_units: [{ id: 1, name: 'Alpha', entity_id: 100, entity_name: 'Acme' }, { id: 2, name: 'Beta', entity_id: null, entity_name: null }], mapping_type: 'PRIMARY' },
     ]);
   } finally {
     restore();
@@ -89,8 +89,8 @@ test('getMyEmployees bypasses manager mappings for an Admin and returns only act
     Employee.findAll = async ({ where }) => {
       employeeWhere = where;
       return [
-        { id: 21, employee_code: 'EMP-0021', full_name: 'Active Admin Scope', designation: 'Engineer', status: 'active', businessUnits: [{ id: 3, company_name: 'hfds' }] },
-        { id: 22, employee_code: 'EMP-0022', full_name: 'Other BU', designation: 'Designer', status: 'active', businessUnits: [{ id: 4, company_name: 'Other' }] },
+        { id: 21, employee_code: 'EMP-0021', full_name: 'Active Admin Scope', designation: 'Engineer', status: 'active', businessUnits: [{ id: 3, company_name: 'hfds', entity_id: 300, entity: { id: 300, entity_name: 'HFDS Entity' } }] },
+        { id: 22, employee_code: 'EMP-0022', full_name: 'Other BU', designation: 'Designer', status: 'active', businessUnits: [{ id: 4, company_name: 'Other', entity_id: null, entity: null }] },
       ];
     };
 
@@ -98,7 +98,7 @@ test('getMyEmployees bypasses manager mappings for an Admin and returns only act
 
     assert.deepEqual(employeeWhere, { status: 'active', is_deleted: false });
     assert.deepEqual(employees, [
-      { id: 21, employee_code: 'EMP-0021', full_name: 'Active Admin Scope', designation: 'Engineer', status: 'active', business_unit_ids: [3], business_units: [{ id: 3, name: 'hfds' }], mapping_type: null },
+      { id: 21, employee_code: 'EMP-0021', full_name: 'Active Admin Scope', designation: 'Engineer', status: 'active', business_unit_ids: [3], business_units: [{ id: 3, name: 'hfds', entity_id: 300, entity_name: 'HFDS Entity' }], mapping_type: null },
     ]);
   } finally {
     restore();

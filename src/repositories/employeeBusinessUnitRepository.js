@@ -1,7 +1,7 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { EmployeeBusinessUnit, Company } = require('../models');
+const { EmployeeBusinessUnit, Company, Entity } = require('../models');
 
 /**
  * All direct database interaction for employee_business_units — an
@@ -11,7 +11,12 @@ const { EmployeeBusinessUnit, Company } = require('../models');
 
 /**
  * @param {number} employeeId
- * @returns {Promise<Company[]>} active, non-deleted Business Units this employee belongs to
+ * @returns {Promise<Company[]>} active, non-deleted Business Units this employee
+ *   belongs to, each with its parent Entity attached (entity_id + the nested
+ *   `entity: { id, entity_name }` relation) — a BU-scoped caller (HR, BU
+ *   Admin, etc.) has no GET /entities access, so this is their ONLY source
+ *   for Entity info; see companyService.getAllForEmployee(), the GET
+ *   /companies path this feeds for such a caller.
  */
 const findBusinessUnitsByEmployeeId = async (employeeId) => {
   const grants = await EmployeeBusinessUnit.findAll({
@@ -20,9 +25,12 @@ const findBusinessUnitsByEmployeeId = async (employeeId) => {
       {
         model: Company,
         as: 'businessUnit',
-        attributes: ['id', 'company_code', 'company_name', 'status', 'is_original_data_visible'],
+        attributes: ['id', 'company_code', 'company_name', 'status', 'is_original_data_visible', 'saturday_off_rule', 'entity_id'],
         where: { is_deleted: false },
         required: true,
+        include: [
+          { model: Entity, as: 'entity', attributes: ['id', 'entity_name'], required: false },
+        ],
       },
     ],
   });

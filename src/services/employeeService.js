@@ -465,9 +465,15 @@ const getMappings = async (id, authContext) => {
  * an employee's own record is always within their own access scope, so
  * this always succeeds for "my own mapped BUs".
  *
+ * Each entry also carries `saturday_off_rule` ('ALL'|'ALT_1_3'|'ALT_2_4'|
+ * 'NONE', straight off the underlying `companies` row) — the Off-Day
+ * Approval Gate's only Employee-reachable source for a BU's Week Off
+ * Policy (GET /companies/:id has it too, but that route is Admin/BU-Admin
+ * scoped and not reliably callable from a plain Employee login).
+ *
  * @param {number} id
  * @param {object} authContext - { userId, employeeId, companyId, hierarchyRank, roleNames }
- * @returns {Promise<{ employee_id: number, businessUnits: {id: number, name: string, is_original_data_visible: boolean, source: string}[] }>}
+ * @returns {Promise<{ employee_id: number, businessUnits: {id: number, name: string, is_original_data_visible: boolean, saturday_off_rule: string, source: string}[] }>}
  */
 const getBusinessUnits = async (id, authContext) => {
   // Self-lookup ("my own mapped BUs") is unconditionally allowed — no
@@ -494,6 +500,7 @@ const getBusinessUnits = async (id, authContext) => {
       id: bu.id,
       name: bu.company_name,
       is_original_data_visible: !!bu.is_original_data_visible,
+      saturday_off_rule: bu.saturday_off_rule,
       source: 'mapped',
     }])
   );
@@ -514,7 +521,7 @@ const getBusinessUnits = async (id, authContext) => {
     if (ownedCompanyIds.length > 0) {
       const ownedCompanies = await Company.findAll({
         where: { id: { [Op.in]: ownedCompanyIds }, is_deleted: false },
-        attributes: ['id', 'company_name', 'is_original_data_visible'],
+        attributes: ['id', 'company_name', 'is_original_data_visible', 'saturday_off_rule'],
       });
       ownedCompanies.forEach((company) => {
         if (!businessUnitsById.has(company.id)) {
@@ -522,6 +529,7 @@ const getBusinessUnits = async (id, authContext) => {
             id: company.id,
             name: company.company_name,
             is_original_data_visible: !!company.is_original_data_visible,
+            saturday_off_rule: company.saturday_off_rule,
             source: 'owned',
           });
         }

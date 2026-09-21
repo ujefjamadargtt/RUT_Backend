@@ -17,7 +17,13 @@ const {
   dailyQuerySchema,
   listEntriesQuerySchema,
 } = require('../validations/employeeTimesheetValidation');
+const {
+  createOffDayRequestSchema,
+  resubmitOffDayRequestSchema,
+  listOffDayRequestsQuerySchema,
+} = require('../validations/offDayWorkRequestValidation');
 const controller = require('../controllers/employeeTimesheetController');
+const offDayWorkRequestController = require('../controllers/offDayWorkRequestController');
 
 /**
  * @swagger
@@ -455,6 +461,108 @@ router.post(
   authorize('employee.view_timesheet'),
   reminderLimiter,
   controller.remindApproval
+);
+
+/**
+ * @swagger
+ * /employee-timesheets/off-day-requests:
+ *   get:
+ *     summary: >
+ *       My own Off-Day Work Requests, optionally narrowed to one date —
+ *       what Daily Timesheet shows for the date currently open (Not
+ *       requested / Pending / Approved / Rejected).
+ *     tags: [Employee Timesheet]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: work_date
+ *         schema: { type: string, format: date }
+ *     responses:
+ *       200:
+ *         description: Off-Day Work Request list
+ */
+router.get(
+  '/off-day-requests',
+  authenticate,
+  requireCompanyScope,
+  authorize('employee.view_timesheet'),
+  validate(listOffDayRequestsQuerySchema, 'query'),
+  offDayWorkRequestController.listMyRequests
+);
+
+/**
+ * @swagger
+ * /employee-timesheets/off-day-requests:
+ *   post:
+ *     summary: >
+ *       Ask permission to log hours on a day the BU that owns service_po_id
+ *       marks off (see companies.saturday_off_rule / weekOffPolicy.js).
+ *       Routed to whichever Project Manager already approves that Service
+ *       PO's timesheets — the same Service-PO-based scope Timesheet
+ *       Approval uses. One request ever per (me, service_po_id, work_date);
+ *       a rejected one is reopened only via PUT .../resubmit below.
+ *     tags: [Employee Timesheet]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [service_po_id, work_date]
+ *             properties:
+ *               service_po_id: { type: integer }
+ *               work_date: { type: string, format: date }
+ *               reason: { type: string }
+ *     responses:
+ *       201:
+ *         description: Request submitted, status 'pending'
+ *       400:
+ *         description: work_date is not an off day under this Service PO's BU policy
+ *       403:
+ *         description: service_po_id is not assigned to you
+ *       409:
+ *         description: A request for this Service PO/date already exists (pending, approved, or rejected)
+ */
+router.post(
+  '/off-day-requests',
+  authenticate,
+  requireCompanyScope,
+  authorize('employee.fill_worklog'),
+  validate(createOffDayRequestSchema),
+  offDayWorkRequestController.createRequest
+);
+
+/**
+ * @swagger
+ * /employee-timesheets/off-day-requests/{id}/resubmit:
+ *   put:
+ *     summary: The only way a REJECTED request becomes 'pending' again, optionally with an updated reason.
+ *     tags: [Employee Timesheet]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Request resubmitted, status back to 'pending'
+ *       404:
+ *         description: Not found, or not one of my own requests
+ *       409:
+ *         description: Request is not currently rejected
+ */
+router.put(
+  '/off-day-requests/:id/resubmit',
+  authenticate,
+  requireCompanyScope,
+  authorize('employee.fill_worklog'),
+  validate(resubmitOffDayRequestSchema),
+  offDayWorkRequestController.resubmitRequest
 );
 
 module.exports = router;

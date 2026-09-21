@@ -33,7 +33,19 @@ const logger = require('../utils/logger');
  * @param {import('express').Request} req
  */
 function buildAuthContext(req) {
-  return { companyId: req.companyIds, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId };
+  return {
+    companyId: req.companyIds,
+    hierarchyRank: req.hierarchyRank,
+    employeeId: req.employeeId,
+    // The caller's ACTIVE-session role names (Role-Based Login already
+    // resolved these server-side against the JWT's activeRoleId — see
+    // auth.js) — servicePOService.resolveIndividuallyMappedServicePOIds
+    // needs these, not every role the Employee has ever held, so a
+    // multi-role Employee logged in as BU Admin doesn't get Project
+    // Manager's individually-mapped-only restriction just because they
+    // also hold that role elsewhere.
+    roleNames: req.employeeRoleNames,
+  };
 }
 
 /**
@@ -88,6 +100,7 @@ const getServicePOById = async (req, res) => {
       companyId: fullReachCompanyIds,
       hierarchyRank: req.hierarchyRank,
       employeeId: req.employeeId,
+      roleNames: req.employeeRoleNames,
     });
     return sendSuccess(res, po, 'Service PO fetched successfully.');
   } catch (error) {

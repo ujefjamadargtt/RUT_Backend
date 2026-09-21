@@ -77,6 +77,7 @@ const PasswordResetHistory   = require('./PasswordResetHistory')(sequelize);
 const EmailLog                = require('./EmailLog')(sequelize);
 const CostBudget             = require('./CostBudget')(sequelize);
 const ResourceBudget         = require('./ResourceBudget')(sequelize);
+const OffDayWorkRequest      = require('./OffDayWorkRequest')(sequelize);
 
 // ---------------------------------------------------------------------------
 // Associations
@@ -445,6 +446,15 @@ ServicePO.hasMany(ResourceBudget, { foreignKey: 'service_po_id', as: 'resourceBu
 ResourceBudget.belongsTo(ServicePO, { foreignKey: 'service_po_id', as: 'servicePO' });
 ResourceBudget.belongsTo(Company, { foreignKey: 'company_id', as: 'company' });
 
+// Off-Day Work Requests — see database/migrations/
+// 20260901_add_off_day_work_approval.sql and OffDayWorkRequest.js.
+Employee.hasMany(OffDayWorkRequest, { foreignKey: 'employee_id', as: 'offDayWorkRequests' });
+OffDayWorkRequest.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
+OffDayWorkRequest.belongsTo(Company, { foreignKey: 'company_id', as: 'company' });
+ServicePO.hasMany(OffDayWorkRequest, { foreignKey: 'service_po_id', as: 'offDayWorkRequests' });
+OffDayWorkRequest.belongsTo(ServicePO, { foreignKey: 'service_po_id', as: 'servicePO' });
+OffDayWorkRequest.belongsTo(Employee, { foreignKey: 'approver_id', as: 'approver' });
+
 // ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
@@ -496,4 +506,5 @@ module.exports = {
   EmailLog,
   CostBudget,
   ResourceBudget,
+  OffDayWorkRequest,
 };

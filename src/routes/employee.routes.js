@@ -5,6 +5,7 @@ const router = express.Router();
 
 const authenticate = require('../middlewares/auth');
 const resolveCompany = require('../middlewares/resolveCompany');
+const resolveEmployeeListCompanyScope = require('../middlewares/resolveEmployeeListCompanyScope');
 const authorize = require('../middlewares/authorize');
 const { validate } = require('../middlewares/validateRequest');
 const {
@@ -288,7 +289,8 @@ router.get(
  */
 router.get(
   '/',
-  authenticate,
+  authenticate.authenticateIdentity,
+  resolveEmployeeListCompanyScope,
   employeeController.getAll
 );
 

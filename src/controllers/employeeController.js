@@ -47,18 +47,21 @@ function buildEmployeeAuthContext(req) {
 /**
  * GET /api/v1/employees
  *
- * X-Company-Id (via resolveCompany, composed into authenticate()) is NOT a
- * filter here — same as every other route, it only resolves
- * buildEmployeeAuthContext's `companyId`, which decides what a BU-scoped
- * caller (BU Admin and below) is AUTHORIZED to see at all (an Admin/Entity
- * Admin/Platform Admin's authorized scope is their full owned set, header
- * notwithstanding — see employeeAccessControlService.resolveEmployeeAccessWhere).
- * The ONE explicit, documented way to narrow the returned list down to a
- * single Business Unit (for any caller whose authorized scope spans more
- * than one) is the `?business_unit_id=` query param, handled entirely
- * inside employeeService.getAll — deliberately not also read from the
- * header here, so there's exactly one BU-narrowing mechanism, not two
- * competing ones.
+ * X-Company-Id (via resolveEmployeeListCompanyScope, mounted on this route
+ * instead of the full authenticate()) is NOT a filter here — same as every
+ * other route, it only resolves buildEmployeeAuthContext's `companyId`,
+ * which decides what a BU-scoped caller (BU Admin and below) is AUTHORIZED
+ * to see at all (an Admin/Entity Admin/Platform Admin's authorized scope is
+ * their full owned set, header notwithstanding — see
+ * employeeAccessControlService.resolveEmployeeAccessWhere). A multi-BU BU
+ * Admin/Project Admin/BU-Admin-peer caller who omits the header falls back
+ * to their full employeeBusinessUnits scope instead of being rejected — see
+ * resolveEmployeeListCompanyScope.js's doc comment. The ONE explicit,
+ * documented way to narrow the returned list down to a single Business Unit
+ * (for any caller whose authorized scope spans more than one) is the
+ * `?business_unit_id=` query param, handled entirely inside
+ * employeeService.getAll — deliberately not also read from the header here,
+ * so there's exactly one BU-narrowing mechanism, not two competing ones.
  *
  * @param {import('express').Request}  req
  * @param {import('express').Response} res

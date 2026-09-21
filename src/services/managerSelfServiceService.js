@@ -1,7 +1,7 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { Employee, ServicePO, Company, sequelize } = require('../models');
+const { Employee, ServicePO, Company, Entity, sequelize } = require('../models');
 const managerEmployeeMappingRepository = require('../repositories/managerEmployeeMappingRepository');
 const managerServicePOMappingRepository = require('../repositories/managerServicePOMappingRepository');
 const employeeServicePOMappingRepository = require('../repositories/employeeServicePOMappingRepository');
@@ -106,9 +106,12 @@ const getMyEmployees = async (managerUserId, companyIds, hierarchyRank, explicit
     include: [{
       model: Company,
       as: 'businessUnits',
-      attributes: ['id', 'company_name'],
+      attributes: ['id', 'company_name', 'entity_id'],
       through: { attributes: [], where: { status: 'active' } },
       required: false,
+      include: [
+        { model: Entity, as: 'entity', attributes: ['id', 'entity_name'], required: false },
+      ],
     }],
   });
 
@@ -126,6 +129,8 @@ const getMyEmployees = async (managerUserId, companyIds, hierarchyRank, explicit
     const businessUnits = (employee.businessUnits || []).map((businessUnit) => ({
       id: businessUnit.id,
       name: businessUnit.company_name,
+      entity_id: businessUnit.entity_id,
+      entity_name: businessUnit.entity?.entity_name || null,
     }));
     const businessUnitIds = businessUnits.map((businessUnit) => businessUnit.id);
     return {
@@ -169,13 +174,48 @@ const getMyEmployees = async (managerUserId, companyIds, hierarchyRank, explicit
 };
 
 /**
- * The Service POs granted to this Manager.
+ * The Service POs granted to this Manager — or, for a BU Admin (rank 4),
+ * every Service PO in their own Business Unit(s), mapped or not. A BU
+ * Admin's authority is BU-wide by design (same as their Employee scope in
+ * assertOwnEmployee/assertOwnEmployeeForApproval above) — unlike a Manager/
+ * Team Lead, whose visibility here really is driven by individual
+ * manager_servicepo_mappings grants, a BU Admin should never see an empty
+ * list here just because nobody happened to create an explicit grant row
+ * for them.
+ *
+ * Admin tier (Platform Admin/Admin/Entity Admin, rank <= ADMIN_TIER_MAX_RANK)
+ * carries no company_id of its own (see resolveCompany.js's early-return for
+ * ranks 1-3) and has no manager_servicepo_mappings grants to begin with —
+ * this is a "my own self-service grants" list, which simply doesn't apply to
+ * a cross-BU role. Return empty rather than falling through to a
+ * company_id-scoped query with an undefined companyId.
  *
  * @param {number} managerUserId
  * @param {number} companyId
+ * @param {number|null} [hierarchyRank] - req.hierarchyRank from auth middleware
+ * @param {number[]} [callerBuIds] - all caller BU ids (BU Admin path)
  * @returns {Promise<Array>}
  */
-const getMyGrantedServicePOs = async (managerUserId, companyId) => {
+const getMyGrantedServicePOs = async (managerUserId, companyId, hierarchyRank = null, callerBuIds = []) => {
+  if (Number.isInteger(hierarchyRank) && hierarchyRank <= ADMIN_TIER_MAX_RANK) {
+    return [];
+  }
+
+  if (hierarchyRank === BU_ADMIN_RANK) {
+    const scopeIds = callerBuIds.length > 0 ? callerBuIds : [companyId].filter(Boolean);
+    // Centralised POs (Leave/Bench/Training/HR-Admin) are OR'd in
+    // unconditionally, same as everywhere else Service PO scope is
+    // resolved in this codebase (see servicePORepository.companyScope's
+    // doc comment) — they have no Business Unit of their own to match.
+    return ServicePO.findAll({
+      where: {
+        is_deleted: false,
+        [Op.or]: [{ company_id: { [Op.in]: scopeIds } }, { is_centralised: true }],
+      },
+      attributes: ['id', 'service_po_code', 'service_po_name', 'status'],
+    });
+  }
+
   const grants = await managerServicePOMappingRepository.findByManager(managerUserId, companyId);
   if (grants.length === 0) return [];
 
@@ -232,10 +272,14 @@ async function assertOwnEmployee(managerUserId, employeeId, companyId, hierarchy
 }
 
 /**
- * Approval-specific ownership guard — used ONLY by the Timesheet Approval
+ * Approval-specific ownership guard — used by the Timesheet Approval
  * read/action functions below (getTimesheets, getApprovalSummary,
- * approveTimesheet, rejectWorkLogEntry, bulkApproveTimesheets) and by
- * getMyEmployees above. Deliberately a SEPARATE function from
+ * approveTimesheet, rejectWorkLogEntry, bulkApproveTimesheets), by
+ * getMyEmployees above, and by managerMonthlyWorkLogService's
+ * get/submit/deleteMonthlyWorkLogForEmployee (Monthly Work Log shares the
+ * exact same "is this Employee mine" question as Timesheet Approval, so it
+ * must resolve a Project Manager's Employees the same Service-PO-based way).
+ * Deliberately a SEPARATE function from
  * assertOwnEmployee() (kept completely unmodified above) — Service PO
  * delegation (assignServicePOToEmployee/getEmployeeServicePOs/
  * removeServicePOFromEmployee, further below) keeps calling the ORIGINAL

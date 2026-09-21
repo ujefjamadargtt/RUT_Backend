@@ -17,6 +17,7 @@ const router = express.Router();
 
 const authenticate = require('../middlewares/auth');
 const resolveMyTeamBusinessUnitScope = require('../middlewares/resolveMyTeamBusinessUnitScope');
+const resolveOffDayRequestBusinessUnitScope = require('../middlewares/resolveOffDayRequestBusinessUnitScope');
 const authorize = require('../middlewares/authorize');
 const { validate } = require('../middlewares/validateRequest');
 const { handleManagerWorkLogUpload } = require('../middlewares/upload');
@@ -30,6 +31,10 @@ const {
   bulkApproveTimesheetsSchema,
   rejectWorkLogSchema,
 } = require('../validations/managerSelfServiceValidation');
+const {
+  listOffDayQueueQuerySchema,
+  bulkApproveOffDayRequestsSchema,
+} = require('../validations/offDayWorkRequestValidation');
 const {
   submitManagerMonthlyWorkLogSchema,
   monthYearQuerySchema,
@@ -56,7 +61,11 @@ const monthlyWorkLogController = require('../controllers/managerMonthlyWorkLogCo
  *         description: Optional Business Unit filter. Takes precedence over X-Company-Id.
  *     responses:
  *       200:
- *         description: My Employees list, including each Employee's active business_unit_ids and manager mapping_type
+ *         description: >
+ *           My Employees list, including each Employee's active
+ *           business_unit_ids and manager mapping_type. business_units
+ *           entries carry { id, name, entity_id, entity_name } — entity_name
+ *           is null for a Business Unit with no parent Entity.
  */
 router.get(
   '/employees',
@@ -706,6 +715,181 @@ router.delete(
   authenticate,
   authorize('manager.map_employees'),
   controller.unmapEmployee
+);
+
+/**
+ * @swagger
+ * /my-team/off-day-requests:
+ *   get:
+ *     summary: >
+ *       Off-Day Work Requests I may act on — same Service-PO-based scope as
+ *       Timesheet Approval (my own mapped Employees' requests for Team
+ *       Lead/Project Admin, or every request against a Service PO I'm the
+ *       Project Manager of). Defaults to every status (still-pending ones
+ *       first), so an approved/rejected request stays visible as a record
+ *       of what's been handled rather than disappearing from the queue.
+ *       Scoped to one Business Unit at a time via the X-Company-Id header,
+ *       same as every other /my-team/* endpoint.
+ *     tags: [My Team]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: header
+ *         name: X-Company-Id
+ *         required: true
+ *         schema: { type: integer }
+ *         description: >
+ *           Which Business Unit's requests to return (required whenever the
+ *           caller is mapped to more than one). Also honored for a cross-BU
+ *           caller (Platform Admin/Admin/Entity Admin) — when present,
+ *           narrows the queue to that one Business Unit (must be one the
+ *           caller can reach); omitted, it returns every reachable Business
+ *           Unit's requests at once.
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, default: 20 }
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, enum: [all, pending, approved, rejected], default: all }
+ *       - in: query
+ *         name: startDate
+ *         schema: { type: string, format: date }
+ *         description: Inclusive work_date range start — requires endDate too.
+ *       - in: query
+ *         name: endDate
+ *         schema: { type: string, format: date }
+ *         description: Inclusive work_date range end — requires startDate too.
+ *       - in: query
+ *         name: search
+ *         schema: { type: string }
+ *         description: Matches employee name/code, Service PO name, or reason (case-insensitive).
+ *     responses:
+ *       200:
+ *         description: Paginated Off-Day Work Request list
+ */
+router.get(
+  '/off-day-requests',
+  authenticate,
+  resolveOffDayRequestBusinessUnitScope,
+  authorize(['manager.view_mapped_employees', 'servicepo.view_mapped_employees']),
+  validate(listOffDayQueueQuerySchema, 'query'),
+  controller.getOffDayRequests
+);
+
+/**
+ * @swagger
+ * /my-team/off-day-requests/bulk-approve:
+ *   post:
+ *     summary: >
+ *       Multi-select Approve from the Weekend Requests queue — one call,
+ *       several ids (max 100). Never aborts the whole batch over one bad
+ *       id: an id that isn't yours to approve, or isn't currently pending,
+ *       is reported in `failed` rather than failing the request. Always
+ *       200 — check `failed` for anything that didn't go through.
+ *     tags: [My Team]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [ids]
+ *             properties:
+ *               ids:
+ *                 type: array
+ *                 items: { type: integer }
+ *                 example: [101, 102, 103]
+ *     responses:
+ *       200:
+ *         description: >
+ *           { data: { approved: number[], failed: [{ id, reason: 'not_found'|'not_owned'|'not_pending', message }] } },
+ *           message = "&lt;approved.length&gt; of &lt;ids.length&gt; requests approved."
+ *       422:
+ *         description: ids missing, empty, over 100 entries, or contains duplicates
+ */
+router.post(
+  '/off-day-requests/bulk-approve',
+  authenticate,
+  authorize(['manager.approve_timesheets', 'servicepo.approve_timesheets']),
+  validate(bulkApproveOffDayRequestsSchema),
+  controller.bulkApproveOffDayRequests
+);
+
+/**
+ * @swagger
+ * /my-team/off-day-requests/{id}/approve:
+ *   put:
+ *     summary: Approve one pending Off-Day Work Request — unlocks Daily Timesheet for that exact (employee, service PO, date).
+ *     tags: [My Team]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Request approved
+ *       403:
+ *         description: This request's Employee/Service PO is not one you may act on
+ *       404:
+ *         description: Not found
+ *       409:
+ *         description: Request is not currently pending
+ */
+router.put(
+  '/off-day-requests/:id/approve',
+  authenticate,
+  authorize(['manager.approve_timesheets', 'servicepo.approve_timesheets']),
+  controller.approveOffDayRequest
+);
+
+/**
+ * @swagger
+ * /my-team/off-day-requests/{id}/reject:
+ *   put:
+ *     summary: Reject one pending Off-Day Work Request. A remark is mandatory; the Employee can Resubmit it afterward.
+ *     tags: [My Team]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [remark]
+ *             properties:
+ *               remark: { type: string }
+ *     responses:
+ *       200:
+ *         description: Request rejected
+ *       403:
+ *         description: This request's Employee/Service PO is not one you may act on
+ *       404:
+ *         description: Not found
+ *       409:
+ *         description: Request is not currently pending
+ *       422:
+ *         description: remark is missing or empty
+ */
+router.put(
+  '/off-day-requests/:id/reject',
+  authenticate,
+  authorize(['manager.approve_timesheets', 'servicepo.approve_timesheets']),
+  validate(rejectWorkLogSchema),
+  controller.rejectOffDayRequest
 );
 
 module.exports = router;

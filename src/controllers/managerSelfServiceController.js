@@ -1,6 +1,7 @@
 'use strict';
 
 const managerSelfServiceService = require('../services/managerSelfServiceService');
+const offDayWorkRequestService = require('../services/offDayWorkRequestService');
 const { sendSuccess, sendCreated, sendNoContent, sendNotFound, sendPaginated, sendError } = require('../utils/response');
 const { getIpAddress } = require('../middlewares/auditLog');
 const logger = require('../utils/logger');
@@ -35,7 +36,7 @@ const getMyEmployees = async (req, res) => {
 
 const getMyServicePOs = async (req, res) => {
   try {
-    const pos = await managerSelfServiceService.getMyGrantedServicePOs(req.userId, req.companyId);
+    const pos = await managerSelfServiceService.getMyGrantedServicePOs(req.userId, req.companyId, req.hierarchyRank, callerBuIds(req));
     return sendSuccess(res, pos, 'My granted Service POs fetched successfully.');
   } catch (error) {
     logger.error('getMyServicePOs error', { error: error.message, userId: req.userId });
@@ -217,6 +218,67 @@ const unmapEmployee = async (req, res) => {
   }
 };
 
+const getOffDayRequests = async (req, res) => {
+  try {
+    const { data, meta } = await offDayWorkRequestService.listPendingQueue(
+      req.userId, req.companyId, req.hierarchyRank, callerBuIds(req), req.query
+    );
+    return sendPaginated(res, data, meta, 'Off-Day Work Requests fetched successfully.');
+  } catch (error) {
+    logger.error('getOffDayRequests error', { error: error.message, userId: req.userId });
+    return sendError(res, error.message, error.statusCode || 500);
+  }
+};
+
+const approveOffDayRequest = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) return sendError(res, 'Invalid Off-Day Work Request ID.', 400);
+
+    const request = await offDayWorkRequestService.approveRequest(
+      req.userId, id, req.companyId, req.userId, req.hierarchyRank, callerBuIds(req)
+    );
+    return sendSuccess(res, request, 'Off-Day Work Request approved successfully.');
+  } catch (error) {
+    if (error.statusCode === 403) return sendError(res, error.message, 403);
+    if (error.statusCode === 404) return sendNotFound(res, 'Off-Day Work Request');
+    if (error.statusCode === 409) return sendError(res, error.message, 409);
+    logger.error('approveOffDayRequest error', { error: error.message, userId: req.userId });
+    return sendError(res, error.message, error.statusCode || 500);
+  }
+};
+
+const bulkApproveOffDayRequests = async (req, res) => {
+  try {
+    const { approved, failed } = await offDayWorkRequestService.bulkApproveRequests(
+      req.userId, req.body.ids, req.companyId, req.userId, req.hierarchyRank, callerBuIds(req)
+    );
+    const total = req.body.ids.length;
+    return sendSuccess(res, { approved, failed }, `${approved.length} of ${total} requests approved.`);
+  } catch (error) {
+    logger.error('bulkApproveOffDayRequests error', { error: error.message, userId: req.userId });
+    return sendError(res, error.message, error.statusCode || 500);
+  }
+};
+
+const rejectOffDayRequest = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) return sendError(res, 'Invalid Off-Day Work Request ID.', 400);
+
+    const request = await offDayWorkRequestService.rejectRequest(
+      req.userId, id, req.body.remark, req.companyId, req.userId, req.hierarchyRank, callerBuIds(req)
+    );
+    return sendSuccess(res, request, 'Off-Day Work Request rejected successfully.');
+  } catch (error) {
+    if (error.statusCode === 403) return sendError(res, error.message, 403);
+    if (error.statusCode === 404) return sendNotFound(res, 'Off-Day Work Request');
+    if (error.statusCode === 409) return sendError(res, error.message, 409);
+    logger.error('rejectOffDayRequest error', { error: error.message, userId: req.userId });
+    return sendError(res, error.message, error.statusCode || 500);
+  }
+};
+
 module.exports = {
   getMyEmployees,
   getMyServicePOs,
@@ -230,4 +292,8 @@ module.exports = {
   removeServicePO,
   mapEmployee,
   unmapEmployee,
+  getOffDayRequests,
+  approveOffDayRequest,
+  bulkApproveOffDayRequests,
+  rejectOffDayRequest,
 };

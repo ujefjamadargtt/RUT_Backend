@@ -151,12 +151,23 @@ async function assertValidDeliveryHead(employeeId, companyId) {
  * own BU isn't one of theirs; just as importantly, a PO in their own mapped
  * BU that ISN'T individually mapped to them stays hidden — visibility is
  * driven entirely by the mapping, never by BU membership, for these two
- * roles. Every other role stays strictly BU-scoped, completely unaffected —
- * role is always re-fetched from the database (employeeRoleRepository),
- * never trusted from the request, same as
- * employeeServicePOMappingService.resolveMappingEligibilityInputs().
+ * roles. Every other role stays strictly BU-scoped, completely unaffected.
+ *
+ * Role-Based Login (auth.js) scopes a session to the ONE role picked at
+ * login — a multi-role Employee (e.g. holds BOTH "BU Admin" and "Project
+ * Manager") who selected BU Admin for this session must get the normal
+ * BU-wide scope, not Project Manager's individually-mapped-only
+ * restriction, just because they ALSO happen to hold that role on some
+ * other login. `roleNames`, when given, is the caller's already-resolved
+ * ACTIVE-role names (req.employeeRoleNames — server-verified from the JWT's
+ * activeRoleId, never client-submitted) and is used as-is; omitted (no
+ * caller currently does, kept only so a pre-existing token issued before
+ * Role-Based Login shipped degrades the same way auth.js itself documents
+ * for that case) falls back to every role the Employee has ever held.
  *
  * @param {number} employeeId
+ * @param {string[]|null} [roleNames] - the caller's active-session role
+ *   names; omitted/null re-fetches every held role from the database.
  * @returns {Promise<number[]|null>} service_po ids (possibly empty — the
  *   role qualifies but has no active mappings yet, so it sees NO Service
  *   POs at all) when the role qualifies; `null` when it doesn't, meaning
@@ -164,11 +175,9 @@ async function assertValidDeliveryHead(employeeId, companyId) {
  *   servicePORepository.companyScope()'s doc comment for how the two are
  *   told apart downstream).
  */
-async function resolveIndividuallyMappedServicePOIds(employeeId) {
-  const roles = await employeeRoleRepository.findRolesByEmployeeId(employeeId);
-  const qualifies = employeeServicePOMappingService.hasUnrestrictedServicePOVisibility(
-    roles.map((role) => role.role_name)
-  );
+async function resolveIndividuallyMappedServicePOIds(employeeId, roleNames = null) {
+  const names = roleNames || (await employeeRoleRepository.findRolesByEmployeeId(employeeId)).map((role) => role.role_name);
+  const qualifies = employeeServicePOMappingService.hasUnrestrictedServicePOVisibility(names);
   if (!qualifies) return null;
 
   const mappings = await employeeServicePOMappingRepository.findAllByEmployee(employeeId, 'active');
@@ -201,7 +210,7 @@ async function resolveIndividuallyMappedServicePOIds(employeeId) {
 const getAll = async (query = {}, authContext, headerCompanyId = null) => {
   const companyId = await resolveActorCompanyScopeForSelectedBU(authContext, headerCompanyId);
   const { page, limit, offset } = getPaginationParams(query);
-  const mappedServicePOIds = await resolveIndividuallyMappedServicePOIds(authContext.employeeId);
+  const mappedServicePOIds = await resolveIndividuallyMappedServicePOIds(authContext.employeeId, authContext.roleNames);
 
   const filters = {
     search: query.search || null,
@@ -261,7 +270,7 @@ const getById = async (id, authContext) => {
   // gets a BU of its own (company_id NULL). See
   // servicePORepository.companyScope()'s doc comment.
   const centralisedOwnerIds = await resolveCentralisedOwnerIds(companyId);
-  const mappedServicePOIds = await resolveIndividuallyMappedServicePOIds(authContext.employeeId);
+  const mappedServicePOIds = await resolveIndividuallyMappedServicePOIds(authContext.employeeId, authContext.roleNames);
   const po = await servicePORepository.findById(id, companyId, authContext.employeeId, centralisedOwnerIds, mappedServicePOIds);
 
   if (!po) {

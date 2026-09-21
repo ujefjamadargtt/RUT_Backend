@@ -100,14 +100,14 @@ const getById = async (id, entityIds) => {
  * 20260890_seed_global_service_types_categories.sql), shared by every
  * Business Unit instead of being duplicated per-BU.
  *
- * @param {object} data - { entity_id, company_code, company_name, is_original_data_visible? }
+ * @param {object} data - { entity_id, company_code, company_name, is_original_data_visible?, saturday_off_rule? }
  * @param {number} actorId - the Entity Admin creating this company
  * @param {string} ipAddress
  * @param {number[]} entityIds - the calling Entity Admin's own owned Entities (req.entityIds)
  * @returns {Promise<Company>}
  */
 const create = async (data, actorId, ipAddress = null, entityIds = []) => {
-  const { entity_id, company_code, company_name, is_original_data_visible } = data;
+  const { entity_id, company_code, company_name, is_original_data_visible, saturday_off_rule } = data;
 
   // "Entity Admin cannot access Entities belonging to another Entity
   // Admin" — enforced here before anything else runs.
@@ -125,6 +125,7 @@ const create = async (data, actorId, ipAddress = null, entityIds = []) => {
     company_code,
     company_name,
     is_original_data_visible,
+    saturday_off_rule,
     created_by: actorId,
     updated_by: actorId,
   });
