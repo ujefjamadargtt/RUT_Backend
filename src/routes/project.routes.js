@@ -133,7 +133,8 @@ router.get(
  *         schema: { type: integer, default: 20 }
  *       - in: query
  *         name: status
- *         schema: { type: string, enum: [active, inactive, all], default: active }
+ *         schema: { type: string, enum: [active, inactive, all] }
+ *         description: Omit to return projects of every status; pass active/inactive to filter
  *       - in: query
  *         name: client_id
  *         schema: { type: integer }

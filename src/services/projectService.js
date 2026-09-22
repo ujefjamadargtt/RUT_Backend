@@ -27,7 +27,7 @@ const getAll = async (query = {}, authContext) => {
 
   const filters = {
     search: query.search || null,
-    status: query.status || 'active',
+    status: query.status || null,
     client_id: query.client_id ? parseInt(query.client_id, 10) : null,
     companyId,
     // A company-less Admin/Entity Admin (companyId resolved as an array of

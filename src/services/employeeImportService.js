@@ -78,12 +78,10 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 // Employee is the sole login identity (email/password live natively on
 // `employees` — see database/migrations/20260864_add_employee_login_columns.sql,
-// same as employeeService.create()); a row only gets login credentials
-// (email/password + the "Employee" role grant) when an "Email ID" column
-// is present and populated, minus Manager assignment, which this file's
-// format doesn't have columns for. HR can assign a Manager afterwards via
-// PUT /employees/:id. Rows with no email import as business-data-only,
-// with no login at all.
+// same as employeeService.create()); every imported row gets a login —
+// "Email ID" is a required column, minus Manager assignment, which this
+// file's format doesn't have columns for. HR can assign a Manager
+// afterwards via PUT /employees/:id.
 
 function normaliseHeader(raw) {
   return String(raw || '').trim().toLowerCase().replace(/\s+/g, ' ');
@@ -213,18 +211,18 @@ function validateRow(raw, existingCodes, seenCodes, existingEmails, seenEmails) 
     data.full_name = name;
   }
 
-  // ── email (optional — populating it creates a linked login account) ────────
-  if (!isBlank(raw.email)) {
-    const email = String(raw.email).trim().toLowerCase();
-    if (!EMAIL_RE.test(email) || email.length > 100) {
-      errors.push('Email must be a valid email address (max 100 characters).');
-    } else if (existingEmails.has(email)) {
-      errors.push(`Email "${email}" is already registered.`);
-    } else if (seenEmails.has(email)) {
-      errors.push(`Email "${email}" is duplicated within this file.`);
-    } else {
-      data.email = email;
-    }
+  // ── email (required) ────────────────────────────────────────────────────────
+  const email = String(raw.email || '').trim().toLowerCase();
+  if (!email) {
+    errors.push('Email is required.');
+  } else if (!EMAIL_RE.test(email) || email.length > 100) {
+    errors.push('Email must be a valid email address (max 100 characters).');
+  } else if (existingEmails.has(email)) {
+    errors.push(`Email "${email}" is already registered.`);
+  } else if (seenEmails.has(email)) {
+    errors.push(`Email "${email}" is duplicated within this file.`);
+  } else {
+    data.email = email;
   }
 
   // ── designation (optional) ──────────────────────────────────────────────────
@@ -463,15 +461,15 @@ async function importEmployees(filePath, userId, req) {
       data.business_unit_ids = businessUnitIds;
       validRows.push(data);
       seenCodes.add(data.employee_code);
-      if (data.email) seenEmails.add(data.email);
+      seenEmails.add(data.email);
     }
   }
 
-  // 4. Look up the "Employee" role once, only if at least one row needs a
-  // linked login account (same role every auto-created User gets — see
-  // employeeService.create()).
+  // 4. Look up the "Employee" role once — every valid row gets a login
+  // now that email is required, so every imported employee gets this same
+  // default role grant (same role employeeService.create() defaults to).
   let employeeRole = null;
-  if (validRows.some((row) => row.email)) {
+  if (validRows.length > 0) {
     employeeRole = await Role.findOne({ where: { role_name: 'Employee' } });
     if (!employeeRole) {
       const err = new Error('The "Employee" role is not seeded.');
@@ -480,11 +478,11 @@ async function importEmployees(filePath, userId, req) {
     }
   }
 
-  // 5. Insert valid rows — Employee always; a native login (email/password
-  // directly on the Employee row — Employee is the sole login identity
-  // now, see this file's header comment) plus the "Employee" role grant
-  // when the row carried an Email ID, both in one transaction so a failed
-  // role-grant insert doesn't leave a half-created login.
+  // 5. Insert valid rows — Employee + native login (email/password directly
+  // on the Employee row — Employee is the sole login identity now, see this
+  // file's header comment) + the "Employee" role grant, all in one
+  // transaction so a failed role-grant insert doesn't leave a half-created
+  // login.
   let importedCount = 0;
   const dbErrors = [];
   const credentials = [];
@@ -495,16 +493,15 @@ async function importEmployees(filePath, userId, req) {
       await sequelize.transaction(async (transaction) => {
         const employee = await employeeRepository.create({
           ...employeeFields,
-          ...(email ? { email, password: DEFAULT_IMPORT_PASSWORD } : {}),
+          email,
+          password: DEFAULT_IMPORT_PASSWORD,
           company_id: companyId,
           created_by: userId,
           updated_by: userId,
         }, { transaction });
 
-        if (email) {
-          await employeeRoleRepository.replaceForEmployee(employee.id, [employeeRole.id], userId, transaction);
-          credentials.push({ employee_code: employee.employee_code, email, temporaryPassword: DEFAULT_IMPORT_PASSWORD });
-        }
+        await employeeRoleRepository.replaceForEmployee(employee.id, [employeeRole.id], userId, transaction);
+        credentials.push({ employee_code: employee.employee_code, email, temporaryPassword: DEFAULT_IMPORT_PASSWORD });
 
         // "Business Units" column mapping — see resolveRowBusinessUnitIds's
         // doc comment. A blank column resolved to an empty array, so this is

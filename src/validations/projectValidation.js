@@ -128,7 +128,7 @@ const updateProjectSchema = Joi.object({
 const listProjectsQuerySchema = Joi.object({
   page: Joi.number().integer().min(1).default(1),
   limit: Joi.number().integer().min(1).max(200).default(20),
-  status: Joi.string().valid('active', 'inactive', 'all').default('active'),
+  status: Joi.string().valid('active', 'inactive', 'all').optional(),
   client_id: Joi.number().integer().positive().optional().messages({
     'number.base': 'Client ID must be a number.',
     'number.positive': 'Client ID must be a positive integer.',
