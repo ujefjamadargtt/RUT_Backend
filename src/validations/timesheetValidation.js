@@ -161,6 +161,10 @@ const listTimesheetsQuerySchema = Joi.object({
   // src/utils/hoursVisibility.js). Only compared case-insensitively to
   // "management"; any other value (or omission) shows both hours fields.
   role: Joi.string().trim().min(1).optional(),
+  // Optional multi-select narrowing on top of the caller's existing BU/role
+  // scope (req.companyIds) — comma-separated ids. Never widens access.
+  entityIds: Joi.string().trim().optional(),
+  businessUnitIds: Joi.string().trim().optional(),
 });
 
 module.exports = {

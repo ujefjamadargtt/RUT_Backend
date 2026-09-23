@@ -5,6 +5,7 @@ const companyAccessControlService = require('./companyAccessControlService');
 const { generateClientCode } = require('../helpers/codeGenerator');
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
+const { parseIdList } = require('../utils/idListParser');
 const logger = require('../utils/logger');
 
 /**
@@ -30,7 +31,7 @@ const logger = require('../utils/logger');
  * created_by = them`).
  */
 
-const { resolveActorRecordAccessScope, resolveOptionalCreateCompanyId } = companyAccessControlService;
+const { resolveActorRecordAccessScope, resolveOptionalCreateCompanyId, resolveActorFullReach, intersectCompanyIdsWithEntity, intersectIds } = companyAccessControlService;
 
 /**
  * Retrieve a paginated list of clients with optional filters.
@@ -41,7 +42,25 @@ const { resolveActorRecordAccessScope, resolveOptionalCreateCompanyId } = compan
  */
 const getAll = async (query = {}, authContext) => {
   const { page, limit, offset } = getPaginationParams(query);
-  const companyId = await resolveActorRecordAccessScope(authContext);
+  let companyId = await resolveActorRecordAccessScope(authContext);
+
+  // Optional entityIds/businessUnitIds multi-select narrowing. Handles BOTH
+  // shapes resolveActorRecordAccessScope() can return: a plain array (most
+  // actors), or — for a company-less actor with no ?company_id selected —
+  // the { ownedCompanyIds, createdBy } object shape that also surfaces
+  // their own BU-less records. An explicit entityIds/businessUnitIds
+  // narrowing is treated the same as the existing explicit ?company_id
+  // (selectedCompanyId) narrowing already is: the caller wants ONLY these
+  // specific BUs' records now, so BU-less own-records are no longer
+  // surfaced (collapses to a plain array, same as selectedCompanyId does).
+  const entityIds = parseIdList(query.entityIds);
+  const businessUnitIds = parseIdList(query.businessUnitIds);
+  if (entityIds || businessUnitIds) {
+    let scopeArray = Array.isArray(companyId) ? companyId : companyId.ownedCompanyIds;
+    scopeArray = await intersectCompanyIdsWithEntity(scopeArray, entityIds);
+    scopeArray = intersectIds(scopeArray, businessUnitIds);
+    companyId = scopeArray;
+  }
 
   const filters = {
     search: query.search || null,
@@ -192,17 +211,42 @@ const create = async (data, userId, req) => {
  * Update an existing client.
  * Prevents updating to an already-used client_code.
  *
+ * Looks the Client up via resolveActorFullReach() (NOT
+ * resolveActorRecordAccessScope(req.companyId)) — same fix already shipped
+ * for getClientById(): req.companyId is only the caller's single CURRENTLY
+ * ACTIVE Business Unit (X-Company-Id), but GET /clients (which this Update
+ * form's list is populated from) already spans every Business Unit the
+ * caller manages. Scoping the existence check to just the active BU meant
+ * opening any Client from a DIFFERENT BU than whichever one happened to be
+ * currently selected 404'd on Save — "Client not found" — even for a
+ * no-op rename, before any field-level logic ever ran. A company-less actor
+ * (Admin/Entity Admin/Platform Admin) is unaffected either way.
+ *
+ * Business Unit REASSIGNMENT: an optional `company_id` in the body moves the
+ * Client to a different Business Unit — same authorization rule create()
+ * uses (never re-validated against req.companyId, the currently-active BU,
+ * since a multi-BU actor must be able to move a Client between ANY of their
+ * own mapped/owned BUs, not just the one currently selected):
+ *   - BU-scoped actor (req.companyId set): the target company_id must be one
+ *     of req.employeeBusinessUnits, else 403.
+ *   - Company-less actor (Admin/Entity Admin): the target company_id must be
+ *     one of their own owned Companies (resolveOwnedCompanyIds), else 403.
+ * Omitted (or equal to the Client's current company_id) -> no BU change.
+ * client_code/client_name uniqueness is checked against the DESTINATION
+ * company (the new BU when one is being assigned), since uniqueness is
+ * per-company.
+ *
  * @param {number} id
- * @param {object} data   - Validated partial body
+ * @param {object} data   - Validated partial body (may include company_id)
  * @param {number} userId
- * @param {object} req    - carries companyId/hierarchyRank/employeeId
+ * @param {object} req    - carries companyId/hierarchyRank/employeeId/employeeBusinessUnits
  * @returns {Promise<Client>}
  */
 const update = async (id, data, userId, req) => {
-  const companyId = await resolveActorRecordAccessScope({
-    companyId: req.companyId,
+  const companyId = await resolveActorFullReach({
     hierarchyRank: req.hierarchyRank,
     employeeId: req.employeeId,
+    employeeBusinessUnits: req.employeeBusinessUnits,
   });
 
   const existing = await clientRepository.findById(id, companyId);
@@ -212,10 +256,32 @@ const update = async (id, data, userId, req) => {
     throw err;
   }
 
+  const { company_id: bodyCompanyId, ...clientFields } = data;
+
+  let targetCompanyId = existing.company_id;
+  if (bodyCompanyId != null && bodyCompanyId !== existing.company_id) {
+    if (req.companyId != null) {
+      const mappedBuIds = (req.employeeBusinessUnits || []).map((bu) => bu.id);
+      if (!mappedBuIds.includes(bodyCompanyId)) {
+        const err = new Error(`Business Unit #${bodyCompanyId} is not one of your mapped Business Units.`);
+        err.statusCode = 403;
+        throw err;
+      }
+    } else {
+      const ownedCompanyIds = (await companyAccessControlService.resolveOwnedCompanyIds(req.hierarchyRank, req.employeeId)) || [];
+      if (!ownedCompanyIds.includes(bodyCompanyId)) {
+        const err = new Error(`Business Unit #${bodyCompanyId} is not one of your own Business Units.`);
+        err.statusCode = 403;
+        throw err;
+      }
+    }
+    targetCompanyId = bodyCompanyId;
+  }
+
   // If the caller wants to change the code, ensure it is not already taken
-  // within this company (uniqueness is per-company, not global)
+  // within the DESTINATION company (uniqueness is per-company, not global)
   if (data.client_code && data.client_code !== existing.client_code) {
-    const conflict = await clientRepository.findByCode(data.client_code, existing.company_id);
+    const conflict = await clientRepository.findByCode(data.client_code, targetCompanyId);
     if (conflict) {
       const err = new Error(`Client code "${data.client_code}" is already in use.`);
       err.statusCode = 409;
@@ -223,10 +289,10 @@ const update = async (id, data, userId, req) => {
     }
   }
 
-  // Same rule as create() — a renamed client can't collide with another
-  // client's name in the same company.
+  // Same rule as create() — a renamed (or BU-moved) client can't collide
+  // with another client's name in the same DESTINATION company.
   if (data.client_name && data.client_name.trim().toLowerCase() !== existing.client_name.toLowerCase()) {
-    const nameConflict = await clientRepository.findByName(data.client_name, existing.company_id);
+    const nameConflict = await clientRepository.findByName(data.client_name, targetCompanyId);
     if (nameConflict && nameConflict.id !== id) {
       const err = new Error(`Client "${data.client_name}" already exists.`);
       err.statusCode = 409;
@@ -239,9 +305,10 @@ const update = async (id, data, userId, req) => {
     client_name: existing.client_name,
     industry: existing.industry,
     status: existing.status,
+    company_id: existing.company_id,
   };
 
-  const payload = { ...data, updated_by: userId };
+  const payload = { ...clientFields, company_id: targetCompanyId, updated_by: userId };
   const updated = await clientRepository.update(id, payload, existing.company_id);
 
   await createAuditLog(
@@ -263,16 +330,19 @@ const update = async (id, data, userId, req) => {
  * Soft-delete a client (status -> inactive).
  * Refuses to delete if the client has active Service POs.
  *
+ * Looks the Client up via resolveActorFullReach() — same reasoning as
+ * update()'s own doc comment above.
+ *
  * @param {number} id
  * @param {number} userId
- * @param {object} req - carries companyId/hierarchyRank/employeeId
+ * @param {object} req - carries hierarchyRank/employeeId/employeeBusinessUnits
  * @returns {Promise<void>}
  */
 const deleteClient = async (id, userId, req) => {
-  const companyId = await resolveActorRecordAccessScope({
-    companyId: req.companyId,
+  const companyId = await resolveActorFullReach({
     hierarchyRank: req.hierarchyRank,
     employeeId: req.employeeId,
+    employeeBusinessUnits: req.employeeBusinessUnits,
   });
 
   const existing = await clientRepository.findById(id, companyId);

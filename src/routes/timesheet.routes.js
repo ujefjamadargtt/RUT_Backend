@@ -67,6 +67,14 @@ const {
  *           Narrow to one specific Business Unit, validated against the
  *           caller's own reach. Omit to see every Business Unit the caller
  *           can reach at once (never a single frozen/wrong BU, never empty).
+ *       - in: query
+ *         name: entityIds
+ *         schema: { type: string }
+ *         description: Optional. Comma-separated Entity ids — narrows the caller's BU scope, intersected with (never replacing) it.
+ *       - in: query
+ *         name: businessUnitIds
+ *         schema: { type: string }
+ *         description: Optional. Comma-separated Business Unit ids — narrows the caller's BU scope, intersected with (never replacing) it.
  *     responses:
  *       200:
  *         description: >
@@ -364,9 +372,16 @@ router.post(
  *       401:
  *         description: Unauthorized
  */
+// Converted to the same "no X-Company-Id -> role reach across every BU"
+// contract as /import/history above, so entityIds/businessUnitIds
+// multi-select narrowing is possible here — previously a multi-BU actor was
+// REQUIRED to pick exactly one BU via X-Company-Id/company_id (this route
+// used the plain `authenticate` chain, req.companyId singular). Omitting
+// the header now aggregates across every BU the caller can reach instead
+// of 400ing, matching every other List/Master endpoint already converted.
 router.get(
   '/',
-  authenticate,
+  authenticateReadMultiBU,
   validate(listTimesheetsQuerySchema, 'query'),
   timesheetController.getAll
 );

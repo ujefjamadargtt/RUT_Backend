@@ -292,7 +292,7 @@ test('bulkApproveTimesheets (Project Manager): the Project Manager\'s own Servic
     employeeWorkLogRepository.approveByEmployeeAndDates = async (employeeId, dates, transaction, servicePoIds) => {
       assert.equal(employeeId, 101);
       capturedPoIds = servicePoIds;
-      return 2;
+      return { total_rows_approved: 2, buckets: dates.map((date) => ({ date, rows_approved: 1, already_settled: false })) };
     };
 
     const result = await managerSelfServiceService.bulkApproveTimesheets(
@@ -318,7 +318,7 @@ test('bulkApproveTimesheets (Project Manager): scope is widened to include every
     let capturedPoIds;
     employeeWorkLogRepository.approveByEmployeeAndDates = async (employeeId, dates, transaction, servicePoIds) => {
       capturedPoIds = servicePoIds;
-      return 3;
+      return { total_rows_approved: 3, buckets: [{ date: '2026-08-01', rows_approved: 3, already_settled: false }] };
     };
 
     const result = await managerSelfServiceService.bulkApproveTimesheets(
@@ -340,7 +340,7 @@ test('bulkApproveTimesheets (Project Manager): rejected up front when the employ
     stubWorkLogQueries();
     sequelize.transaction = async (fn) => fn({ __fakeTransaction: true });
     let repoCalled = false;
-    employeeWorkLogRepository.approveByEmployeeAndDates = async () => { repoCalled = true; return 0; };
+    employeeWorkLogRepository.approveByEmployeeAndDates = async () => { repoCalled = true; return { total_rows_approved: 0, buckets: [] }; };
 
     // Employee 999 never appears in WORKLOG_BY_PO for PO1.
     await assert.rejects(

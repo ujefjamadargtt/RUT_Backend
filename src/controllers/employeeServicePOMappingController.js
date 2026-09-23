@@ -54,7 +54,8 @@ const assign = async (req, res, next) => {
       req.body.employee_id,
       req.body.service_po_id,
       req.userId,
-      companyId
+      companyId,
+      req.body.is_project_manager
     );
     return sendCreated(res, mapping, 'Service PO assigned to employee successfully.');
   } catch (err) {
@@ -63,6 +64,42 @@ const assign = async (req, res, next) => {
     }
     if (err.statusCode === 409) {
       return sendError(res, err.message, 409);
+    }
+    if (err.statusCode === 400) {
+      return sendError(res, err.message, 400);
+    }
+    next(err);
+  }
+};
+
+/**
+ * PUT /api/v1/employee-servicepo-mapping/:id/project-manager
+ *
+ * Updates ONLY an existing mapping's `is_project_manager` flag — never
+ * creates/deletes the mapping. Backs both the Employee Master mapping
+ * screen's per-row PM toggle and the Service PO Master "Map Employees"
+ * screen's Employee/Project-Manager radio (Section 11 of the PM redesign
+ * spec).
+ */
+const updateProjectManagerFlag = async (req, res, next) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) {
+      return sendError(res, 'Invalid mapping ID.', 400);
+    }
+    const mapping = await employeeServicePOMappingService.setMappingProjectManagerFlag(
+      id,
+      req.body.is_project_manager,
+      req.userId,
+      await resolveScope(req)
+    );
+    return sendSuccess(res, mapping, 'Mapping updated successfully.');
+  } catch (err) {
+    if (err.statusCode === 404) {
+      return sendNotFound(res, 'Mapping');
+    }
+    if (err.statusCode === 400) {
+      return sendError(res, err.message, 400);
     }
     next(err);
   }
@@ -203,6 +240,7 @@ const getServicePOOptions = async (req, res, next) => {
       companyId: req.companyId,
       hierarchyRank: req.hierarchyRank,
       employeeId: req.employeeId,
+      employeeBusinessUnits: (req.employeeBusinessUnits || []).map((bu) => bu.id),
     });
     return sendSuccess(res, options, 'Eligible Service PO options fetched successfully.');
   } catch (err) {
@@ -229,7 +267,12 @@ const saveMappings = async (req, res, next) => {
       employeeId,
       req.body.service_po_ids,
       req.userId,
-      { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId }
+      {
+        companyId: req.companyId,
+        hierarchyRank: req.hierarchyRank,
+        employeeId: req.employeeId,
+        employeeBusinessUnits: (req.employeeBusinessUnits || []).map((bu) => bu.id),
+      }
     );
     return sendSuccess(res, mappings, 'Employee Service PO mappings saved successfully.');
   } catch (err) {
@@ -315,6 +358,7 @@ module.exports = {
   removeMapping,
   activateMapping,
   deactivateMapping,
+  updateProjectManagerFlag,
   getEmployeeMappings,
   getServicePOEmployees,
   getServicePOOptions,

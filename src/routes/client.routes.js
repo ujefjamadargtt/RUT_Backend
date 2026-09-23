@@ -248,9 +248,19 @@ router.post(
  *               status:
  *                 type: string
  *                 enum: [active, inactive]
+ *               company_id:
+ *                 type: integer
+ *                 description: >
+ *                   Optional Business Unit reassignment. Must be one of the
+ *                   caller's own mapped Business Units (BU-scoped actor) or
+ *                   owned Companies (Admin/Entity Admin) — a Business Unit
+ *                   outside that set is rejected with 403. Omitted -> the
+ *                   Client's current Business Unit is left unchanged.
  *     responses:
  *       200:
  *         description: Client updated
+ *       403:
+ *         description: The given company_id is not one of the caller's own mapped/owned Business Units
  *       404:
  *         description: Client not found
  */

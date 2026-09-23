@@ -6,6 +6,28 @@ const logger = require('../utils/logger');
 const dateHelper = require('../helpers/dateHelper');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
 const publishVisibilityService = require('./publishVisibilityService');
+const { intersectCompanyIdsWithEntity, intersectIds } = require('./companyAccessControlService');
+const { parseIdList } = require('../utils/idListParser');
+
+/**
+ * Narrow an already-resolved companyId[] (BU/role reach — req.companyIds,
+ * always an array for /dashboard/analytics and /dashboard/analytics2) by
+ * the entityIds/businessUnitIds multi-select query params, same contract as
+ * every other converted report endpoint. Only meaningful when the scope is
+ * an array; a plain single companyId (not used by these two routes, but
+ * this helper mirrors the defensive check used elsewhere) has nothing left
+ * to narrow. Never widens access.
+ *
+ * @param {number|number[]} companyId
+ * @param {object} query
+ * @returns {Promise<number|number[]>}
+ */
+async function applyEntityBuFilters(companyId, query) {
+  if (!Array.isArray(companyId)) return companyId;
+  let scoped = await intersectCompanyIdsWithEntity(companyId, parseIdList(query.entityIds));
+  scoped = intersectIds(scoped, parseIdList(query.businessUnitIds));
+  return scoped;
+}
 const round2 = (n) => Math.round(parseFloat(n || 0) * 100) / 100;
 
 /**
@@ -769,6 +791,7 @@ async function getBillableTrend(query = {}, companyId) {
  * @returns {Promise<object>} { filters_applied, workforce, portfolio, financials, tiles, charts, activity }
  */
 async function getAnalyticsDashboard(query = {}, companyId) {
+  companyId = await applyEntityBuFilters(companyId, query);
   const fiscalYear = resolveFiscalYear(query);
   const fyBounds = fiscalYearBounds(fiscalYear);
   const period = resolveAnalyticsPeriod(query, fiscalYear);
@@ -1465,6 +1488,7 @@ async function buildTopClientsByCost(pagination, hoursSource, companyId) {
  * }>}
  */
 async function getMonthlyResourceUtilization(query = {}, companyId) {
+  companyId = await applyEntityBuFilters(companyId, query);
   const fiscalYear = resolveFiscalYear(query);
   const period = resolveAnalyticsPeriod(query, fiscalYear);
 

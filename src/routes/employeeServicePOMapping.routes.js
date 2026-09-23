@@ -9,6 +9,7 @@ const {
   assignMappingSchema,
   listMappingsQuerySchema,
   saveEmployeeMappingsSchema,
+  updateProjectManagerFlagSchema,
   getServicePOEmployeeOptionsQuerySchema,
 } = require('../validations/employeeServicePOMappingValidation');
 const controller = require('../controllers/employeeServicePOMappingController');
@@ -29,6 +30,14 @@ const controller = require('../controllers/employeeServicePOMappingController');
  * /employee-servicepo-mapping:
  *   post:
  *     summary: Assign a Service PO to an Employee
+ *     description: >
+ *       `is_project_manager: true` (Section 11.B of the PM redesign spec —
+ *       the Service PO Master "Map Employees" entry point) explicitly marks
+ *       this Employee as the Project Manager/approver for THIS Service PO,
+ *       separate from and in addition to a plain employee mapping. Rejected
+ *       with 400 if the Employee does not currently hold the Project
+ *       Manager role. Defaults to false (a plain employee mapping) when
+ *       omitted.
  *     tags: [Employee Service PO Mapping]
  *     security:
  *       - bearerAuth: []
@@ -42,9 +51,12 @@ const controller = require('../controllers/employeeServicePOMappingController');
  *             properties:
  *               employee_id: { type: integer }
  *               service_po_id: { type: integer }
+ *               is_project_manager: { type: boolean, default: false }
  *     responses:
  *       201:
  *         description: Mapping created
+ *       400:
+ *         description: is_project_manager=true but the Employee does not hold the Project Manager role
  *       404:
  *         description: Employee or Service PO not found
  *       409:
@@ -97,7 +109,12 @@ router.get(
  *       server-side), every eligible Service PO in the caller's authorized
  *       company/tenant scope is returned, regardless of the Employee's own
  *       Business Unit. Every other role stays restricted to their own
- *       Business Unit(s) plus Centralised/BU-less Service POs.
+ *       Business Unit(s) plus Centralised/BU-less Service POs. Uses
+ *       identity-only authentication (no mandatory X-Company-Id) — same
+ *       reasoning as GET .../service-po/{id} above: a BU Admin/Project
+ *       Manager/Delivery Head managing MULTIPLE Business Units must reach
+ *       this screen for any Employee across their own full managed scope,
+ *       not just whichever ONE Business Unit is currently selected.
  *     tags: [Employee Service PO Mapping]
  *     security:
  *       - bearerAuth: []
@@ -114,7 +131,7 @@ router.get(
  */
 router.get(
   '/employee/:employeeId/options',
-  authenticate,
+  authenticate.authenticateIdentity,
   controller.getServicePOOptions
 );
 
@@ -128,7 +145,11 @@ router.get(
  *       Every id is revalidated server-side against the same eligibility
  *       rule GET .../options uses; an ineligible id rejects the whole
  *       request with 400. Existing mappings are diff-synced (activated/
- *       deactivated), never hard-deleted.
+ *       deactivated), never hard-deleted. Uses identity-only authentication
+ *       (no mandatory X-Company-Id) — same reasoning as GET .../options
+ *       above, so Save never rejects an already-eligible Service PO purely
+ *       because the caller's currently-selected Global BU doesn't happen to
+ *       match it.
  *     tags: [Employee Service PO Mapping]
  *     security:
  *       - bearerAuth: []
@@ -158,7 +179,7 @@ router.get(
  */
 router.put(
   '/employee/:employeeId',
-  authenticate,
+  authenticate.authenticateIdentity,
   validate(saveEmployeeMappingsSchema),
   controller.saveMappings
 );
@@ -326,6 +347,50 @@ router.put(
   '/:id/deactivate',
   authenticate,
   controller.deactivateMapping
+);
+
+/**
+ * @swagger
+ * /employee-servicepo-mapping/{id}/project-manager:
+ *   put:
+ *     summary: Update ONLY an existing mapping's Project Manager flag
+ *     description: >
+ *       Never creates or deletes the mapping, and never touches `status` —
+ *       purely toggles `is_project_manager` on an already-existing row
+ *       (Section 8 Case 1 of the PM redesign spec, and the Service PO
+ *       Master "Map Employees" screen's Employee/Project-Manager radio).
+ *       Turning it ON is rejected with 400 if the mapping's Employee does
+ *       not currently hold the Project Manager role.
+ *     tags: [Employee Service PO Mapping]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [is_project_manager]
+ *             properties:
+ *               is_project_manager: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: Mapping updated
+ *       400:
+ *         description: is_project_manager=true but the Employee does not hold the Project Manager role
+ *       404:
+ *         description: Not found
+ */
+router.put(
+  '/:id/project-manager',
+  authenticate,
+  validate(updateProjectManagerFlagSchema),
+  controller.updateProjectManagerFlag
 );
 
 /**

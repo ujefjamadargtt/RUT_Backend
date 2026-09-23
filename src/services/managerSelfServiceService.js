@@ -100,7 +100,7 @@ const getMyEmployees = async (managerUserId, companyIds, hierarchyRank, explicit
     employeeWhere = { id: mappings.map((mapping) => mapping.employee_id) };
   }
 
-  const employees = await Employee.findAll({
+  const allEmployees = await Employee.findAll({
     where: employeeWhere,
     attributes: ['id', 'employee_code', 'full_name', 'designation', 'status'],
     include: [{
@@ -114,6 +114,19 @@ const getMyEmployees = async (managerUserId, companyIds, hierarchyRank, explicit
       ],
     }],
   });
+
+  // The caller's own Employee record (req.userId/req.employeeId are the
+  // same id — see middlewares/auth.js) must never appear in their own "My
+  // Employees" list, no matter how it otherwise qualified (a direct
+  // manager_employee_mappings row, or — the real case this closes — a
+  // Project Manager who has personally logged work against a Service PO
+  // they themselves manage, which the Service-PO-based branch above would
+  // otherwise happily include). Left in, the Timesheet Approval screen
+  // built from this list would show the Manager their own name/entries and
+  // let them approve their own submitted hours (assertOwnEmployeeForApproval
+  // now also blocks that action directly — see its own doc comment — but
+  // this list must never have offered it in the first place).
+  const employees = allEmployees.filter((employee) => employee.id !== managerUserId);
 
   const mappingByEmployeeId = new Map();
   for (const mapping of mappings) {
@@ -319,6 +332,22 @@ async function assertOwnEmployee(managerUserId, employeeId, companyId, hierarchy
  *   (every other tier)
  */
 async function assertOwnEmployeeForApproval(managerUserId, employeeId, companyId, hierarchyRank, callerBuIds = [], servicePoId = null) {
+  // A Manager's own Employee record (req.userId/req.employeeId are the same
+  // id post-identity-redesign — see middlewares/auth.js) must never qualify
+  // as one of "my mapped Employees" here, no matter how it otherwise would
+  // (a direct manager_employee_mappings row mapping someone to themselves,
+  // or — the real-world case — a Project Manager who has personally logged
+  // work against a Service PO they themselves manage). Without this, a
+  // Manager/Project Manager could view/approve/reject their OWN submitted
+  // timesheet entries, since every check below only asks "is this Employee
+  // one this caller manages" and never "is this Employee the caller". "My
+  // own timesheet" is reached exclusively via the employeeId-omitted path
+  // (getTimesheets/getApprovalSummary's ownEmployeeId branch) — never
+  // through this approval-guarded, explicit-employeeId path.
+  if (employeeId === managerUserId) {
+    throw forbiddenError('You cannot approve, reject, or view your own timesheet through Timesheet Approval.');
+  }
+
   if (Number.isInteger(hierarchyRank) && hierarchyRank <= ADMIN_TIER_MAX_RANK) {
     return null;
   }
@@ -700,6 +729,15 @@ const getApprovalSummary = async (managerUserId, employeeId, ownEmployeeId, comp
  * to include an already-settled item than one deliberate click on a
  * known-pending row.
  *
+ * `approved` carries a per-bucket `already_settled` flag, true when that
+ * date/month had rows but none were pending BY THE TIME this call's atomic
+ * UPDATE ran — i.e. this call lost a race against another action (another
+ * Manager's overlapping bulk-approve on a shared Centralised PO, or simply
+ * an earlier approve/reject) that got there first. A bucket with no rows at
+ * all (nothing was ever logged) stays `already_settled: false` — the two
+ * cases both approve 0 rows but are NOT the same thing, and the caller
+ * needs to tell them apart rather than seeing an unexplained 0.
+ *
  * @param {number} managerUserId
  * @param {object} body - { employee_id, dates?, months? }
  * @param {number} companyId
@@ -707,7 +745,7 @@ const getApprovalSummary = async (managerUserId, employeeId, ownEmployeeId, comp
  * @param {string} ipAddress
  * @param {number|null} [hierarchyRank] - req.hierarchyRank from auth middleware
  * @param {number[]}    [callerBuIds]   - all caller BU ids (BU Admin path)
- * @returns {Promise<{ employee_id, approved: object[], total_rows_approved }>}
+ * @returns {Promise<{ employee_id, approved: Array<{date?, month?, year?, rows_approved, already_settled}>, total_rows_approved }>}
  */
 const bulkApproveTimesheets = async (managerUserId, body, companyId, actorId, ipAddress, hierarchyRank = null, callerBuIds = []) => {
   const { employee_id: employeeId, dates, months } = body;
@@ -719,11 +757,13 @@ const bulkApproveTimesheets = async (managerUserId, body, companyId, actorId, ip
 
   await sequelize.transaction(async (transaction) => {
     if (dates) {
-      totalRowsApproved = await employeeWorkLogRepository.approveByEmployeeAndDates(employeeId, dates, transaction, poIds);
-      approved = dates.map((date) => ({ date }));
+      const result = await employeeWorkLogRepository.approveByEmployeeAndDates(employeeId, dates, transaction, poIds);
+      totalRowsApproved = result.total_rows_approved;
+      approved = result.buckets;
     } else {
-      totalRowsApproved = await employeeWorkLogRepository.approveByEmployeeAndMonths(employeeId, months, transaction, poIds);
-      approved = months.map(({ month, year }) => ({ month, year }));
+      const result = await employeeWorkLogRepository.approveByEmployeeAndMonths(employeeId, months, transaction, poIds);
+      totalRowsApproved = result.total_rows_approved;
+      approved = result.buckets;
     }
   });
 

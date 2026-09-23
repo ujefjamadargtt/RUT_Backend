@@ -160,6 +160,28 @@ test('TEST 5: an existing mapping to an Employee outside the resolved BU set sti
   restore();
 });
 
+// PM redesign (Section 11.B): project_manager_employee_ids is the subset of
+// mapped_employee_ids whose mapping row is explicitly PM-flagged — lets the
+// Service PO Master "Map Employees" screen pre-select each mapped
+// employee's Employee/Project-Manager radio without a second round-trip.
+test('project_manager_employee_ids: only the PM-flagged mapping rows are included, never every mapped employee', async () => {
+  companyAccessControlService.resolveActorCompanyScope = async () => 1;
+  companyAccessControlService.resolveAdminScopeForBusinessUnits = async (ids) => ids;
+  servicePORepository.findById = async () => ({ id: 378, company_id: 1 });
+  employeeServicePOMappingRepository.findByServicePO = async () => [
+    { employee_id: 55, is_project_manager: true },
+    { employee_id: 56, is_project_manager: false },
+    { employee_id: 57, is_project_manager: true },
+  ];
+  stubEmployeeFindAllCapture([]);
+
+  const result = await employeeServicePOMappingService.getEmployeeOptionsForServicePO(378, BU_ADMIN_MULTI_BU);
+
+  assert.deepEqual(result.mapped_employee_ids.sort((a, b) => a - b), [55, 56, 57]);
+  assert.deepEqual(result.project_manager_employee_ids.sort((a, b) => a - b), [55, 57]);
+  restore();
+});
+
 // TEST 6 — search spans the whole scope, not just one BU.
 test('TEST 6: a search term is passed straight through to the (already cross-BU) Employee query', async () => {
   stubHappyPath();

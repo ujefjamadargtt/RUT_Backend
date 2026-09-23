@@ -74,6 +74,14 @@ const createProjectSchema = Joi.object({
  * PUT /projects/:id — Update existing project
  */
 const updateProjectSchema = Joi.object({
+  // Optional Business Unit reassignment — see projectService.update()'s own
+  // doc comment for the authorization rule (must be one of the caller's own
+  // mapped/owned Business Units). Omitted -> the Project's BU is left
+  // unchanged.
+  company_id: Joi.number().integer().positive().optional().messages({
+    'number.base': 'Business Unit (company_id) must be a number.',
+  }),
+
   client_id: Joi.number()
     .integer()
     .positive()
@@ -136,6 +144,14 @@ const listProjectsQuerySchema = Joi.object({
   search: Joi.string().trim().max(100).optional().allow(''),
   sort_by: Joi.string().valid('project_name', 'project_code', 'created_at').default('project_name'),
   sort_order: Joi.string().valid('ASC', 'DESC', 'asc', 'desc').default('ASC'),
+  // Optional multi-select narrowing on top of the caller's existing BU/role
+  // scope (req.companyIds) — comma-separated ids, same convention as every
+  // other multi-select id filter in this codebase (see
+  // reportService.parseIdList). Never widens access: an id outside the
+  // caller's own reach is silently dropped, never an error — see
+  // companyAccessControlService.intersectCompanyIdsWithEntity()/intersectIds().
+  entityIds: Joi.string().trim().optional(),
+  businessUnitIds: Joi.string().trim().optional(),
 });
 
 module.exports = {

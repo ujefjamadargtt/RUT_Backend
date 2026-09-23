@@ -65,6 +65,14 @@ const createClientSchema = Joi.object({
  * PUT /clients/:id — Update existing client
  */
 const updateClientSchema = Joi.object({
+  // Optional Business Unit reassignment — see clientService.update()'s own
+  // doc comment for the authorization rule (must be one of the caller's own
+  // mapped/owned Business Units). Omitted -> the Client's BU is left
+  // unchanged.
+  company_id: Joi.number().integer().positive().optional().messages({
+    'number.base': 'Business Unit (company_id) must be a number.',
+  }),
+
   client_code: Joi.string()
     .trim()
     .uppercase()
@@ -119,6 +127,12 @@ const listClientsQuerySchema = Joi.object({
   // records are excluded). BU-scoped actors: validated against their own BUs
   // by resolveReportCompanyScope before this ever reaches the service.
   company_id: Joi.number().integer().positive().optional(),
+  // Optional multi-select narrowing (comma-separated ids), additive to the
+  // existing single-value company_id above — same "explicit BU narrowing
+  // excludes BU-less own-records" semantics as company_id. Never widens
+  // access.
+  entityIds: Joi.string().trim().optional(),
+  businessUnitIds: Joi.string().trim().optional(),
 });
 
 module.exports = {

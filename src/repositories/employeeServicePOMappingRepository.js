@@ -110,6 +110,68 @@ const updateStatus = async (id, status, updatedBy, companyId) => {
 };
 
 /**
+ * Update a single mapping row's `is_project_manager` flag in place — never
+ * creates a new row and never touches `status`. Case 1 (Section 8 of the PM
+ * redesign spec) — "remove/grant PM status only, employee stays mapped" —
+ * and its promote-to-PM mirror, both go through this one function, called
+ * by employeeServicePOMappingService.setMappingProjectManagerFlag() only
+ * after that service has already confirmed (when turning it ON) the
+ * employee currently holds the Project Manager role.
+ * @param {number} id
+ * @param {boolean} isProjectManager
+ * @param {number} updatedBy
+ * @param {number|number[]} companyId
+ * @returns {Promise<EmployeeServicePOMapping|null>}
+ */
+const updateProjectManagerFlag = async (id, isProjectManager, updatedBy, companyId) => {
+  const mapping = await EmployeeServicePOMapping.findOne({ where: { id, ...companyScope(companyId) } });
+  if (!mapping) return null;
+  return mapping.update({ is_project_manager: isProjectManager, updated_by: updatedBy });
+};
+
+/**
+ * Bulk-set `is_project_manager` on several mapping rows by id, in one
+ * statement — the diff-sync PM-flag step of
+ * employeeServicePOMappingService.saveEmployeeServicePOMappings(), mirroring
+ * bulkUpdateStatus()'s pattern for `status`.
+ * @param {number[]} ids
+ * @param {boolean} isProjectManager
+ * @param {number} updatedBy
+ * @returns {Promise<number>} rows updated
+ */
+const bulkSetProjectManagerFlag = async (ids, isProjectManager, updatedBy) => {
+  if (!ids.length) return 0;
+  const [count] = await EmployeeServicePOMapping.update(
+    { is_project_manager: isProjectManager, updated_by: updatedBy },
+    { where: { id: { [Op.in]: ids } } }
+  );
+  return count;
+};
+
+/**
+ * Section 6/7 of the PM redesign spec: when an Employee's Project Manager
+ * role is removed/disabled, every Service PO mapping row where they were
+ * marked as PM must revert to a plain employee mapping (is_project_manager
+ * -> false) — the mapping row itself is NEVER deleted, only the flag. Called
+ * from employeeService.js's update() (inside the same transaction as the
+ * role replace) via
+ * employeeServicePOMappingService.clearProjectManagerAssignmentsForEmployee().
+ * A no-op (0 rows) when this employee had no PM-flagged mapping to begin
+ * with.
+ * @param {number} employeeId
+ * @param {number} updatedBy
+ * @param {object} [transaction]
+ * @returns {Promise<number>} rows updated
+ */
+const clearProjectManagerFlagForEmployee = async (employeeId, updatedBy, transaction) => {
+  const [count] = await EmployeeServicePOMapping.update(
+    { is_project_manager: false, updated_by: updatedBy },
+    { where: { employee_id: employeeId, is_project_manager: true }, transaction }
+  );
+  return count;
+};
+
+/**
  * Hard-delete a mapping row.
  * @param {number} id
  * @param {number|number[]} companyId
@@ -174,11 +236,17 @@ const findByEmployee = async (employeeId, companyId, status) => {
  * dropdown even though they hold an active mapping to it.
  * @param {number} employeeId
  * @param {string} [status]
+ * @param {{ onlyProjectManager?: boolean }} [options] - onlyProjectManager
+ *   narrows to rows with is_project_manager = true — used by
+ *   employeeServicePOMappingService.getProjectManagerServicePOIds() so the
+ *   Service PO ids returned reflect ONLY this employee's explicit PM
+ *   assignments, never every Service PO they merely happen to be mapped to.
  * @returns {Promise<EmployeeServicePOMapping[]>}
  */
-const findAllByEmployee = async (employeeId, status) => {
+const findAllByEmployee = async (employeeId, status, options = {}) => {
   const where = { employee_id: employeeId };
   if (status) where.status = status;
+  if (options.onlyProjectManager) where.is_project_manager = true;
 
   return EmployeeServicePOMapping.findAll({
     where,
@@ -292,12 +360,18 @@ const findByServicePO = async (servicePOId, status) => {
  *
  * @param {number[]} servicePoIds
  * @param {string} [status]
+ * @param {{ onlyProjectManager?: boolean }} [options] - onlyProjectManager
+ *   narrows to rows with is_project_manager = true — used by
+ *   employeeServicePOMappingService.getProjectManagersForServicePOs() so the
+ *   employees returned are ONLY those explicitly assigned as PM for one of
+ *   these Service POs, never every employee merely mapped to them.
  * @returns {Promise<EmployeeServicePOMapping[]>}
  */
-const findByServicePOs = async (servicePoIds, status) => {
+const findByServicePOs = async (servicePoIds, status, options = {}) => {
   if (!servicePoIds || servicePoIds.length === 0) return [];
   const where = { service_po_id: { [Op.in]: servicePoIds } };
   if (status) where.status = status;
+  if (options.onlyProjectManager) where.is_project_manager = true;
 
   return EmployeeServicePOMapping.findAll({
     where,
@@ -353,6 +427,9 @@ module.exports = {
   create,
   bulkCreate,
   updateStatus,
+  updateProjectManagerFlag,
+  bulkSetProjectManagerFlag,
+  clearProjectManagerFlagForEmployee,
   remove,
   findByEmployee,
   findAllByEmployee,

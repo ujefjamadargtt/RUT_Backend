@@ -8,6 +8,8 @@ const employeeServicePOMappingRepository = require('../repositories/employeeServ
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
 const dateHelper = require('../helpers/dateHelper');
 const { getDeadlineInfo, assertWithinEditWindow } = require('../config/servicePOMonthlyBudget.config');
+const { intersectCompanyIdsWithEntity, intersectIds } = require('./companyAccessControlService');
+const { parseIdList } = require('../utils/idListParser');
 const logger = require('../utils/logger');
 
 /**
@@ -150,6 +152,14 @@ const listMonthlyBudgets = async (query, companyId, userId, roleName, employeeId
   const year = parseInt(query.year, 10);
   const month = query.month !== undefined ? parseInt(query.month, 10) : null;
 
+  // Optional entityIds/businessUnitIds multi-select narrowing on top of the
+  // already-resolved companyId (req.companyIds, always an array for this
+  // route). Never widens access.
+  if (Array.isArray(companyId)) {
+    companyId = await intersectCompanyIdsWithEntity(companyId, parseIdList(query.entityIds));
+    companyId = intersectIds(companyId, parseIdList(query.businessUnitIds));
+  }
+
   const allowedIds = await getAllowedServicePOIds(userId, roleName, companyId, employeeId);
 
   const records = await servicePOMonthlyBudgetRepository.findBudgetsForMonth(month, year, companyId, allowedIds);
@@ -180,13 +190,25 @@ const listMonthlyBudgets = async (query, companyId, userId, roleName, employeeId
  * GET /service-po-monthly-budgets/service-pos — the Service PO dropdown.
  * Active Service POs the caller's role is allowed to see, no budget data.
  *
+ * @param {object} query - { entityIds?, businessUnitIds? }
  * @param {number} companyId
  * @param {number} userId - authenticated caller (req.userId)
  * @param {string} roleName - authenticated caller's primary role (req.userRoleName)
  * @param {number|null} employeeId - authenticated caller's linked Employee id (req.employeeId)
  * @returns {Promise<object[]>}
  */
-const listServicePOsForDropdown = async (companyId, userId, roleName, employeeId) => {
+const listServicePOsForDropdown = async (query, companyId, userId, roleName, employeeId) => {
+  // Optional entityIds/businessUnitIds multi-select narrowing on top of the
+  // already-resolved companyId (req.companyIds, always an array for this
+  // route) — same narrowing GET /service-po-monthly-budgets itself already
+  // applies (listMonthlyBudgets above). Without this, the PO dropdown/grid
+  // this feeds would keep showing every BU's Service POs while the budget
+  // list next to it is correctly narrowed — an inconsistent screen.
+  if (Array.isArray(companyId)) {
+    companyId = await intersectCompanyIdsWithEntity(companyId, parseIdList(query.entityIds));
+    companyId = intersectIds(companyId, parseIdList(query.businessUnitIds));
+  }
+
   const allowedIds = await getAllowedServicePOIds(userId, roleName, companyId, employeeId);
   const servicePOs = await servicePOMonthlyBudgetRepository.findActiveServicePOsForDropdown(companyId, allowedIds);
 

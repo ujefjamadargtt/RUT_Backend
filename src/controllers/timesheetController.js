@@ -226,7 +226,7 @@ const getImportRows = async (req, res, next) => {
 const getAll = async (req, res, next) => {
   try {
     const filters = { ...req.body, ...req.query };
-    const { data, meta } = await timesheetService.getAllTimesheets(filters, req.companyId);
+    const { data, meta } = await timesheetService.getAllTimesheets(filters, req.companyIds);
     return sendPaginated(res, data, meta, 'Timesheets fetched successfully.');
   } catch (err) {
     return handleError(next, err, 'getAll');

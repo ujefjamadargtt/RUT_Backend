@@ -8,13 +8,22 @@ const assert = require('node:assert/strict');
 // saveEmployeeServicePOMappings() (PUT save). Same monkey-patch style as
 // test/employeeServicePOMappingService.crossTenant.test.js — every
 // repository call is stubbed, no real DB. authContext.companyId is always a
-// plain number (a BU-scoped actor) so companyAccessControlService.
-// resolveActorCompanyScope() short-circuits without hitting the DB.
+// plain number (a BU-scoped actor); the CALLER's scope is resolved via
+// resolveEmployeeMappingScope() (NOT resolveActorCompanyScope() — see that
+// function's doc comment: a BU-scoped caller's scope now widens to their
+// owning Admin's FULL company set, not just their own single active BU —
+// same fix already applied to assign()/getServicePOEmployees()). Its own
+// resolveAdminScopeForBusinessUnits() widening step is stubbed as an
+// identity passthrough here (own-BUs -> owning-Admin's full scope is tested
+// separately in test/companyAccessControlService.resolveAdminScopeForBusinessUnits.test.js)
+// so these tests stay DB-independent and can assert on the plain [companyId]
+// array these functions pass down.
 const employeeRepository = require('../src/repositories/employeeRepository');
 const employeeBusinessUnitRepository = require('../src/repositories/employeeBusinessUnitRepository');
 const employeeRoleRepository = require('../src/repositories/employeeRoleRepository');
 const servicePORepository = require('../src/repositories/servicePORepository');
 const employeeServicePOMappingRepository = require('../src/repositories/employeeServicePOMappingRepository');
+const companyAccessControlService = require('../src/services/companyAccessControlService');
 const employeeServicePOMappingService = require('../src/services/employeeServicePOMappingService');
 
 const ORIGINAL = {
@@ -23,9 +32,11 @@ const ORIGINAL = {
   findRolesByEmployeeId: employeeRoleRepository.findRolesByEmployeeId,
   getEligibleForMapping: servicePORepository.getEligibleForMapping,
   findByEmployee: employeeServicePOMappingRepository.findByEmployee,
+  findAllByEmployee: employeeServicePOMappingRepository.findAllByEmployee,
   findByEmployeeAndPOIds: employeeServicePOMappingRepository.findByEmployeeAndPOIds,
   bulkCreate: employeeServicePOMappingRepository.bulkCreate,
   bulkUpdateStatus: employeeServicePOMappingRepository.bulkUpdateStatus,
+  resolveAdminScopeForBusinessUnits: companyAccessControlService.resolveAdminScopeForBusinessUnits,
 };
 
 function restore() {
@@ -37,7 +48,20 @@ function restore() {
   employeeServicePOMappingRepository.findByEmployeeAndPOIds = ORIGINAL.findByEmployeeAndPOIds;
   employeeServicePOMappingRepository.bulkCreate = ORIGINAL.bulkCreate;
   employeeServicePOMappingRepository.bulkUpdateStatus = ORIGINAL.bulkUpdateStatus;
+  // resolveAdminScopeForBusinessUnits and findAllByEmployee deliberately
+  // stay stubbed (their own defaults) for every test in this file — see the
+  // top-of-file comments. Each test that needs its own findAllByEmployee
+  // result re-stubs it directly.
+  employeeServicePOMappingRepository.findAllByEmployee = async () => [];
 }
+
+companyAccessControlService.resolveAdminScopeForBusinessUnits = async (ownBusinessUnitIds) => ownBusinessUnitIds;
+// saveEmployeeServicePOMappings() now grandfathers the Employee's currently-
+// ACTIVE mappings (findAllByEmployee) so a closed/completed Service PO can't
+// block an unrelated save — see the "grandfather" test below. Defaults to
+// none here; each saveEmployeeServicePOMappings test that needs a specific
+// existing-mappings set stubs this itself.
+employeeServicePOMappingRepository.findAllByEmployee = async () => [];
 
 const AUTH_CONTEXT = { companyId: 10, hierarchyRank: 4, employeeId: 900 }; // BU Admin, own BU 10
 
@@ -81,7 +105,7 @@ test('TEST 1/2 — Project Manager (renamed from Service PO Admin): eligible que
   const result = await employeeServicePOMappingService.getServicePOOptionsForEmployee(1, AUTH_CONTEXT);
 
   assert.equal(captured.unrestricted, true);
-  assert.equal(captured.companyId, 10); // the CALLER's authorized scope, not the employee's own BU
+  assert.deepEqual(captured.companyId, [10]); // the CALLER's resolved authorized scope (resolveEmployeeMappingScope), not the employee's own BU
   assert.equal(result.unrestricted, true);
   assert.equal(result.eligible_service_pos.length, 3); // PO-002/PO-003 (different BUs) still included
 

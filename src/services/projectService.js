@@ -2,10 +2,12 @@
 
 const projectRepository = require('../repositories/projectRepository');
 const clientRepository = require('../repositories/clientRepository');
-const { resolveActorCompanyScope, resolveCreateCompanyIdForActor } = require('./companyAccessControlService');
+const companyAccessControlService = require('./companyAccessControlService');
+const { resolveActorCompanyScope, resolveCreateCompanyIdForActor, resolveActorFullReach, intersectCompanyIdsWithEntity, intersectIds } = companyAccessControlService;
 const { generateProjectCode } = require('../helpers/codeGenerator');
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
+const { parseIdList } = require('../utils/idListParser');
 const logger = require('../utils/logger');
 
 /**
@@ -22,7 +24,17 @@ const logger = require('../utils/logger');
  * @returns {Promise<{ data: Project[], meta: object }>}
  */
 const getAll = async (query = {}, authContext) => {
-  const companyId = await resolveActorCompanyScope(authContext);
+  let companyId = await resolveActorCompanyScope(authContext);
+  // Optional entityIds/businessUnitIds multi-select narrowing on top of the
+  // already-resolved BU/role scope — only meaningful when that scope is an
+  // array (a BU-scoped actor with a single X-Company-Id-selected companyId
+  // is already narrowed to one BU; these filters have nothing left to
+  // narrow there). Never widens access — see intersectCompanyIdsWithEntity()/
+  // intersectIds()'s own doc comments.
+  if (Array.isArray(companyId)) {
+    companyId = await intersectCompanyIdsWithEntity(companyId, parseIdList(query.entityIds));
+    companyId = intersectIds(companyId, parseIdList(query.businessUnitIds));
+  }
   const { page, limit, offset } = getPaginationParams(query);
 
   const filters = {
@@ -222,6 +234,31 @@ const create = async (data, userId, req) => {
 /**
  * Update an existing project.
  *
+ * Looks the Project up via resolveActorFullReach() (NOT
+ * resolveActorCompanyScope(req.companyId)) — same fix as clientService.
+ * update(): req.companyId is only the caller's single CURRENTLY ACTIVE
+ * Business Unit, but GET /projects/GET /projects/:id (which the Edit form's
+ * list is populated from) already span every Business Unit the caller
+ * manages. Scoping the existence check to just the active BU meant opening
+ * any Project from a DIFFERENT BU than whichever one happened to be
+ * currently selected 404'd on Save — "Project not found" — even for a
+ * no-op rename, before any field-level logic ever ran. The exact same class
+ * of bug just fixed for Client, and it surfaces together with it: moving a
+ * Client to a different BU (clientService.update()) leaves any of that
+ * Client's own Projects still pointing at the OLD BU, so re-opening one of
+ * THOSE Projects to update it next hits this identical gap.
+ *
+ * Business Unit REASSIGNMENT: an optional `company_id` in the body moves the
+ * Project to a different Business Unit — same authorization rule
+ * clientService.update() uses (never re-validated against req.companyId,
+ * the currently-active BU, since a multi-BU actor must be able to move a
+ * Project between ANY of their own mapped/owned BUs):
+ *   - BU-scoped actor (req.companyId set): the target company_id must be one
+ *     of req.employeeBusinessUnits, else 403.
+ *   - Company-less actor (Admin/Entity Admin): the target company_id must be
+ *     one of their own owned Companies (resolveOwnedCompanyIds), else 403.
+ * Omitted (or equal to the Project's current company_id) -> no BU change.
+ *
  * @param {number} id
  * @param {object} data
  * @param {number} userId
@@ -229,10 +266,10 @@ const create = async (data, userId, req) => {
  * @returns {Promise<Project>}
  */
 const update = async (id, data, userId, req) => {
-  const scope = await resolveActorCompanyScope({
-    companyId: req.companyId,
+  const scope = await resolveActorFullReach({
     hierarchyRank: req.hierarchyRank,
     employeeId: req.employeeId,
+    employeeBusinessUnits: req.employeeBusinessUnits,
   });
 
   const existing = await projectRepository.findById(id, scope, req.employeeId);
@@ -241,10 +278,33 @@ const update = async (id, data, userId, req) => {
     err.statusCode = 404;
     throw err;
   }
-  const companyId = existing.company_id;
+
+  const { company_id: bodyCompanyId, ...projectFields } = data;
+
+  let companyId = existing.company_id;
+  if (bodyCompanyId != null && bodyCompanyId !== existing.company_id) {
+    if (req.companyId != null) {
+      const mappedBuIds = (req.employeeBusinessUnits || []).map((bu) => bu.id);
+      if (!mappedBuIds.includes(bodyCompanyId)) {
+        const err = new Error(`Business Unit #${bodyCompanyId} is not one of your mapped Business Units.`);
+        err.statusCode = 403;
+        throw err;
+      }
+    } else {
+      const ownedCompanyIds = (await companyAccessControlService.resolveOwnedCompanyIds(req.hierarchyRank, req.employeeId)) || [];
+      if (!ownedCompanyIds.includes(bodyCompanyId)) {
+        const err = new Error(`Business Unit #${bodyCompanyId} is not one of your own Business Units.`);
+        err.statusCode = 403;
+        throw err;
+      }
+    }
+    companyId = bodyCompanyId;
+  }
 
   // If client_id is being changed, validate the new client — same
-  // conditional-on-change pattern servicePOService.update() uses.
+  // conditional-on-change pattern servicePOService.update() uses. Checked
+  // against the DESTINATION company (the new BU when one is being
+  // assigned), consistent with the uniqueness checks below.
   if (data.client_id && data.client_id !== existing.client_id) {
     const client = await clientRepository.findById(data.client_id, companyId);
     if (!client) {
@@ -268,8 +328,8 @@ const update = async (id, data, userId, req) => {
     }
   }
 
-  // Same rule as create() — a renamed project can't collide with another
-  // project's name in the same company.
+  // Same rule as create() — a renamed (or BU-moved) project can't collide
+  // with another project's name in the same DESTINATION company.
   if (data.project_name && data.project_name.trim().toLowerCase() !== existing.project_name.toLowerCase()) {
     const nameConflict = await projectRepository.findByName(data.project_name, companyId);
     if (nameConflict && nameConflict.id !== id) {
@@ -285,10 +345,11 @@ const update = async (id, data, userId, req) => {
     project_name: existing.project_name,
     project_description: existing.project_description,
     status: existing.status,
+    company_id: existing.company_id,
   };
 
-  const payload = { ...data, updated_by: userId };
-  const updated = await projectRepository.update(id, payload, companyId);
+  const payload = { ...projectFields, company_id: companyId, updated_by: userId };
+  const updated = await projectRepository.update(id, payload, existing.company_id);
 
   await createAuditLog(
     userId,
@@ -309,16 +370,19 @@ const update = async (id, data, userId, req) => {
  * Soft-delete a project. Refuses to delete if any Service PO still
  * references it.
  *
+ * Looks the Project up via resolveActorFullReach() — same reasoning as
+ * update()'s own doc comment above.
+ *
  * @param {number} id
  * @param {number} userId
  * @param {object} req
  * @returns {Promise<void>}
  */
 const deleteProject = async (id, userId, req) => {
-  const scope = await resolveActorCompanyScope({
-    companyId: req.companyId,
+  const scope = await resolveActorFullReach({
     hierarchyRank: req.hierarchyRank,
     employeeId: req.employeeId,
+    employeeBusinessUnits: req.employeeBusinessUnits,
   });
 
   const existing = await projectRepository.findById(id, scope, req.employeeId);

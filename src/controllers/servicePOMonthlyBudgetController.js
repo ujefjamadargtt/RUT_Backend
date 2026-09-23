@@ -47,7 +47,7 @@ const getOne = async (req, res) => {
  */
 const listServicePOs = async (req, res) => {
   try {
-    const data = await servicePOMonthlyBudgetService.listServicePOsForDropdown(req.companyIds, req.userId, req.userRoleName, req.employeeId);
+    const data = await servicePOMonthlyBudgetService.listServicePOsForDropdown(req.query, req.companyIds, req.userId, req.userRoleName, req.employeeId);
     return sendSuccess(res, data, 'Service PO list fetched successfully.');
   } catch (error) {
     logger.error('listServicePOs (ServicePOMonthlyBudget) error', { error: error.message });

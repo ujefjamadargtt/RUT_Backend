@@ -95,6 +95,17 @@ const listCompaniesQuerySchema = Joi.object({
   status: Joi.string().valid('active', 'inactive', 'all').default('active'),
   search: Joi.string().trim().max(150).optional().allow(''),
   entity_id: Joi.number().integer().positive().optional(),
+  // Multi-select narrowing (comma-separated ids), additive to the existing
+  // single-value entity_id — see companyRepository.findAllForEntities().
+  // entity_ids/business_unit_ids (this endpoint's own snake_case
+  // convention) are the primary accepted names; entityIds/businessUnitIds
+  // (camelCase, matching the Report endpoints' convention) are also
+  // accepted for compatibility. The snake_case form wins when both are
+  // somehow given.
+  entity_ids: Joi.string().trim().optional(),
+  business_unit_ids: Joi.string().trim().optional(),
+  entityIds: Joi.string().trim().optional(),
+  businessUnitIds: Joi.string().trim().optional(),
   sort_by: Joi.string().valid('company_name', 'company_code', 'status', 'created_at').default('company_name'),
   sort_order: Joi.string().valid('ASC', 'DESC', 'asc', 'desc').default('ASC'),
 });

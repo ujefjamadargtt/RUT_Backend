@@ -334,6 +334,15 @@ const listServicePOsQuerySchema = Joi.object({
     .valid('service_po_name', 'service_po_code', 'start_date', 'end_date', 'po_value', 'created_at')
     .default('created_at'),
   sort_order: Joi.string().valid('ASC', 'DESC', 'asc', 'desc').default('DESC'),
+  // Optional multi-select narrowing on top of the caller's existing BU/role
+  // scope — comma-separated ids. Never widens access. company_ids
+  // (snake_case, matching this endpoint's own client_id/sort_by
+  // convention) is the Admin/Platform-Admin-only BU filter; businessUnitIds
+  // (camelCase) is also accepted for compatibility with the Report
+  // endpoints' convention. Both compose (intersect) when given together.
+  entityIds: Joi.string().trim().optional(),
+  businessUnitIds: Joi.string().trim().optional(),
+  company_ids: Joi.string().trim().optional(),
 });
 
 module.exports = {

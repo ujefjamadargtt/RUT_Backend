@@ -72,6 +72,80 @@ function toCsvExportBuffer(rows, columns) {
 }
 
 /**
+ * Excel export with a 2-row grouped header — a static "employee master"
+ * column block followed by repeating month blocks (e.g. APR: Hours, Logged
+ * Hrs, Utilization % - Projection, Utilization % - Actual, Contribution),
+ * each month's columns merged under one top-row header cell. Consecutive
+ * columns sharing the same `group` are merged in row 1; columns with no
+ * `group` (the static columns) get a single cell vertically merged across
+ * both header rows instead. Used by the Resource Cost / Utilization report;
+ * generic enough for any future report with the same "static columns + N
+ * repeating dynamic column groups" shape.
+ *
+ * @param {Array<object>} rows - flat row objects, one key per column (a
+ *   column with no matching key on a row renders as a blank/editable cell —
+ *   used for the Expected CTC / Billed Status columns).
+ * @param {Array<{ key: string, label: string, group?: string, width?: number, numFmt?: string }>} columns
+ * @param {string} title
+ * @param {{ freezeColumns?: number, freezeHeaderRows?: number }} [options] -
+ *   both default to 0 (no freeze pane at all — merged headers scroll like
+ *   any other row/column). Pass freezeColumns to pin that many leading
+ *   columns and/or freezeHeaderRows (typically 2, for this function's
+ *   2-row header) to pin header rows on vertical scroll.
+ * @returns {Promise<Buffer>}
+ */
+async function toGroupedExcelBuffer(rows, columns, title, { freezeColumns = 0, freezeHeaderRows = 0 } = {}) {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet(title.substring(0, 31) || 'Report');
+
+  let col = 1;
+  let i = 0;
+  while (i < columns.length) {
+    const group = columns[i].group;
+    if (!group) {
+      sheet.getCell(1, col).value = columns[i].label;
+      sheet.mergeCells(1, col, 2, col);
+      col += 1;
+      i += 1;
+      continue;
+    }
+    let span = 0;
+    while (i + span < columns.length && columns[i + span].group === group) span += 1;
+    sheet.getCell(1, col).value = group;
+    sheet.mergeCells(1, col, 1, col + span - 1);
+    for (let j = 0; j < span; j += 1) {
+      sheet.getCell(2, col + j).value = columns[i + j].label;
+    }
+    col += span;
+    i += span;
+  }
+
+  sheet.getRow(1).font = { bold: true };
+  sheet.getRow(1).alignment = { horizontal: 'center', vertical: 'middle' };
+  sheet.getRow(2).font = { bold: true };
+
+  columns.forEach((c, idx) => {
+    sheet.getColumn(idx + 1).width = c.width || 16;
+  });
+
+  rows.forEach((row) => {
+    const excelRow = sheet.addRow(columns.map((c) => row[c.key] ?? null));
+    columns.forEach((c, idx) => {
+      if (c.numFmt) excelRow.getCell(idx + 1).numFmt = c.numFmt;
+    });
+  });
+
+  if (freezeColumns > 0 || freezeHeaderRows > 0) {
+    sheet.views = [{ state: 'frozen', xSplit: freezeColumns, ySplit: freezeHeaderRows }];
+  }
+  // Neither passed (this report's case) -> no `views` set at all, so the
+  // sheet opens with no freeze pane whatsoever — merged month headers stay
+  // as plain rows 1-2, scrolling like everything else.
+
+  return workbook.xlsx.writeBuffer();
+}
+
+/**
  * @param {Array<object>} rows
  * @param {Array<{ key: string, label: string }>} columns
  * @param {string} title
@@ -113,4 +187,4 @@ function toPdfBuffer(rows, columns, title) {
   });
 }
 
-module.exports = { toExcelBuffer, toMultiSheetExcelBuffer, toCsvExportBuffer, toPdfBuffer };
+module.exports = { toExcelBuffer, toMultiSheetExcelBuffer, toGroupedExcelBuffer, toCsvExportBuffer, toPdfBuffer };

@@ -38,6 +38,10 @@ function requireDateOrMonth(value, helpers) {
 const complianceReportQuerySchema = Joi.object({
   ...periodFields,
   company_id: Joi.number().integer().positive().optional(),
+  // Multi-select narrowing (comma-separated ids), additive to the legacy
+  // single-value company_id above. Never widens access.
+  entityIds: Joi.string().trim().optional(),
+  businessUnitIds: Joi.string().trim().optional(),
   search: Joi.string().trim().max(100).allow('').optional(),
   sortBy: Joi.string()
     .valid('employee_name', 'employee_code', 'total_hours', 'shortfall_hours')
@@ -81,6 +85,10 @@ const complianceReminderBodySchema = Joi.object({
 const complianceReminderBulkBodySchema = Joi.object({
   ...periodFields,
   company_id: Joi.number().integer().positive().optional(),
+  // Multi-select narrowing (comma-separated ids), additive to the legacy
+  // single-value company_id above — wins over it when both are given.
+  // Only meaningful when remindAll=true, same as company_id.
+  company_ids: Joi.string().trim().optional(),
   employeeIds: Joi.array()
     .items(Joi.number().integer().positive())
     .min(1)

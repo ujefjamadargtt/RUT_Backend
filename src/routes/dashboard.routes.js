@@ -120,6 +120,12 @@ const analyticsQuerySchema = Joi.object({
     .description("'O' = original hours_logged, 'M' (default) = modified_hours falling back to hours_logged."),
   roleId: Joi.number().integer().positive().optional()
     .description('Sent by the frontend to identify the caller\'s role. roleId=5 (Management) gates this response to published-only data for the selected period — see publishVisibilityService.js.'),
+  // Optional multi-select narrowing on top of the caller's existing BU/role
+  // scope (req.companyIds) — comma-separated ids. Never widens access.
+  entityIds: Joi.string().trim().optional()
+    .description('Optional, comma-separated Entity ids — narrows the caller\'s BU scope, intersected with (never replacing) it.'),
+  businessUnitIds: Joi.string().trim().optional()
+    .description('Optional, comma-separated Business Unit ids — narrows the caller\'s BU scope, intersected with (never replacing) it.'),
 })
   .and('startDate', 'endDate')
   .and('month', 'year');

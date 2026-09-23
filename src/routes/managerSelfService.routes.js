@@ -316,7 +316,15 @@ router.put(
  *                 example: [{ "month": 7, "year": 2026 }]
  *     responses:
  *       200:
- *         description: Approval summary — which dates/months were approved and how many rows each affected
+ *         description: >
+ *           { employee_id, total_rows_approved, approved: [{ date|month+year,
+ *           rows_approved, already_settled }] } — `already_settled: true` on
+ *           a bucket means it had rows but none were still pending by the
+ *           time this call ran (already approved by another concurrent
+ *           action, e.g. another Manager's overlapping bulk-approve on a
+ *           shared Centralised PO, or an earlier action) — distinct from a
+ *           bucket with no rows at all, which also shows rows_approved: 0
+ *           but already_settled: false.
  *       403:
  *         description: employee_id is not one of the caller's mapped Employees
  *       422:

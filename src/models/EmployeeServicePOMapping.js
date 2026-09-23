@@ -65,6 +65,19 @@ module.exports = (sequelize) => {
           isIn: { args: [['active', 'inactive']], msg: 'Status must be active or inactive.' },
         },
       },
+      // True only when this SAME mapping row also carries Project
+      // Manager/approver authority for this one Service PO — never implied
+      // merely by the employee holding the Project Manager role or by the
+      // existence of this mapping row itself. See
+      // employeeServicePOMappingService.js's getProjectManagerServicePOIds()/
+      // getProjectManagersForServicePOs() (the approval-routing consumers of
+      // this flag) and database/migrations/
+      // 20260903_add_is_project_manager_to_employee_servicepo_mapping.sql.
+      is_project_manager: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
+      },
       created_by: {
         type: DataTypes.INTEGER,
         allowNull: true,

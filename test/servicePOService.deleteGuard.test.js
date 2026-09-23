@@ -36,10 +36,12 @@ function restore() {
 const FAKE_PO = { id: 293, service_po_name: 'ABC Service PO', company_id: 4 };
 
 // delete() now takes a req-like object (it resolves the actor's company
-// scope via companyAccessControlService.resolveActorCompanyScope — see
+// scope via companyAccessControlService.resolveActorFullReach — see
 // projectService.js's deleteProject() for the identical pattern) rather
 // than a bare companyId, so every call below passes this instead of `4`.
-const FAKE_REQ = { companyId: 4, hierarchyRank: 4, employeeId: 100 };
+// employeeBusinessUnits (not just companyId) is required since
+// resolveActorFullReach resolves a BU-scoped actor's FULL reach from it.
+const FAKE_REQ = { companyId: 4, hierarchyRank: 4, employeeId: 100, employeeBusinessUnits: [{ id: 4 }] };
 const HIERARCHY_NODES = [
   { id: 1, node_type: 'PARENT' },
   { id: 2, node_type: 'CHILD' },

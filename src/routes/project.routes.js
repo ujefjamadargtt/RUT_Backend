@@ -149,6 +149,23 @@ router.get(
  *       - in: query
  *         name: sort_order
  *         schema: { type: string, enum: [ASC, DESC], default: ASC }
+ *       - in: query
+ *         name: entityIds
+ *         schema: { type: string }
+ *         description: >
+ *           Optional. Comma-separated Entity ids (e.g. "1,4"). Narrows the
+ *           caller's existing Business Unit scope (X-Company-Id header /
+ *           role reach) to just the Companies under these Entities —
+ *           intersected with, never replacing, that scope.
+ *       - in: query
+ *         name: businessUnitIds
+ *         schema: { type: string }
+ *         description: >
+ *           Optional. Comma-separated Business Unit ids (e.g. "10,12,15").
+ *           Further narrows the caller's existing BU scope (after any
+ *           entityIds narrowing) — intersected with, never replacing, that
+ *           scope. An id outside the caller's reach is silently dropped,
+ *           never an error.
  *     responses:
  *       200:
  *         description: Paginated list of projects
@@ -234,9 +251,30 @@ router.post(
  *         name: id
  *         required: true
  *         schema: { type: integer }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               client_id: { type: integer }
+ *               project_code: { type: string }
+ *               project_name: { type: string }
+ *               project_description: { type: string }
+ *               status: { type: string, enum: [active, inactive] }
+ *               company_id:
+ *                 type: integer
+ *                 description: >
+ *                   Optional Business Unit reassignment. Must be one of the
+ *                   caller's own mapped Business Units (BU-scoped actor) or
+ *                   owned Companies (Admin/Entity Admin) — a Business Unit
+ *                   outside that set is rejected with 403. Omitted -> the
+ *                   Project's current Business Unit is left unchanged.
  *     responses:
  *       200:
  *         description: Project updated
+ *       403:
+ *         description: The given company_id is not one of the caller's own mapped/owned Business Units
  *       404:
  *         description: Project not found
  */

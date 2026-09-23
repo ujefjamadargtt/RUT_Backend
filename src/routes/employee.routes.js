@@ -269,6 +269,23 @@ router.get(
  *         schema: { type: integer }
  *         description: Narrows the list to employees CURRENTLY holding this ONE Role — composes with business_unit_id, status, and search exactly as they already do.
  *       - in: query
+ *         name: entityIds
+ *         schema: { type: string }
+ *         description: >
+ *           Optional. Comma-separated Entity ids — resolves to the Companies
+ *           under those Entities, then applies the SAME narrowing as
+ *           business_unit_id (just via the Company mapping table, not a
+ *           header). Composes with businessUnitIds when both are given
+ *           (intersected). Supersedes business_unit_id when given.
+ *       - in: query
+ *         name: businessUnitIds
+ *         schema: { type: string }
+ *         description: >
+ *           Optional. Comma-separated Business Unit ids — the multi-select
+ *           version of business_unit_id above. An id outside the caller's
+ *           own authorized scope is silently dropped (yields zero matching
+ *           employees for it), never an error.
+ *       - in: query
  *         name: service_po_id
  *         schema: { type: integer }
  *         description: >

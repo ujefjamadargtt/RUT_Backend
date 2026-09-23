@@ -6,6 +6,8 @@ const { ServicePO, Timesheet } = require('../models');
 const { createAuditLog } = require('../middlewares/auditLog');
 const { generateSubProjectCode } = require('../helpers/codeGenerator');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
+const { intersectCompanyIdsWithEntity, intersectIds } = require('./companyAccessControlService');
+const { parseIdList } = require('../utils/idListParser');
 const logger = require('../utils/logger');
 
 /**
@@ -21,6 +23,15 @@ const logger = require('../utils/logger');
  */
 const getAll = async (query = {}, companyId) => {
   const { page, limit, offset } = getPaginationParams(query);
+
+  // Optional entityIds/businessUnitIds multi-select narrowing on top of the
+  // already-resolved companyId (req.companyIds, always an array for this
+  // route). Never widens access — see intersectCompanyIdsWithEntity()/
+  // intersectIds()'s own doc comments.
+  if (Array.isArray(companyId)) {
+    companyId = await intersectCompanyIdsWithEntity(companyId, parseIdList(query.entityIds));
+    companyId = intersectIds(companyId, parseIdList(query.businessUnitIds));
+  }
 
   const filters = {
     service_po_id: query.service_po_id || null,

@@ -5,7 +5,8 @@ const serviceCategoryRepo = require('../repositories/serviceCategoryRepository')
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
 const logger = require('../utils/logger');
 const dateHelper = require('../helpers/dateHelper');
-const { resolveCentralisedOwnerCreatorIds, intersectCompanyIdsWithEntity } = require('./companyAccessControlService');
+const { resolveCentralisedOwnerCreatorIds, intersectCompanyIdsWithEntity, intersectIds } = require('./companyAccessControlService');
+const { parseIdList } = require('../utils/idListParser');
 
 /**
  * Report Service
@@ -35,28 +36,34 @@ function parseCommonFilters(query) {
     hoursSource: query.hoursSource,
     roleId: query.roleId,
     // Optional further narrowing on top of the caller's BU/role scope — see
-    // companyAccessControlService.intersectCompanyIdsWithEntity(). Never
-    // widens access: an entityId the caller has no Companies under simply
-    // yields no data.
+    // companyAccessControlService.intersectCompanyIdsWithEntity()/
+    // intersectIds(). Never widens access: an id the caller has no
+    // Companies/BUs under simply yields no data. entityId (singular) is
+    // kept for backward compatibility with any existing caller still
+    // sending it; entityIds (plural) is the new multi-select form and wins
+    // when both are present (see applyEntityBuFilters() below).
     entityId: query.entityId ? parseInt(query.entityId, 10) : undefined,
+    entityIds: parseIdList(query.entityIds),
+    businessUnitIds: parseIdList(query.businessUnitIds),
   };
 }
 
 /**
- * Parse a multi-select ID filter from a query param. Accepts a single value
- * ("175"), a comma-separated list ("175,178,179"), or an array (repeated
- * query keys, e.g. employeeId=175&employeeId=178).
+ * Narrow an already-resolved companyIds[] (BU/role reach) by the new
+ * multi-select entityIds/businessUnitIds query params, on top of the
+ * existing single-value entityId narrowing. Both narrow, never widen —
+ * an id outside the caller's own reach silently yields no data for that
+ * id, never an error (see intersectCompanyIdsWithEntity()/intersectIds()'s
+ * own doc comments). entityIds (plural) takes precedence over the legacy
+ * singular entityId when both are somehow supplied.
  *
- * @param {string|string[]|number|undefined} value
- * @returns {number[]|undefined} undefined when no usable ID was provided
+ * @param {number[]} companyIds
+ * @param {{ entityId?: number, entityIds?: number[], businessUnitIds?: number[] }} filters
+ * @returns {Promise<number[]>}
  */
-function parseIdList(value) {
-  if (value === undefined || value === null || value === '') return undefined;
-  const raw = Array.isArray(value) ? value : String(value).split(',');
-  const ids = raw
-    .map((v) => parseInt(String(v).trim(), 10))
-    .filter((n) => !isNaN(n));
-  return ids.length > 0 ? ids : undefined;
+async function applyEntityBuFilters(companyIds, filters) {
+  const scoped = await intersectCompanyIdsWithEntity(companyIds, filters.entityIds ?? filters.entityId);
+  return intersectIds(scoped, filters.businessUnitIds);
 }
 
 /**
@@ -69,7 +76,7 @@ function parseIdList(value) {
 async function getEmployeeHourlyRate(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
-  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
+  companyIds = await applyEntityBuFilters(companyIds, filters);
 
   if (!filters.month || !filters.year) {
     const err = new Error('month and year query parameters are required for this report.');
@@ -107,11 +114,11 @@ async function getEmployeeHourlyRate(query, companyIds) {
 async function getMonthlyCostSummary(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
-  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
+  companyIds = await applyEntityBuFilters(companyIds, filters);
 
   logger.info('Report: getMonthlyCostSummary', { filters, page, limit });
 
-  const { rows, count } = await reportRepo.getMonthlyCostSummary({
+  const { rows, count, totals } = await reportRepo.getMonthlyCostSummary({
     year: filters.year,
     month: filters.month,
     sortBy: query.sortBy,
@@ -123,26 +130,18 @@ async function getMonthlyCostSummary(query, companyIds) {
 
   const meta = getPaginationMeta(count, page, limit);
 
-  // Compute totals across the returned page for convenience
-  const pageTotals = rows.reduce(
-    (acc, row) => {
-      acc.total_salary_cost += parseFloat(row.total_salary_cost) || 0;
-      acc.total_ops_cost += parseFloat(row.total_ops_cost) || 0;
-      acc.total_cost += parseFloat(row.total_cost) || 0;
-      acc.total_billable_cost += parseFloat(row.total_billable_cost) || 0;
-      return acc;
-    },
-    { total_salary_cost: 0, total_ops_cost: 0, total_cost: 0, total_billable_cost: 0 }
-  );
-
+  // Totals across the FULL filtered dataset (every month_year bucket
+  // matching the current filters, not just this page) — computed in SQL by
+  // reportRepo.getMonthlyCostSummary's own unpaginated totals query, never
+  // by reducing over the returned page.
   return {
     data: rows,
     meta,
     summary: {
-      total_salary_cost: Math.round(pageTotals.total_salary_cost * 100) / 100,
-      total_ops_cost: Math.round(pageTotals.total_ops_cost * 100) / 100,
-      total_cost: Math.round(pageTotals.total_cost * 100) / 100,
-      total_billable_cost: Math.round(pageTotals.total_billable_cost * 100) / 100,
+      total_salary_cost: Math.round(totals.total_salary_cost * 100) / 100,
+      total_ops_cost: Math.round(totals.total_ops_cost * 100) / 100,
+      total_cost: Math.round(totals.total_cost * 100) / 100,
+      total_billable_cost: Math.round(totals.total_billable_cost * 100) / 100,
     },
   };
 }
@@ -156,7 +155,7 @@ async function getMonthlyCostSummary(query, companyIds) {
 async function getTimesheetSummary(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
-  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
+  companyIds = await applyEntityBuFilters(companyIds, filters);
 
   logger.info('Report: getTimesheetSummary', { filters, page, limit });
 
@@ -198,7 +197,7 @@ async function getTimesheetSummary(query, companyIds) {
 async function getServicePOUtilisation(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
-  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
+  companyIds = await applyEntityBuFilters(companyIds, filters);
 
   logger.info('Report: getServicePOUtilisation', { filters, page, limit });
 
@@ -225,7 +224,7 @@ async function getServicePOUtilisation(query, companyIds) {
 async function getSubProjectHours(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
-  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
+  companyIds = await applyEntityBuFilters(companyIds, filters);
 
   logger.info('Report: getSubProjectHours', { filters, page, limit });
 
@@ -272,7 +271,21 @@ async function getSubProjectHours(query, companyIds) {
  * @param {number}   limit
  * @returns {{ columns, data, meta, summary }}
  */
-function buildPivotResponse(rawColumns, rawRows, count, page, limit) {
+/**
+ * @param {object[]} rawColumns
+ * @param {object[]} rawRows
+ * @param {number} count
+ * @param {number} page
+ * @param {number} limit
+ * @param {{billable_total: number, non_billable_total: number, total_hours: number, leaves_hours: number, total_utilization: number, employee_count: number}} [fullDatasetSummary] -
+ *   when given (e.g. reportRepository.getResourceMonthlyUtilization's own
+ *   unpaginated summary query), `summary` is computed from THIS full
+ *   filtered dataset instead of reducing over just the current page's
+ *   `data` — see reportService.getResourceMonthlyUtilizationReport. Omit to
+ *   keep the existing page-level `summary` behavior (the other two
+ *   buildPivotResponse callers, not yet converted to full-dataset totals).
+ */
+function buildPivotResponse(rawColumns, rawRows, count, page, limit, fullDatasetSummary) {
   const round2 = (n) => Math.round(n * 100) / 100;
 
   // Column headers grouped by category
@@ -351,6 +364,16 @@ function buildPivotResponse(rawColumns, rawRows, count, page, limit) {
     const utilization_percentage = monthlyCapacity > 0
       ? round2((total_utilization / monthlyCapacity) * 100)
       : null;
+    // Contributed % — what share of this employee's Monthly Capacity (the
+    // fixed cap, e.g. 176 — same denominator utilization_percentage above
+    // uses) was billable. E.g. capacity 176, 150 billable -> 85.23%.
+    // Deliberately against monthlyCapacity, NOT total_hours — a pivot report
+    // that doesn't select monthly_capacity at all (plain Resource
+    // Utilization) has no cap to divide by, so this comes back null there,
+    // same as utilization_percentage.
+    const contributed_percentage = monthlyCapacity > 0
+      ? round2((billable_total / monthlyCapacity) * 100)
+      : null;
 
     return {
       ...emp,
@@ -360,36 +383,59 @@ function buildPivotResponse(rawColumns, rawRows, count, page, limit) {
       leaves_hours:       round2(leaves_hours),
       total_utilization:  round2(total_utilization),
       utilization_percentage,
+      contributed_percentage,
     };
   });
 
   const meta = getPaginationMeta(count, page, limit);
 
-  const pageSummary = data.reduce(
-    (acc, r) => {
-      acc.billable_total     += r.billable_total;
-      acc.non_billable_total += r.non_billable_total;
-      acc.total_hours        += r.total_hours;
-      acc.leaves_hours       += r.leaves_hours;
-      acc.total_utilization  += r.total_utilization;
-      acc.monthly_capacity   += parseFloat(r.monthly_capacity) || 0;
-      return acc;
-    },
-    { billable_total: 0, non_billable_total: 0, total_hours: 0, leaves_hours: 0, total_utilization: 0, monthly_capacity: 0 }
-  );
+  // Full-dataset summary (when the caller supplied one) takes over the
+  // capacity denominator too — `employee_count * 176`, covering every
+  // employee in the filtered set, not just this page's `monthly_capacity`
+  // sum. Falls back to the existing page-level reduce for callers that
+  // haven't been converted yet.
+  const summarySource = fullDatasetSummary
+    ? {
+      billable_total: fullDatasetSummary.billable_total,
+      non_billable_total: fullDatasetSummary.non_billable_total,
+      total_hours: fullDatasetSummary.total_hours,
+      leaves_hours: fullDatasetSummary.leaves_hours,
+      total_utilization: fullDatasetSummary.total_utilization,
+      monthly_capacity: (fullDatasetSummary.employee_count || 0) * 176,
+    }
+    : data.reduce(
+      (acc, r) => {
+        acc.billable_total     += r.billable_total;
+        acc.non_billable_total += r.non_billable_total;
+        acc.total_hours        += r.total_hours;
+        acc.leaves_hours       += r.leaves_hours;
+        acc.total_utilization  += r.total_utilization;
+        acc.monthly_capacity   += parseFloat(r.monthly_capacity) || 0;
+        return acc;
+      },
+      { billable_total: 0, non_billable_total: 0, total_hours: 0, leaves_hours: 0, total_utilization: 0, monthly_capacity: 0 }
+    );
 
   return {
     columns,
     data,
     meta,
     summary: {
-      billable_total:     round2(pageSummary.billable_total),
-      non_billable_total: round2(pageSummary.non_billable_total),
-      total_hours:        round2(pageSummary.total_hours),
-      leaves_hours:       round2(pageSummary.leaves_hours),
-      total_utilization:  round2(pageSummary.total_utilization),
-      utilization_percentage: pageSummary.monthly_capacity > 0
-        ? round2((pageSummary.total_utilization / pageSummary.monthly_capacity) * 100)
+      billable_total:     round2(summarySource.billable_total),
+      non_billable_total: round2(summarySource.non_billable_total),
+      total_hours:        round2(summarySource.total_hours),
+      leaves_hours:       round2(summarySource.leaves_hours),
+      total_utilization:  round2(summarySource.total_utilization),
+      utilization_percentage: summarySource.monthly_capacity > 0
+        ? round2((summarySource.total_utilization / summarySource.monthly_capacity) * 100)
+        : null,
+      // Aggregate Contributed % — computed from the SAME summed
+      // billable_total/monthly_capacity above (same denominator as
+      // utilization_percentage), never by averaging each employee's own
+      // contributed_percentage (that would misweight a part-time/partial-
+      // month employee the same as a full-176-hour one).
+      contributed_percentage: summarySource.monthly_capacity > 0
+        ? round2((summarySource.billable_total / summarySource.monthly_capacity) * 100)
         : null,
     },
   };
@@ -404,7 +450,7 @@ function buildPivotResponse(rawColumns, rawRows, count, page, limit) {
 async function getResourceAllocation(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
-  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
+  companyIds = await applyEntityBuFilters(companyIds, filters);
 
   const isBillable = query.isBillable !== undefined
     ? query.isBillable === 'true' || query.isBillable === true
@@ -449,7 +495,7 @@ async function getResourceAllocation(query, companyIds) {
 async function getOperationalCostBreakdown(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
-  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
+  companyIds = await applyEntityBuFilters(companyIds, filters);
 
   logger.info('Report: getOperationalCostBreakdown', { filters, page, limit });
 
@@ -509,7 +555,7 @@ async function getOperationalCostBreakdown(query, companyIds) {
 async function getEmployeeUtilizationSummary(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
-  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
+  companyIds = await applyEntityBuFilters(companyIds, filters);
 
   if (!filters.month || !filters.year) {
     const err = new Error('month and year query parameters are required for this report.');
@@ -525,7 +571,7 @@ async function getEmployeeUtilizationSummary(query, companyIds) {
   logger.info('Report: getEmployeeUtilizationSummary', { filters, page, limit });
 
 
-  const { rows, count } = await reportRepo.getEmployeeUtilizationSummary({
+  const { rows, count, summary: fullDatasetSummary } = await reportRepo.getEmployeeUtilizationSummary({
     ...filters,
     sortBy: query.sortBy,
     sortOrder: filters.sortOrder,
@@ -536,36 +582,23 @@ async function getEmployeeUtilizationSummary(query, companyIds) {
 
   const meta = getPaginationMeta(count, page, limit);
 
-  const pageTotals = rows.reduce(
-    (acc, row) => {
-      acc.billable_total          += parseFloat(row.billable_total)          || 0;
-      acc.non_billable_total      += parseFloat(row.non_billable_total)      || 0;
-      acc.internal_support_hours  += parseFloat(row.internal_support_hours)  || 0;
-      acc.team_management_hours   += parseFloat(row.team_management_hours)   || 0;
-      acc.leaves_hours            += parseFloat(row.leaves_hours)            || 0;
-      acc.lnd_hours               += parseFloat(row.lnd_hours)               || 0;
-      acc.others_hours            += parseFloat(row.others_hours)            || 0;
-      return acc;
-    },
-    {
-      billable_total: 0, non_billable_total: 0, internal_support_hours: 0,
-      team_management_hours: 0, leaves_hours: 0, lnd_hours: 0, others_hours: 0,
-    }
-  );
-
   const round2 = (n) => Math.round(n * 100) / 100;
 
+  // Totals across the FULL filtered dataset (every employee matching the
+  // current filters, not just the current page) — computed in SQL by
+  // reportRepo.getEmployeeUtilizationSummary's own unpaginated summary
+  // query, never by reducing over the returned page.
   return {
     data: rows,
     meta,
     summary: {
-      billable_total:         round2(pageTotals.billable_total),
-      non_billable_total:     round2(pageTotals.non_billable_total),
-      internal_support_hours: round2(pageTotals.internal_support_hours),
-      team_management_hours:  round2(pageTotals.team_management_hours),
-      leaves_hours:           round2(pageTotals.leaves_hours),
-      lnd_hours:              round2(pageTotals.lnd_hours),
-      others_hours:           round2(pageTotals.others_hours),
+      billable_total:         round2(fullDatasetSummary.billable_total),
+      non_billable_total:     round2(fullDatasetSummary.non_billable_total),
+      internal_support_hours: round2(fullDatasetSummary.internal_support_hours),
+      team_management_hours:  round2(fullDatasetSummary.team_management_hours),
+      leaves_hours:           round2(fullDatasetSummary.leaves_hours),
+      lnd_hours:              round2(fullDatasetSummary.lnd_hours),
+      others_hours:           round2(fullDatasetSummary.others_hours),
     },
   };
 }
@@ -581,7 +614,7 @@ async function getEmployeeUtilizationSummary(query, companyIds) {
 async function getServicePOSummary(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
-  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
+  companyIds = await applyEntityBuFilters(companyIds, filters);
 
   if (!filters.month || !filters.year) {
     const err = new Error('month and year query parameters are required for this report.');
@@ -680,7 +713,7 @@ async function getServicePOSummary(query, companyIds) {
 async function getInvoicePOSummary(query, companyIds) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
-  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
+  companyIds = await applyEntityBuFilters(companyIds, filters);
 
   if (!filters.month || !filters.year) {
     const err = new Error('month and year query parameters are required for this report.');
@@ -785,7 +818,7 @@ async function getInvoicePOSummary(query, companyIds) {
  */
 async function getResourceUtilization(query, companyIds) {
   const filters = parseCommonFilters(query);
-  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
+  companyIds = await applyEntityBuFilters(companyIds, filters);
 
   if (!filters.month || !filters.year) {
     const err = new Error('month and year query parameters are required for this report.');
@@ -830,7 +863,7 @@ async function getResourceUtilization(query, companyIds) {
  */
 async function getMonthlyResourceUtilization(query, companyIds) {
   const filters = parseCommonFilters(query);
-  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
+  companyIds = await applyEntityBuFilters(companyIds, filters);
 
   if (!filters.month || !filters.year) {
     const err = new Error('month and year query parameters are required for this report.');
@@ -847,7 +880,7 @@ async function getMonthlyResourceUtilization(query, companyIds) {
 
   logger.info('Report: getMonthlyResourceUtilization', { filters, page, limit });
 
-  const { columns: rawColumns, rows: rawRows, count } = await reportRepo.getMonthlyResourceUtilization({
+  const { columns: rawColumns, rows: rawRows, count, summary } = await reportRepo.getMonthlyResourceUtilization({
     month:      filters.month,
     year:       filters.year,
     employeeId: filters.employeeId,
@@ -859,7 +892,7 @@ async function getMonthlyResourceUtilization(query, companyIds) {
     companyIds,
   });
 
-  return buildPivotResponse(rawColumns, rawRows, count, page, limit);
+  return buildPivotResponse(rawColumns, rawRows, count, page, limit, summary);
 }
 
 const RESOURCE_MONTHLY_UTILIZATION_CAPACITY = 176;
@@ -890,7 +923,7 @@ const RESOURCE_MONTHLY_UTILIZATION_CAPACITY = 176;
  */
 async function getResourceMonthlyUtilizationReport(query, companyIds) {
   const filters = parseCommonFilters(query);
-  companyIds = await intersectCompanyIdsWithEntity(companyIds, filters.entityId);
+  companyIds = await applyEntityBuFilters(companyIds, filters);
 
   if (!filters.month || !filters.year) {
     const err = new Error('month and year query parameters are required for this report.');
@@ -917,7 +950,7 @@ async function getResourceMonthlyUtilizationReport(query, companyIds) {
     filters, page, limit, clientId, poId, serviceTypeId,
   });
 
-  const { columns: rawColumns, rows: rawRows, count } = await reportRepo.getResourceMonthlyUtilization({
+  const { columns: rawColumns, rows: rawRows, count, summary: fullDatasetSummary } = await reportRepo.getResourceMonthlyUtilization({
     month:      filters.month,
     year:       filters.year,
     employeeId: filters.employeeId,
@@ -932,7 +965,11 @@ async function getResourceMonthlyUtilizationReport(query, companyIds) {
     companyIds,
   });
 
-  const { data: pivotData, summary: pivotSummary } = buildPivotResponse(rawColumns, rawRows, count, page, limit);
+  // fullDatasetSummary (from the repo's own unpaginated summary query) makes
+  // buildPivotResponse's `summary` reflect the FULL filtered dataset (every
+  // matching employee), not just this page's — see buildPivotResponse's own
+  // doc comment and reportRepository.getResourceMonthlyUtilization.
+  const { data: pivotData, summary: pivotSummary } = buildPivotResponse(rawColumns, rawRows, count, page, limit, fullDatasetSummary);
 
   const utilizationAgainstCapacity = (hours, capacity) => (
     capacity > 0 ? round2((parseFloat(hours) || 0) / capacity * 100) : 0
@@ -955,14 +992,17 @@ async function getResourceMonthlyUtilizationReport(query, companyIds) {
   const meta = getPaginationMeta(count, page, limit);
 
   // Billable/Non-Billable % at the summary level are against the SUMMED
-  // capacity across every employee on the page (176 × employee count) — the
-  // same aggregation basis buildPivotResponse itself uses internally for
-  // Overall Utilization % (pageSummary.monthly_capacity), so all three
-  // summary percentages share one consistent divisor. Derived here from the
-  // per-employee monthly_capacity already present on each pivotData row
-  // (not reimplemented — buildPivotResponse computed that same total for
-  // its own utilization_percentage, it just doesn't expose the raw sum).
-  const totalCapacity = pivotData.reduce((sum, emp) => sum + (parseFloat(emp.monthly_capacity) || 0), 0);
+  // capacity across every employee in the FULL filtered dataset (176 ×
+  // employee count), not just the current page — the same aggregation basis
+  // buildPivotResponse itself now uses internally for Overall Utilization %
+  // (see its own fullDatasetSummary handling), so all three summary
+  // percentages share one consistent, full-dataset divisor. Falls back to
+  // reducing over pivotData's own page-level monthly_capacity only if the
+  // repo didn't supply a full-dataset summary (defensive; the one caller of
+  // this function always does).
+  const totalCapacity = fullDatasetSummary
+    ? (fullDatasetSummary.employee_count || 0) * RESOURCE_MONTHLY_UTILIZATION_CAPACITY
+    : pivotData.reduce((sum, emp) => sum + (parseFloat(emp.monthly_capacity) || 0), 0);
 
   const summary = {
     billableHours: pivotSummary.billable_total,
@@ -990,7 +1030,8 @@ async function getResourseProjectUtilizationReport(query, companyIds) {
   }
 
   const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
-  companyIds = await intersectCompanyIdsWithEntity(companyIds, entityId);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, parseIdList(query.entityIds) ?? entityId);
+  companyIds = intersectIds(companyIds, parseIdList(query.businessUnitIds));
 
   const filters = {
     month,
@@ -1158,7 +1199,8 @@ async function getClientServicePOHoursReport(query, companyIds) {
   const { startDate, endDate } = resolveClientServicePODateRange(query);
 
   const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
-  companyIds = await intersectCompanyIdsWithEntity(companyIds, entityId);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, parseIdList(query.entityIds) ?? entityId);
+  companyIds = intersectIds(companyIds, parseIdList(query.businessUnitIds));
 
   const filters = {
     companyIds,
@@ -1270,7 +1312,8 @@ function isBenchServiceTypeReport(servicePOName) {
 async function getClientCostAnalytics(query, companyIds) {
   const hoursSource = query.hoursSource;
   const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
-  companyIds = await intersectCompanyIdsWithEntity(companyIds, entityId);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, parseIdList(query.entityIds) ?? entityId);
+  companyIds = intersectIds(companyIds, parseIdList(query.businessUnitIds));
 
   const [hoursRows, costRows, categories, matrixRows] = await Promise.all([
     reportRepo.getClientCostAnalyticsHours({ companyIds, hoursSource }),
@@ -1358,7 +1401,8 @@ async function getClientWiseAnalyticsReport(query, companyIds) {
   const { startDate, endDate } = resolveClientServicePODateRange(query);
 
   const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
-  companyIds = await intersectCompanyIdsWithEntity(companyIds, entityId);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, parseIdList(query.entityIds) ?? entityId);
+  companyIds = intersectIds(companyIds, parseIdList(query.businessUnitIds));
 
   const filters = {
     companyIds,
@@ -1453,7 +1497,8 @@ async function getMonthlyHoursTrend(query, companyIds) {
   const { startDate, endDate } = resolveClientServicePODateRange(query);
 
   const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
-  companyIds = await intersectCompanyIdsWithEntity(companyIds, entityId);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, parseIdList(query.entityIds) ?? entityId);
+  companyIds = intersectIds(companyIds, parseIdList(query.businessUnitIds));
 
   const filters = {
     companyIds,
@@ -1563,7 +1608,8 @@ async function getEmployeeBenchPercentage(query, companyIds) {
   const { startDate, endDate } = resolveClientServicePODateRange(query);
 
   const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
-  companyIds = await intersectCompanyIdsWithEntity(companyIds, entityId);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, parseIdList(query.entityIds) ?? entityId);
+  companyIds = intersectIds(companyIds, parseIdList(query.businessUnitIds));
 
   const filters = {
     companyIds,
@@ -1639,7 +1685,8 @@ async function getBudgetVsBilledReport(query, companyIds) {
   const { startDate, endDate } = resolveClientServicePODateRange(query);
 
   const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
-  companyIds = await intersectCompanyIdsWithEntity(companyIds, entityId);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, parseIdList(query.entityIds) ?? entityId);
+  companyIds = intersectIds(companyIds, parseIdList(query.businessUnitIds));
 
   const filters = {
     companyIds,
@@ -1748,7 +1795,8 @@ async function getResourceUtilizationTrendReport(query, companyIds) {
   const { startDate, endDate } = resolveClientServicePODateRange(query);
 
   const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
-  companyIds = await intersectCompanyIdsWithEntity(companyIds, entityId);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, parseIdList(query.entityIds) ?? entityId);
+  companyIds = intersectIds(companyIds, parseIdList(query.businessUnitIds));
 
   const filters = {
     companyIds,
@@ -1820,7 +1868,8 @@ async function getServicePOHoursBudgetReport(query, companyIds) {
   const { startDate, endDate } = resolveClientServicePODateRange(query);
 
   const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
-  companyIds = await intersectCompanyIdsWithEntity(companyIds, entityId);
+  companyIds = await intersectCompanyIdsWithEntity(companyIds, parseIdList(query.entityIds) ?? entityId);
+  companyIds = intersectIds(companyIds, parseIdList(query.businessUnitIds));
 
   const filters = {
     companyIds,

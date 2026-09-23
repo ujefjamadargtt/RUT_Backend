@@ -4,39 +4,50 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const employeeServicePOMappingRepository = require('../src/repositories/employeeServicePOMappingRepository');
-const employeeRoleRepository = require('../src/repositories/employeeRoleRepository');
 const servicePORepository = require('../src/repositories/servicePORepository');
 const employeeServicePOMappingService = require('../src/services/employeeServicePOMappingService');
 
 /**
- * Timesheet Approval redesign — the two functions that derive a Project
- * Manager's Service PO relationship, REUSING the existing
+ * PM redesign — the two functions that derive a Project Manager's Service PO
+ * relationship for approval routing, REUSING the existing
  * employee_servicepo_mapping table (no new PM<->PO table):
- *   - getProjectManagerServicePOIds(pmEmployeeId): PM -> their mapped PO ids
- *   - getProjectManagersForServicePOs(servicePoIds): PO ids -> the active,
- *     Project-Manager-role-holding employees mapped to any of them, deduped
+ *   - getProjectManagerServicePOIds(pmEmployeeId): PM -> the Service PO ids
+ *     they are EXPLICITLY assigned as PM for (is_project_manager = true)
+ *   - getProjectManagersForServicePOs(servicePoIds): PO ids -> the active
+ *     employees EXPLICITLY assigned as PM (is_project_manager = true) for
+ *     any of them, deduped
  *
- * Both EXCLUDE Centralised Service POs (Leaves, On Bench, Training &
- * Upskilling, HR and Admin Activity, etc.) — a real bug report: a
- * Centralised PO is auto-mapped to EVERY employee, so an
- * employee_servicepo_mapping row against one is never a genuine PM
- * assignment. Confirmed live: a Project Manager mapped to Ambulance Tracker
- * (a real project, 5 people) was ALSO auto-mapped to 4 Centralised POs
- * (Leaves/On Bench/Training/HR Admin), which — before this fix — pulled
- * ~90 unrelated employees into their "My Employees" approval scope.
+ * PM DETERMINATION — OLD vs NEW: previously, ANY active
+ * employee_servicepo_mapping row for an employee holding the Project
+ * Manager role was treated as a PM assignment — so an Employee merely
+ * mapped to a Service PO as an ordinary team member (not its PM) was
+ * incorrectly treated as its approver. Now both functions filter the
+ * repository query itself by `is_project_manager = true`
+ * (onlyProjectManager) — a plain mapping (is_project_manager = false) never
+ * counts, regardless of the employee's role. Neither function re-checks the
+ * employee's role live anymore (getProjectManagersForServicePOs used to,
+ * via employeeRoleRepository) — that invariant is instead maintained at
+ * WRITE time (assign()/saveEmployeeServicePOMappings()/
+ * setMappingProjectManagerFlag() require the role before allowing
+ * is_project_manager = true, and employeeService.js's role-removal cascade
+ * reverts it to false the moment the role is removed), so is_project_manager
+ * = true is trusted as sufficient on its own here.
+ *
+ * Both still EXCLUDE Centralised Service POs (Leaves, On Bench, Training &
+ * Upskilling, HR and Admin Activity, etc.) as defense in depth — a
+ * Centralised PO is auto-mapped to EVERY employee with is_project_manager
+ * defaulting false, so this should already be a no-op in practice.
  */
 
 const ORIGINAL = {
   findAllByEmployee: employeeServicePOMappingRepository.findAllByEmployee,
   findByServicePOs: employeeServicePOMappingRepository.findByServicePOs,
-  findRolesByEmployeeId: employeeRoleRepository.findRolesByEmployeeId,
   findCentralisedIdsAmong: servicePORepository.findCentralisedIdsAmong,
 };
 
 function restore() {
   employeeServicePOMappingRepository.findAllByEmployee = ORIGINAL.findAllByEmployee;
   employeeServicePOMappingRepository.findByServicePOs = ORIGINAL.findByServicePOs;
-  employeeRoleRepository.findRolesByEmployeeId = ORIGINAL.findRolesByEmployeeId;
   servicePORepository.findCentralisedIdsAmong = ORIGINAL.findCentralisedIdsAmong;
 }
 
@@ -44,12 +55,15 @@ function stubNoCentralisedPOs() {
   servicePORepository.findCentralisedIdsAmong = async () => [];
 }
 
-test('getProjectManagerServicePOIds: returns the Service PO ids from this employee\'s active employee_servicepo_mapping rows', async () => {
+// --- getProjectManagerServicePOIds() ---------------------------------------
+
+test('getProjectManagerServicePOIds: queries the repository with onlyProjectManager:true and returns the Service PO ids from the (already PM-filtered) rows', async () => {
   try {
     stubNoCentralisedPOs();
-    employeeServicePOMappingRepository.findAllByEmployee = async (employeeId, status) => {
+    employeeServicePOMappingRepository.findAllByEmployee = async (employeeId, status, options) => {
       assert.equal(employeeId, 501);
       assert.equal(status, 'active');
+      assert.deepEqual(options, { onlyProjectManager: true });
       return [{ service_po_id: 201 }, { service_po_id: 202 }];
     };
 
@@ -61,10 +75,27 @@ test('getProjectManagerServicePOIds: returns the Service PO ids from this employ
   }
 });
 
-test('getProjectManagerServicePOIds: EXCLUDES Centralised Service POs (Leaves/On Bench/etc.) even though the employee is actively mapped to them', async () => {
+test('getProjectManagerServicePOIds: a Service PO this employee is merely MAPPED to (is_project_manager=false) never appears — the repository query itself excludes it', async () => {
   try {
-    // PM mapped to one real project (201, Ambulance-like) plus 2 Centralised
-    // utility POs (202 = Leaves, 203 = On Bench) via auto-mapping.
+    stubNoCentralisedPOs();
+    // Simulates the real query: only the is_project_manager=true row (201)
+    // is ever returned by the repository for this options flag; PO 202
+    // (a plain mapping) is never in this result set at all.
+    employeeServicePOMappingRepository.findAllByEmployee = async (employeeId, status, options) => {
+      assert.deepEqual(options, { onlyProjectManager: true });
+      return [{ service_po_id: 201 }];
+    };
+
+    const poIds = await employeeServicePOMappingService.getProjectManagerServicePOIds(501);
+
+    assert.deepEqual(poIds, [201]);
+  } finally {
+    restore();
+  }
+});
+
+test('getProjectManagerServicePOIds: EXCLUDES Centralised Service POs (Leaves/On Bench/etc.) even if somehow PM-flagged', async () => {
+  try {
     employeeServicePOMappingRepository.findAllByEmployee = async () => [
       { service_po_id: 201 },
       { service_po_id: 202 },
@@ -83,7 +114,7 @@ test('getProjectManagerServicePOIds: EXCLUDES Centralised Service POs (Leaves/On
   }
 });
 
-test('getProjectManagerServicePOIds: no mappings at all short-circuits without checking is_centralised', async () => {
+test('getProjectManagerServicePOIds: no PM-flagged mappings at all short-circuits without checking is_centralised', async () => {
   try {
     employeeServicePOMappingRepository.findAllByEmployee = async () => [];
     servicePORepository.findCentralisedIdsAmong = async () => {
@@ -98,19 +129,65 @@ test('getProjectManagerServicePOIds: no mappings at all short-circuits without c
   }
 });
 
-test('getProjectManagersForServicePOs: PO with multiple Project Managers returns all of them', async () => {
+// --- getEmployeeRealProjectServicePOIds() ----------------------------------
+// A DIFFERENT question from the above: "which real (non-Centralised)
+// project(s) is this ARBITRARY employee mapped to at all" — regardless of
+// is_project_manager, since this employee is typically NOT a PM themselves.
+// Used only by resolveApprovalRoutingServicePOIds() to route a stray
+// Centralised-PO (Leave/Bench) reminder to that project's actual PM.
+
+test('getEmployeeRealProjectServicePOIds: returns every active mapping\'s Service PO id, regardless of is_project_manager', async () => {
   try {
     stubNoCentralisedPOs();
-    employeeServicePOMappingRepository.findByServicePOs = async (servicePoIds, status) => {
+    employeeServicePOMappingRepository.findAllByEmployee = async (employeeId, status, options) => {
+      assert.equal(employeeId, 101);
+      assert.equal(status, 'active');
+      assert.equal(options, undefined); // NOT filtered by onlyProjectManager
+      return [{ service_po_id: 201 }];
+    };
+
+    const poIds = await employeeServicePOMappingService.getEmployeeRealProjectServicePOIds(101);
+
+    assert.deepEqual(poIds, [201]);
+  } finally {
+    restore();
+  }
+});
+
+test('getEmployeeRealProjectServicePOIds: EXCLUDES Centralised Service POs', async () => {
+  try {
+    employeeServicePOMappingRepository.findAllByEmployee = async () => [
+      { service_po_id: 201 },
+      { service_po_id: 999 },
+    ];
+    servicePORepository.findCentralisedIdsAmong = async (ids) => {
+      assert.deepEqual(ids, [201, 999]);
+      return [999];
+    };
+
+    const poIds = await employeeServicePOMappingService.getEmployeeRealProjectServicePOIds(101);
+
+    assert.deepEqual(poIds, [201]);
+  } finally {
+    restore();
+  }
+});
+
+// --- getProjectManagersForServicePOs() -------------------------------------
+
+test('getProjectManagersForServicePOs: queries the repository with onlyProjectManager:true; a PO with multiple PM-flagged mappings returns all of them', async () => {
+  try {
+    stubNoCentralisedPOs();
+    employeeServicePOMappingRepository.findByServicePOs = async (servicePoIds, status, options) => {
       assert.deepEqual(servicePoIds, [201]);
       assert.equal(status, 'active');
+      assert.deepEqual(options, { onlyProjectManager: true });
       return [
         { employee: { id: 5, full_name: 'PM ABC', email: 'abc@example.com', status: 'active' } },
         { employee: { id: 6, full_name: 'PM XYZ', email: 'xyz@example.com', status: 'active' } },
         { employee: { id: 7, full_name: 'PM PQR', email: 'pqr@example.com', status: 'active' } },
       ];
     };
-    employeeRoleRepository.findRolesByEmployeeId = async () => [{ role_name: 'Project Manager' }];
 
     const managers = await employeeServicePOMappingService.getProjectManagersForServicePOs([201]);
 
@@ -130,7 +207,6 @@ test('getProjectManagersForServicePOs: a Project Manager mapped to MULTIPLE of t
         { employee: { id: 5, full_name: 'PM Both', email: 'both@example.com', status: 'active' } }, // mapped to PO2 too
       ];
     };
-    employeeRoleRepository.findRolesByEmployeeId = async () => [{ role_name: 'Project Manager' }];
 
     const managers = await employeeServicePOMappingService.getProjectManagersForServicePOs([201, 202]);
 
@@ -141,13 +217,12 @@ test('getProjectManagersForServicePOs: a Project Manager mapped to MULTIPLE of t
   }
 });
 
-test('getProjectManagersForServicePOs: excludes a mapped employee who does not hold the Project Manager role', async () => {
+test('getProjectManagersForServicePOs: a mapped employee whose row has is_project_manager=false never reaches this function at all — the repository query already excluded it, so no live role check is performed here', async () => {
   try {
     stubNoCentralisedPOs();
-    employeeServicePOMappingRepository.findByServicePOs = async () => [
-      { employee: { id: 5, full_name: 'Regular Employee', email: 'reg@example.com', status: 'active' } },
-    ];
-    employeeRoleRepository.findRolesByEmployeeId = async () => [{ role_name: 'Employee' }];
+    // Simulates the real (PM-filtered) query result: a plain mapping never
+    // appears here in the first place, regardless of the employee's role.
+    employeeServicePOMappingRepository.findByServicePOs = async () => [];
 
     const managers = await employeeServicePOMappingService.getProjectManagersForServicePOs([201]);
 
@@ -157,13 +232,12 @@ test('getProjectManagersForServicePOs: excludes a mapped employee who does not h
   }
 });
 
-test('getProjectManagersForServicePOs: excludes an inactive Project Manager', async () => {
+test('getProjectManagersForServicePOs: excludes an inactive employee even though their mapping row is PM-flagged', async () => {
   try {
     stubNoCentralisedPOs();
     employeeServicePOMappingRepository.findByServicePOs = async () => [
       { employee: { id: 5, full_name: 'Inactive PM', email: 'inactive@example.com', status: 'inactive' } },
     ];
-    employeeRoleRepository.findRolesByEmployeeId = async () => [{ role_name: 'Project Manager' }];
 
     const managers = await employeeServicePOMappingService.getProjectManagersForServicePOs([201]);
 
@@ -201,7 +275,6 @@ test('getProjectManagersForServicePOs: a mix of one real PO and one Centralised 
       assert.deepEqual(servicePoIds, [201]);
       return [{ employee: { id: 5, full_name: 'Real PM', email: 'real@example.com', status: 'active' } }];
     };
-    employeeRoleRepository.findRolesByEmployeeId = async () => [{ role_name: 'Project Manager' }];
 
     const managers = await employeeServicePOMappingService.getProjectManagersForServicePOs([201, 999]);
 
@@ -210,6 +283,29 @@ test('getProjectManagersForServicePOs: a mix of one real PO and one Centralised 
     restore();
   }
 });
+
+test('getProjectManagersForServicePOs: empty input short-circuits without querying anything', async () => {
+  try {
+    servicePORepository.findCentralisedIdsAmong = async () => {
+      throw new Error('must not be called for an empty servicePoIds array');
+    };
+    employeeServicePOMappingRepository.findByServicePOs = async () => {
+      throw new Error('must not be called for an empty servicePoIds array');
+    };
+
+    const managers = await employeeServicePOMappingService.getProjectManagersForServicePOs([]);
+
+    assert.deepEqual(managers, []);
+  } finally {
+    restore();
+  }
+});
+
+// --- resolveApprovalRoutingServicePOIds() ----------------------------------
+// Unaffected by the PM redesign at this function's own level — it routes
+// through getEmployeeRealProjectServicePOIds() (any active mapping,
+// unfiltered), not getProjectManagerServicePOIds(), since the REPORTING
+// employee here is an ordinary team member, not necessarily a PM.
 
 test('resolveApprovalRoutingServicePOIds: non-Centralised pending POs pass through unchanged, no Employee-mapping lookup needed', async () => {
   try {
@@ -229,19 +325,15 @@ test('resolveApprovalRoutingServicePOIds: non-Centralised pending POs pass throu
   }
 });
 
-test('resolveApprovalRoutingServicePOIds: a pending Centralised PO (Leaves) is replaced by the employee\'s OWN real project PO(s)', async () => {
+test('resolveApprovalRoutingServicePOIds: a pending Centralised PO (Leaves) is replaced by the employee\'s OWN real project PO(s), regardless of is_project_manager', async () => {
   try {
-    // findCentralisedIdsAmong is called twice here — once for the raw
-    // pending set, once again (inside getProjectManagerServicePOIds) to
-    // filter the employee's own resolved mappings — so this must behave
-    // like a real "which of these are Centralised" filter, not assert one
-    // fixed input.
     const CENTRALISED = new Set([999]);
     servicePORepository.findCentralisedIdsAmong = async (ids) => ids.filter((id) => CENTRALISED.has(id));
-    employeeServicePOMappingRepository.findAllByEmployee = async (employeeId, status) => {
+    employeeServicePOMappingRepository.findAllByEmployee = async (employeeId, status, options) => {
       assert.equal(employeeId, 101);
       assert.equal(status, 'active');
-      return [{ service_po_id: 201 }]; // this employee's own real project
+      assert.equal(options, undefined); // an ordinary employee's own real project, not PM-filtered
+      return [{ service_po_id: 201 }];
     };
 
     const routed = await employeeServicePOMappingService.resolveApprovalRoutingServicePOIds(101, [999]);
@@ -288,23 +380,6 @@ test('resolveApprovalRoutingServicePOIds: empty input short-circuits without que
     const routed = await employeeServicePOMappingService.resolveApprovalRoutingServicePOIds(101, []);
 
     assert.deepEqual(routed, []);
-  } finally {
-    restore();
-  }
-});
-
-test('getProjectManagersForServicePOs: empty input short-circuits without querying anything', async () => {
-  try {
-    servicePORepository.findCentralisedIdsAmong = async () => {
-      throw new Error('must not be called for an empty servicePoIds array');
-    };
-    employeeServicePOMappingRepository.findByServicePOs = async () => {
-      throw new Error('must not be called for an empty servicePoIds array');
-    };
-
-    const managers = await employeeServicePOMappingService.getProjectManagersForServicePOs([]);
-
-    assert.deepEqual(managers, []);
   } finally {
     restore();
   }

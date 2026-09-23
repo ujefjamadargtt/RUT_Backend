@@ -14,6 +14,7 @@ const companyAccessControlService = require('./companyAccessControlService');
 const { createAuditLog } = require('../middlewares/auditLog');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
 const { generateTemporaryPassword } = require('../utils/password');
+const { parseIdList } = require('../utils/idListParser');
 const logger = require('../utils/logger');
 
 /**
@@ -317,9 +318,43 @@ const getAll = async (query = {}, authContext) => {
   // employeeRepository.findAll()'s doc comment for why this can only NARROW
   // results, never widen them beyond accessWhere.
   const parsedBusinessUnitId = Number(query.business_unit_id);
-  const businessUnitId = Number.isInteger(parsedBusinessUnitId) && parsedBusinessUnitId > 0
+  let businessUnitId = Number.isInteger(parsedBusinessUnitId) && parsedBusinessUnitId > 0
     ? parsedBusinessUnitId
     : null;
+
+  // entityIds/businessUnitIds (plural) — the new multi-select narrowing,
+  // additive to the legacy single-value business_unit_id above (wins over
+  // it when given, same "plural supersedes singular" convention used on
+  // every other converted endpoint). Composes exactly like businessUnitId
+  // already does: it becomes just another Op.and condition ANDed together
+  // with accessWhere in employeeRepository.findAll() below, so a requested
+  // id outside the caller's authorized accessWhere scope naturally yields
+  // zero matching employees rather than needing a separate pre-intersection
+  // step against a companyIds array — accessWhere already IS that
+  // authorization boundary, unlike every other converted endpoint (this one
+  // has no req.companyIds/resolveReportCompanyScope at all, see
+  // employeeController.buildEmployeeAuthContext's own doc comment — X-Company-Id
+  // is not a narrowing mechanism here, only this explicit query param is).
+  // entityIds resolves to the Companies under those Entities first
+  // (intersected with businessUnitIds when both are given), since Employee
+  // Business Unit membership is recorded by Company (business_unit_id), not
+  // Entity directly.
+  const requestedEntityIds = parseIdList(query.entityIds);
+  const requestedBusinessUnitIds = parseIdList(query.businessUnitIds);
+  if (requestedEntityIds || requestedBusinessUnitIds) {
+    let multiBusinessUnitIds = requestedBusinessUnitIds || null;
+    if (requestedEntityIds) {
+      const companiesUnderEntities = await Company.findAll({
+        where: { entity_id: { [Op.in]: requestedEntityIds }, is_deleted: false },
+        attributes: ['id'],
+      });
+      const entityCompanyIds = companiesUnderEntities.map((c) => c.id);
+      multiBusinessUnitIds = multiBusinessUnitIds
+        ? multiBusinessUnitIds.filter((id) => entityCompanyIds.includes(id))
+        : entityCompanyIds;
+    }
+    businessUnitId = multiBusinessUnitIds;
+  }
 
   // Role list-filter (the "Role" dropdown on the Employee Master filter
   // bar) — same parsing/permissive-on-invalid treatment as businessUnitId
@@ -886,9 +921,12 @@ const update = async (id, data, userId, ipAddress = null, authContext) => {
   const resolvedRoleIds = roleIds !== undefined
     ? await resolveDefaultRoleIds(roleIds)
     : undefined;
-  if (resolvedRoleIds !== undefined) {
-    await assertValidRoles(resolvedRoleIds);
-  }
+  // resolvedRoles (role_name, not just the id) is needed below to detect
+  // whether the Project Manager role is being removed by this update — see
+  // the transaction's PM-flag cascade.
+  const resolvedRoles = resolvedRoleIds !== undefined
+    ? await assertValidRoles(resolvedRoleIds)
+    : undefined;
 
   // ownedScope (not the single companyId) — an Admin/Entity Admin may
   // legitimately attach any of their OWN Business Units, not just the one
@@ -916,6 +954,20 @@ const update = async (id, data, userId, ipAddress = null, authContext) => {
 
     if (resolvedRoleIds !== undefined) {
       await employeeRoleRepository.replaceForEmployee(id, resolvedRoleIds, userId, transaction);
+
+      // Section 6 of the PM redesign spec: if this update no longer grants
+      // the Project Manager role, every Service PO mapping row where this
+      // Employee was explicitly marked as PM must revert to a plain
+      // employee mapping (is_project_manager -> false) — the mapping row
+      // itself is never deleted, so the Employee keeps ordinary access to
+      // every one of those Service POs. A no-op when the role is still held
+      // (or was never held to begin with).
+      const stillHoldsProjectManagerRole = employeeServicePOMappingService.hasUnrestrictedServicePOVisibility(
+        resolvedRoles.map((role) => role.role_name)
+      );
+      if (!stillHoldsProjectManagerRole) {
+        await employeeServicePOMappingService.clearProjectManagerAssignmentsForEmployee(id, userId, transaction);
+      }
     }
     if (resolvedBusinessUnitIds !== null) {
       await employeeBusinessUnitRepository.replaceForEmployee(id, resolvedBusinessUnitIds, userId, transaction);

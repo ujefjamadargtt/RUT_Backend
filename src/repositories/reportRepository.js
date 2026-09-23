@@ -13,6 +13,26 @@ const formatMonthYear = (month, year) => (
   `${parseInt(year, 10)}-${String(parseInt(month, 10)).padStart(2, '0')}`
 );
 
+/**
+ * Whether a `companyIds` scope array resolves to "nothing this caller may
+ * see" — an empty array is a legitimate value (a company-less Admin/Entity
+ * Admin who owns no Companies yet, or every id in an entityIds/
+ * businessUnitIds filter turning out to be outside the caller's reach —
+ * see companyAccessControlService.intersectIds()/intersectCompanyIdsWithEntity()),
+ * never an error. Callers MUST check this before building a raw-SQL
+ * `IN (:companyIds)` clause: unlike the ORM's `Op.in` (which safely
+ * degrades an empty array to `IN (NULL)`), this file's raw
+ * `sequelize.query()` + named-replacement `IN (:companyIds)` idiom has NO
+ * such protection — Sequelize's replacement expansion turns an empty array
+ * into a literal `IN ()`, a Postgres syntax error, not a zero-row result.
+ *
+ * @param {number[]|null|undefined} companyIds
+ * @returns {boolean}
+ */
+function isEmptyCompanyScope(companyIds) {
+  return !companyIds || companyIds.length === 0;
+}
+
 const MONTH_YEAR_SQL = {
   year: "split_part(mc.month_year, '-', 1)::int",
   month: "split_part(mc.month_year, '-', 2)::int",
@@ -167,6 +187,14 @@ async function getEmployeeHourlyRate(filters) {
  * @returns {{ rows: object[], count: number }}
  */
 async function getMonthlyCostSummary(filters) {
+  if (isEmptyCompanyScope(filters.companyIds)) {
+    return {
+      rows: [],
+      count: 0,
+      totals: { total_salary_cost: 0, total_ops_cost: 0, total_cost: 0, total_billable_cost: 0 },
+    };
+  }
+
   const {
     year,
     month,
@@ -235,12 +263,39 @@ async function getMonthlyCostSummary(filters) {
     ) sub
   `;
 
-  const [rows, countResult] = await Promise.all([
+  // Unpaginated totals across the FULL filtered set (every month_year
+  // bucket matching the WHERE clause, not just the current page) — same
+  // `whereClause`/`replacements` as dataQuery, minus GROUP BY/LIMIT/OFFSET.
+  // Backs the response's `summary` block: totals must reflect the whole
+  // filtered dataset regardless of which page is being viewed (see
+  // reportService.getMonthlyCostSummary — this replaces the old
+  // per-page `rows.reduce(...)` totals).
+  const totalsQuery = `
+    SELECT
+      COUNT(DISTINCT mc.employee_id)           AS employee_count,
+      ROUND(SUM(mc.salary_cost)::numeric, 2)   AS total_salary_cost,
+      ROUND(SUM(mc.ops_cost)::numeric, 2)      AS total_ops_cost,
+      ROUND(SUM(mc.total_cost)::numeric, 2)    AS total_cost,
+      ROUND(SUM(mc.billable_cost)::numeric, 2) AS total_billable_cost
+    FROM monthly_costs mc
+    ${whereClause}
+  `;
+
+  const [rows, countResult, totalsResult] = await Promise.all([
     sequelize.query(dataQuery, { replacements, type: QueryTypes.SELECT }),
     sequelize.query(countQuery, { replacements, type: QueryTypes.SELECT }),
+    sequelize.query(totalsQuery, { replacements, type: QueryTypes.SELECT }),
   ]);
 
-  return { rows, count: parseInt(countResult[0].total, 10) };
+  const totalsRow = totalsResult[0] || {};
+  const totals = {
+    total_salary_cost: parseFloat(totalsRow.total_salary_cost) || 0,
+    total_ops_cost: parseFloat(totalsRow.total_ops_cost) || 0,
+    total_cost: parseFloat(totalsRow.total_cost) || 0,
+    total_billable_cost: parseFloat(totalsRow.total_billable_cost) || 0,
+  };
+
+  return { rows, count: parseInt(countResult[0].total, 10), totals };
 }
 
 /**
@@ -644,6 +699,10 @@ async function getSubProjectHours(filters) {
  * @returns {{ rows: object[], count: number }}
  */
 async function getResourceAllocation(filters) {
+  if (isEmptyCompanyScope(filters.companyIds)) {
+    return { rows: [], count: 0 };
+  }
+
   const {
     employeeId,
     poId,
@@ -965,6 +1024,17 @@ async function getOperationalCostBreakdown(filters) {
  * aiCopilotService's `utilization` intent for exactly this reason.
  */
 async function getEmployeeUtilizationSummary(filters) {
+  if (isEmptyCompanyScope(filters.companyIds)) {
+    return {
+      rows: [],
+      count: 0,
+      summary: {
+        billable_total: 0, non_billable_total: 0, internal_support_hours: 0,
+        team_management_hours: 0, leaves_hours: 0, lnd_hours: 0, others_hours: 0,
+      },
+    };
+  }
+
   const {
     month,
     year,
@@ -1022,7 +1092,10 @@ async function getEmployeeUtilizationSummary(filters) {
        )`
     : '';
 
-  const dataQuery = `
+  // Shared by dataQuery (paginated, GROUP BY employee) and summaryQuery
+  // (unpaginated, aggregated across every qualifying employee) below — same
+  // per-hour billable/nb_category classification either way.
+  const categorizedCte = `
     WITH categorized AS (
       SELECT
         e.id              AS employee_id,
@@ -1067,6 +1140,10 @@ async function getEmployeeUtilizationSummary(filters) {
       LEFT JOIN clients c        ON c.id  = sp.client_id
       ${empWhere}
     )
+  `;
+
+  const dataQuery = `
+    ${categorizedCte}
     SELECT
       employee_id,
       full_name,
@@ -1099,12 +1176,42 @@ async function getEmployeeUtilizationSummary(filters) {
     ${empWhere}
   `;
 
-  const [rows, countResult] = await Promise.all([
+  // Full-dataset (unpaginated) summary — the same 7 hour-category totals as
+  // dataQuery's per-row columns, but summed across EVERY qualifying
+  // employee (categorized has no LIMIT/OFFSET of its own — those apply only
+  // in the outer SELECT above), not just the current page.
+  const summaryQuery = `
+    ${categorizedCte}
+    SELECT
+      COUNT(DISTINCT employee_id) AS employee_count,
+      COALESCE(SUM(CASE WHEN nb_category = 'internal_support' THEN hours_logged END), 0) AS internal_support_hours,
+      COALESCE(SUM(CASE WHEN nb_category = 'team_management'  THEN hours_logged END), 0) AS team_management_hours,
+      COALESCE(SUM(CASE WHEN nb_category = 'leaves'           THEN hours_logged END), 0) AS leaves_hours,
+      COALESCE(SUM(CASE WHEN nb_category = 'lnd'              THEN hours_logged END), 0) AS lnd_hours,
+      COALESCE(SUM(CASE WHEN nb_category = 'others'           THEN hours_logged END), 0) AS others_hours,
+      COALESCE(SUM(CASE WHEN is_billable = true               THEN hours_logged END), 0) AS billable_total,
+      COALESCE(SUM(CASE WHEN is_billable = false              THEN hours_logged END), 0) AS non_billable_total
+    FROM categorized
+  `;
+
+  const [rows, countResult, summaryResult] = await Promise.all([
     sequelize.query(dataQuery, { replacements, type: QueryTypes.SELECT }),
     sequelize.query(countQuery, { replacements, type: QueryTypes.SELECT }),
+    sequelize.query(summaryQuery, { replacements, type: QueryTypes.SELECT }),
   ]);
 
-  return { rows, count: parseInt(countResult[0].total, 10) };
+  const summaryRow = summaryResult[0] || {};
+  const summary = {
+    billable_total: parseFloat(summaryRow.billable_total) || 0,
+    non_billable_total: parseFloat(summaryRow.non_billable_total) || 0,
+    internal_support_hours: parseFloat(summaryRow.internal_support_hours) || 0,
+    team_management_hours: parseFloat(summaryRow.team_management_hours) || 0,
+    leaves_hours: parseFloat(summaryRow.leaves_hours) || 0,
+    lnd_hours: parseFloat(summaryRow.lnd_hours) || 0,
+    others_hours: parseFloat(summaryRow.others_hours) || 0,
+  };
+
+  return { rows, count: parseInt(countResult[0].total, 10), summary };
 }
 
 /**
@@ -1714,6 +1821,15 @@ async function getResourceUtilization(filters) {
  * @returns {{ columns: object[], rows: object[], count: number }}
  */
 async function getMonthlyResourceUtilization(filters) {
+  if (isEmptyCompanyScope(filters.companyIds)) {
+    return {
+      columns: [],
+      rows: [],
+      count: 0,
+      summary: { billable_total: 0, non_billable_total: 0, total_hours: 0, leaves_hours: 0, total_utilization: 0, employee_count: 0 },
+    };
+  }
+
   const { month, year, employeeId, search, limit, offset, hoursSource, roleId } = filters;
   // hoursSource = 'O' -> original hours_logged. Anything else/default
   // (including no roleId, or roleId != 5) -> modified_hours. roleId plays no
@@ -1783,6 +1899,20 @@ async function getMonthlyResourceUtilization(filters) {
     ${whereClause}
   `;
 
+  // Full-dataset (unpaginated) summary — billable/non-billable/leave hours
+  // summed across EVERY employee matching the current filters, not just the
+  // current page's emp_page CTE below — same idiom as
+  // reportRepository.getResourceMonthlyUtilization's own summaryQuery.
+  const summaryQuery = `
+    SELECT
+      COUNT(DISTINCT t.employee_id) AS employee_count,
+      ROUND(SUM(CASE WHEN sc.name ILIKE '%billable%' AND sc.name NOT ILIKE '%non%' THEN ${hoursCol} ELSE 0 END)::numeric, 4) AS billable_total,
+      ROUND(SUM(CASE WHEN NOT (sc.name ILIKE '%billable%' AND sc.name NOT ILIKE '%non%') THEN ${hoursCol} ELSE 0 END)::numeric, 4) AS non_billable_total,
+      ROUND(SUM(CASE WHEN st.service_type_name ILIKE '%leave%' OR st.service_type_name ILIKE '%vacation%' OR st.service_type_name ILIKE '%holiday%' THEN ${hoursCol} ELSE 0 END)::numeric, 4) AS leaves_hours
+    ${baseFrom}
+    ${whereClause}
+  `;
+
   // CTE 1: paged employee list
   // CTE 2: aggregated client names per employee for the period
   // Main SELECT: employee × service_type hours with full employee detail
@@ -1835,16 +1965,32 @@ async function getMonthlyResourceUtilization(filters) {
     ORDER BY e.full_name, sc.name, st.service_type_name
   `;
 
-  const [columns, countResult, rows] = await Promise.all([
+  const [columns, countResult, rows, summaryResult] = await Promise.all([
     sequelize.query(columnsQuery, { replacements, type: QueryTypes.SELECT }),
     sequelize.query(countQuery, { replacements, type: QueryTypes.SELECT }),
     sequelize.query(dataQuery, { replacements, type: QueryTypes.SELECT }),
+    sequelize.query(summaryQuery, { replacements, type: QueryTypes.SELECT }),
   ]);
+
+  const summaryRow = summaryResult[0] || {};
+  const billable_total = parseFloat(summaryRow.billable_total) || 0;
+  const non_billable_total = parseFloat(summaryRow.non_billable_total) || 0;
+  const leaves_hours = parseFloat(summaryRow.leaves_hours) || 0;
+  const employee_count = parseInt(summaryRow.employee_count, 10) || 0;
+  const total_hours = billable_total + non_billable_total;
 
   return {
     columns,
     rows,
     count: parseInt(countResult[0].total, 10),
+    summary: {
+      billable_total,
+      non_billable_total,
+      total_hours,
+      leaves_hours,
+      total_utilization: total_hours - leaves_hours,
+      employee_count,
+    },
   };
 }
 
@@ -1877,6 +2023,15 @@ async function getMonthlyResourceUtilization(filters) {
  * @returns {{ columns: object[], rows: object[], count: number }}
  */
 async function getResourceMonthlyUtilization(filters) {
+  if (isEmptyCompanyScope(filters.companyIds)) {
+    return {
+      columns: [],
+      rows: [],
+      count: 0,
+      summary: { billable_total: 0, non_billable_total: 0, total_hours: 0, leaves_hours: 0, total_utilization: 0, employee_count: 0 },
+    };
+  }
+
   const {
     month, year, employeeId, clientId, poId, serviceTypeId, search,
     limit, offset, hoursSource, roleId,
@@ -1962,6 +2117,25 @@ async function getResourceMonthlyUtilization(filters) {
     ${whereClause}
   `;
 
+  // Full-dataset (unpaginated) summary — billable/non-billable/leave hours
+  // summed across EVERY employee matching the current filters, not just the
+  // current page's `emp_page` CTE below. Mirrors buildPivotResponse()'s own
+  // billable/leave classification (reportService.js) in SQL instead of JS:
+  // "billable" = category name containing "billable" but not "non"; "leave"
+  // = service type name containing "leave"/"vacation"/"holiday". Computed
+  // directly over the raw joined timesheet rows (no per-employee grouping
+  // needed for a pure aggregate) so this is a single query regardless of
+  // how many employees match, not one row fetched per employee.
+  const summaryQuery = `
+    SELECT
+      COUNT(DISTINCT t.employee_id) AS employee_count,
+      ROUND(SUM(CASE WHEN sc.name ILIKE '%billable%' AND sc.name NOT ILIKE '%non%' THEN ${hoursCol} ELSE 0 END)::numeric, 4) AS billable_total,
+      ROUND(SUM(CASE WHEN NOT (sc.name ILIKE '%billable%' AND sc.name NOT ILIKE '%non%') THEN ${hoursCol} ELSE 0 END)::numeric, 4) AS non_billable_total,
+      ROUND(SUM(CASE WHEN st.service_type_name ILIKE '%leave%' OR st.service_type_name ILIKE '%vacation%' OR st.service_type_name ILIKE '%holiday%' THEN ${hoursCol} ELSE 0 END)::numeric, 4) AS leaves_hours
+    ${baseFrom}
+    ${whereClause}
+  `;
+
   // CTE: paged employee list. Main SELECT: employee × service_type hours,
   // with the fixed 176-hr monthly_capacity the utilization % is computed
   // against (same literal getMonthlyResourceUtilization uses).
@@ -1991,16 +2165,32 @@ async function getResourceMonthlyUtilization(filters) {
     ORDER BY e.full_name, sc.name, st.service_type_name
   `;
 
-  const [columns, countResult, rows] = await Promise.all([
+  const [columns, countResult, rows, summaryResult] = await Promise.all([
     sequelize.query(columnsQuery, { replacements, type: QueryTypes.SELECT }),
     sequelize.query(countQuery, { replacements, type: QueryTypes.SELECT }),
     sequelize.query(dataQuery, { replacements, type: QueryTypes.SELECT }),
+    sequelize.query(summaryQuery, { replacements, type: QueryTypes.SELECT }),
   ]);
+
+  const summaryRow = summaryResult[0] || {};
+  const billable_total = parseFloat(summaryRow.billable_total) || 0;
+  const non_billable_total = parseFloat(summaryRow.non_billable_total) || 0;
+  const leaves_hours = parseFloat(summaryRow.leaves_hours) || 0;
+  const employee_count = parseInt(summaryRow.employee_count, 10) || 0;
+  const total_hours = billable_total + non_billable_total;
 
   return {
     columns,
     rows,
     count: parseInt(countResult[0].total, 10),
+    summary: {
+      billable_total,
+      non_billable_total,
+      total_hours,
+      leaves_hours,
+      total_utilization: total_hours - leaves_hours,
+      employee_count,
+    },
   };
 }
 
@@ -2382,7 +2572,14 @@ function periodKey(dateStr) {
 function buildTrendFilters(filters, replacements) {
   const { companyIds, startDate, endDate, employeeId, clientId, poId, serviceTypeId, roleId } = filters;
   const conditions = [
-    't.company_id IN (:companyIds)',
+    // An empty companyIds array is a legitimate value (every entityIds/
+    // businessUnitIds id turned out to be outside the caller's reach — see
+    // companyAccessControlService.intersectIds()), never an error — but
+    // unlike the ORM's Op.in, this raw-SQL `IN (:companyIds)` replacement
+    // turns an empty array into a literal `IN ()`, a Postgres syntax error
+    // (see isEmptyCompanyScope()'s own doc comment). '1=0' safely matches
+    // nothing instead.
+    isEmptyCompanyScope(companyIds) ? '1=0' : 't.company_id IN (:companyIds)',
     't.timesheet_date >= :startDate',
     't.timesheet_date <= :endDate',
   ];

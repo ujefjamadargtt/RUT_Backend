@@ -74,6 +74,24 @@ const allowCompanyListing = (req, res, next) => {
  *     tags: [Companies]
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: entityIds
+ *         schema: { type: string }
+ *         description: >
+ *           Entity Admin/Admin path only. Optional, comma-separated Entity
+ *           ids (e.g. "1,4") — narrows the caller's owned Entities to just
+ *           these, intersected with (never widening past) their own scope.
+ *           Superseded by entity_id when neither is given; entityIds wins
+ *           when both are.
+ *       - in: query
+ *         name: businessUnitIds
+ *         schema: { type: string }
+ *         description: >
+ *           Entity Admin/Admin path only. Optional, comma-separated Business
+ *           Unit (Company) ids (e.g. "10,12,15") — narrows the result to
+ *           just these ids, still within the entityIds/owned-Entity scope
+ *           above.
  *     responses:
  *       200:
  *         description: >

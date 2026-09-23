@@ -53,6 +53,10 @@ const getServicePOMonthlyBudgetQuerySchema = Joi.object({
     'number.max': 'year must be a valid year.',
     'any.required': 'year is required.',
   }),
+  // Optional multi-select narrowing on top of the caller's existing BU/role
+  // scope (req.companyIds) — comma-separated ids. Never widens access.
+  entityIds: Joi.string().trim().optional(),
+  businessUnitIds: Joi.string().trim().optional(),
 });
 
 /**

@@ -81,6 +81,15 @@ router.get(
  *     tags: [ServicePOMonthlyBudgets]
  *     security:
  *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: entityIds
+ *         schema: { type: string }
+ *         description: Optional. Comma-separated Entity ids — narrows the caller's BU scope, same as GET /service-po-monthly-budgets.
+ *       - in: query
+ *         name: businessUnitIds
+ *         schema: { type: string }
+ *         description: Optional. Comma-separated Business Unit ids — narrows the caller's BU scope, same as GET /service-po-monthly-budgets.
  *     responses:
  *       200:
  *         description: Service PO list (service_po_id, service_po_code, service_po_name, is_billable, status, client)

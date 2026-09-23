@@ -152,6 +152,10 @@ const listSubProjectsQuerySchema = Joi.object({
     .valid('sub_project_name', 'sub_project_code', 'start_date', 'end_date', 'created_at')
     .default('created_at'),
   sort_order: Joi.string().valid('ASC', 'DESC', 'asc', 'desc').default('DESC'),
+  // Optional multi-select narrowing on top of the caller's existing BU/role
+  // scope (req.companyIds) — comma-separated ids. Never widens access.
+  entityIds: Joi.string().trim().optional(),
+  businessUnitIds: Joi.string().trim().optional(),
 });
 
 module.exports = {

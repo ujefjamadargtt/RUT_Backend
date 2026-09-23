@@ -11,11 +11,12 @@ const servicePOHierarchyRepository = require('../repositories/servicePOHierarchy
 const timesheetRepository = require('../repositories/timesheetRepository');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
 const employeeServicePOMappingService = require('./employeeServicePOMappingService');
-const { resolveActorCompanyScope, resolveCreateCompanyIdForActor, resolveActorCompanyScopeForSelectedBU, resolveCentralisedOwnerCreatorIds } = require('./companyAccessControlService');
+const { resolveActorCompanyScope, resolveCreateCompanyIdForActor, resolveActorCompanyScopeForSelectedBU, resolveActorFullReach, resolveCentralisedOwnerCreatorIds, intersectCompanyIdsWithEntity, intersectIds } = require('./companyAccessControlService');
 const { Employee, Company, sequelize } = require('../models');
 const { Op } = require('sequelize');
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
+const { parseIdList } = require('../utils/idListParser');
 const logger = require('../utils/logger');
 const aiInsightService = require('./aiInsight.service');
 
@@ -208,7 +209,26 @@ async function resolveIndividuallyMappedServicePOIds(employeeId, roleNames = nul
  * @returns {Promise<{ data: ServicePO[], meta: object }>}
  */
 const getAll = async (query = {}, authContext, headerCompanyId = null) => {
-  const companyId = await resolveActorCompanyScopeForSelectedBU(authContext, headerCompanyId);
+  let companyId = await resolveActorCompanyScopeForSelectedBU(authContext, headerCompanyId);
+  // Optional entityIds/businessUnitIds multi-select narrowing on top of the
+  // already-resolved scope — only meaningful when that scope is an array (a
+  // single already-selected companyId has nothing left to narrow). Applied
+  // BEFORE centralisedOwnerIds is derived below, so a narrowed BU selection
+  // also correctly narrows which tenant's Centralised POs are visible. For a
+  // Project Manager/Delivery Head this has no visible effect — their
+  // mappedServicePOIds override replaces companyId/centralisedOwnerIds
+  // entirely regardless (see this function's own doc comment).
+  if (Array.isArray(companyId)) {
+    // entityIds/businessUnitIds (camelCase, matching the Report endpoints'
+    // convention) and company_ids (snake_case, matching this endpoint's own
+    // client_id/service_category_id/sort_by convention — the
+    // Admin/Platform-Admin-only BU filter on the Service PO list) are
+    // accepted as equivalent narrowing filters; all compose via
+    // intersection when more than one is given.
+    companyId = await intersectCompanyIdsWithEntity(companyId, parseIdList(query.entityIds));
+    companyId = intersectIds(companyId, parseIdList(query.businessUnitIds));
+    companyId = intersectIds(companyId, parseIdList(query.company_ids));
+  }
   const { page, limit, offset } = getPaginationParams(query);
   const mappedServicePOIds = await resolveIndividuallyMappedServicePOIds(authContext.employeeId, authContext.roleNames);
 
@@ -479,6 +499,16 @@ const create = async (data, userId, req) => {
  * Update an existing Service PO.
  * Cannot update a PO that is already closed or cancelled.
  *
+ * Looks the Service PO up via resolveActorFullReach() (NOT
+ * resolveActorCompanyScope(req.companyId)) — same fix already shipped for
+ * Client/Project update(): req.companyId is only the caller's single
+ * CURRENTLY ACTIVE Business Unit, but GET /service-pos/:id already spans
+ * every Business Unit the caller manages. Scoping the existence check to
+ * just the active BU meant opening any Service PO from a DIFFERENT BU than
+ * whichever one happened to be currently selected 404'd on Save. Every
+ * downstream use below already reads `existing.company_id` (the PO's OWN
+ * value), never the caller's scope, so widening this lookup alone is safe.
+ *
  * @param {number} id
  * @param {object} data
  * @param {number} userId
@@ -486,10 +516,10 @@ const create = async (data, userId, req) => {
  * @returns {Promise<ServicePO>}
  */
 const update = async (id, data, userId, req) => {
-  const scope = await resolveActorCompanyScope({
-    companyId: req.companyId,
+  const scope = await resolveActorFullReach({
     hierarchyRank: req.hierarchyRank,
     employeeId: req.employeeId,
+    employeeBusinessUnits: req.employeeBusinessUnits,
   });
 
   const existing = await servicePORepository.findById(id, scope, req.employeeId);
@@ -639,10 +669,10 @@ const update = async (id, data, userId, req) => {
  * @returns {Promise<void>}
  */
 const close = async (id, userId, req) => {
-  const scope = await resolveActorCompanyScope({
-    companyId: req.companyId,
+  const scope = await resolveActorFullReach({
     hierarchyRank: req.hierarchyRank,
     employeeId: req.employeeId,
+    employeeBusinessUnits: req.employeeBusinessUnits,
   });
 
   const existing = await servicePORepository.findById(id, scope, req.employeeId);
@@ -689,10 +719,10 @@ const close = async (id, userId, req) => {
  * @returns {Promise<void>}
  */
 const allocateResources = async (poId, employeeIds, userId, req) => {
-  const scope = await resolveActorCompanyScope({
-    companyId: req.companyId,
+  const scope = await resolveActorFullReach({
     hierarchyRank: req.hierarchyRank,
     employeeId: req.employeeId,
+    employeeBusinessUnits: req.employeeBusinessUnits,
   });
 
   // A BU-scoped actor must be able to map employees onto a Centralised PO
@@ -779,10 +809,10 @@ const allocateResources = async (poId, employeeIds, userId, req) => {
  * @returns {Promise<void>}
  */
 const deallocateResource = async (poId, employeeId, userId, req) => {
-  const scope = await resolveActorCompanyScope({
-    companyId: req.companyId,
+  const scope = await resolveActorFullReach({
     hierarchyRank: req.hierarchyRank,
     employeeId: req.employeeId,
+    employeeBusinessUnits: req.employeeBusinessUnits,
   });
 
   // A BU-scoped actor must be able to unmap an employee from a Centralised
@@ -897,10 +927,10 @@ async function hasWorkLogsInHierarchy(servicePOId, companyId) {
 }
 
 const deleteServicePO = async (id, userId, req) => {
-  const scope = await resolveActorCompanyScope({
-    companyId: req.companyId,
+  const scope = await resolveActorFullReach({
     hierarchyRank: req.hierarchyRank,
     employeeId: req.employeeId,
+    employeeBusinessUnits: req.employeeBusinessUnits,
   });
 
   const existing = await servicePORepository.findById(id, scope, req.employeeId);

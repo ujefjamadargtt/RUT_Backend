@@ -4,10 +4,34 @@ const { Op } = require('sequelize');
 const { Employee } = require('../models');
 const employeeRepository = require('../repositories/employeeRepository');
 const employeeAccessControlService = require('./employeeAccessControlService');
-const { intersectCompanyIdsWithEntity } = require('./companyAccessControlService');
+const { intersectCompanyIdsWithEntity, intersectIds } = require('./companyAccessControlService');
 const summaryRepository = require('../repositories/employeeWorkLogHoursSummaryRepository');
 const dateHelper = require('../helpers/dateHelper');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
+const { parseIdList } = require('../utils/idListParser');
+
+/**
+ * Narrow an already-resolved companyIds[] (BU/role reach) by this report's
+ * entity_ids/company_ids/business_unit_ids multi-select query params —
+ * sent as literal, explicit fields now (not via the X-Company-Id header
+ * mechanism most other reports use) — additive to the legacy singular
+ * entityId. company_ids and business_unit_ids are accepted as equivalent
+ * BU-narrowing filters (both compose via intersection when given together,
+ * matching this report's own field naming as sent by the frontend). Both
+ * narrow, never widen; an id outside the caller's own reach silently yields
+ * no data for that id, never an error.
+ *
+ * @param {number[]} companyIds
+ * @param {object} query
+ * @returns {Promise<number[]>}
+ */
+async function applyEntityBuFilters(companyIds, query) {
+  const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
+  let scoped = await intersectCompanyIdsWithEntity(companyIds, parseIdList(query.entity_ids) ?? entityId);
+  scoped = intersectIds(scoped, parseIdList(query.company_ids));
+  scoped = intersectIds(scoped, parseIdList(query.business_unit_ids));
+  return scoped;
+}
 
 const asNumber = (value) => Number.parseFloat(value) || 0;
 
@@ -45,8 +69,7 @@ async function resolveAuthorizedEmployeeIds(authContext, companyIds) {
 
 async function getSummary(query, authContext, companyIds) {
   const { startDate, endDate, period } = resolvePeriod(query);
-  const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
-  companyIds = await intersectCompanyIdsWithEntity(companyIds, entityId);
+  companyIds = await applyEntityBuFilters(companyIds, query);
   let employeeIds = await resolveAuthorizedEmployeeIds(authContext, companyIds);
 
   if (query.employeeId) {
@@ -74,8 +97,7 @@ async function getSummary(query, authContext, companyIds) {
 
 async function getDetails(employeeId, query, authContext, companyIds) {
   const { startDate, endDate, period } = resolvePeriod(query);
-  const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
-  companyIds = await intersectCompanyIdsWithEntity(companyIds, entityId);
+  companyIds = await applyEntityBuFilters(companyIds, query);
   const employeeIds = await resolveAuthorizedEmployeeIds(authContext, companyIds);
   if (!employeeIds.includes(employeeId)) {
     const err = new Error('Employee not found.');

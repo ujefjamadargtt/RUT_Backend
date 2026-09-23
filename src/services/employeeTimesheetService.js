@@ -1417,6 +1417,13 @@ const getMappedProjects = async (employeeId, companyId) => {
       // A project listing represents the whole PO, not a specific logged
       // node, so its breadcrumb is always just the PO name (Case 3 shape).
       service_po_breadcrumb: m.servicePO.service_po_name,
+      // Every mapped Service PO is included here regardless of this value —
+      // a Project Manager role does NOT restrict which POs an Employee can
+      // log time against, only which ones they approve (see
+      // employeeServicePOMappingService.getProjectManagerServicePOIds). This
+      // just lets the frontend badge/distinguish the PO(s) this Employee is
+      // explicitly the PM for, when they log in as an Employee.
+      is_project_manager: !!m.is_project_manager,
     }));
 
   if (projects.length === 0) return projects;

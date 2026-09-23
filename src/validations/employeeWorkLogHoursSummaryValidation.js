@@ -23,6 +23,16 @@ function requireDateOrMonth(value, helpers) {
   return value;
 }
 
+// Multi-select narrowing — sent as literal query fields (not via the
+// X-Company-Id header mechanism most other reports use). Additive to the
+// legacy singular company_id/entityId; see
+// employeeWorkLogHoursSummaryService.applyEntityBuFilters()'s doc comment.
+const multiSelectFields = {
+  entity_ids: Joi.string().trim().optional(),
+  company_ids: Joi.string().trim().optional(),
+  business_unit_ids: Joi.string().trim().optional(),
+};
+
 const employeeWorkLogHoursSummaryQuerySchema = Joi.object({
   ...periodFields,
   company_id: Joi.number().integer().positive().optional(),
@@ -30,6 +40,7 @@ const employeeWorkLogHoursSummaryQuerySchema = Joi.object({
   // Optional further narrowing on top of the caller's BU/role scope — see
   // companyAccessControlService.intersectCompanyIdsWithEntity().
   entityId: Joi.number().integer().positive().optional(),
+  ...multiSelectFields,
   search: Joi.string().trim().max(100).allow('').optional(),
   sortBy: Joi.string().valid('employee_name', 'employee_code', 'total_hours').default('employee_name'),
   sortOrder: Joi.string().valid('ASC', 'DESC').default('ASC'),
@@ -41,6 +52,7 @@ const employeeWorkLogHoursSummaryDetailQuerySchema = Joi.object({
   ...periodFields,
   company_id: Joi.number().integer().positive().optional(),
   entityId: Joi.number().integer().positive().optional(),
+  ...multiSelectFields,
   page: Joi.number().integer().min(1).default(1),
   limit: Joi.number().integer().min(1).max(100).default(20),
 }).custom(requireDateOrMonth, 'date-or-month-period');

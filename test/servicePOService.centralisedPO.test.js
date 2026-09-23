@@ -37,8 +37,11 @@ function restore() {
   aiInsightService.runJob = ORIGINAL.runJob;
 }
 
+// hierarchyRank/employeeBusinessUnits are needed by update()'s
+// resolveActorFullReach() lookup (a BU-scoped actor's full reach resolves
+// from employeeBusinessUnits, not companyId) — create() doesn't use them.
 function fakeReq(companyId) {
-  return { companyId, headers: {}, ip: '127.0.0.1' };
+  return { companyId, hierarchyRank: 4, employeeBusinessUnits: [{ id: companyId }], headers: {}, ip: '127.0.0.1' };
 }
 
 test('create(): is_centralised: true flows through into the payload persisted by the repository', async () => {

@@ -152,9 +152,14 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
   if (businessUnitId) {
     // The explicit list filter must follow the mapping table, not the
     // legacy employees.company_id column. This is the exact table updated by
-    // the Role & BU Mapping feature.
+    // the Role & BU Mapping feature. Accepts a single id (legacy
+    // ?business_unit_id=) or an array (the entityIds/businessUnitIds
+    // multi-select filter) — both narrow via the same Op.in-based lookup.
+    const buWhere = Array.isArray(businessUnitId)
+      ? { business_unit_id: { [Op.in]: businessUnitId }, status: 'active' }
+      : { business_unit_id: businessUnitId, status: 'active' };
     const buRows = await EmployeeBusinessUnit.findAll({
-      where: { business_unit_id: businessUnitId, status: 'active' },
+      where: buWhere,
       attributes: ['employee_id'],
       raw: true,
     });

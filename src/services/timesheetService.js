@@ -15,6 +15,8 @@ const dateHelper = require('../helpers/dateHelper');
 const { applyHoursVisibility } = require('../utils/hoursVisibility');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
 const timesheetPublishPolicy = require('../utils/timesheetPublishPolicy');
+const { intersectCompanyIdsWithEntity, intersectIds } = require('./companyAccessControlService');
+const { parseIdList } = require('../utils/idListParser');
 
 /**
  * Map EmployeeWorkLog rows (Employee Self Timesheet module — ALL rows for
@@ -1497,6 +1499,16 @@ const confirmImport = async (importId, userId, ipAddress = null, companyId) => {
 const getImportHistory = async (query = {}, companyId) => {
   const { page, limit, offset } = getPaginationParams(query);
 
+  // Optional entityIds/businessUnitIds multi-select narrowing on top of the
+  // already-resolved companyId (req.companyIds, always an array for this
+  // authenticateReadMultiBU route). Never widens access. Previously this
+  // query param was accepted by validation but never actually read here —
+  // the endpoint returned an identical total with or without it.
+  if (Array.isArray(companyId)) {
+    companyId = await intersectCompanyIdsWithEntity(companyId, parseIdList(query.entityIds));
+    companyId = intersectIds(companyId, parseIdList(query.businessUnitIds));
+  }
+
   const month = query.month ? parseInt(query.month, 10) : undefined;
   const year = query.year ? parseInt(query.year, 10) : undefined;
 
@@ -2219,6 +2231,14 @@ const deleteImports = async (ids, companyId) => {
 const getAllTimesheets = async (query = {}, companyId) => {
   const { page, limit, offset } = getPaginationParams(query);
   const { startDate, endDate, employeeId, poId, subProjectId, sortBy, sortOrder, role } = query;
+
+  // Optional entityIds/businessUnitIds multi-select narrowing on top of the
+  // already-resolved companyId (req.companyIds, always an array now that
+  // this route is on authenticateReadMultiBU). Never widens access.
+  if (Array.isArray(companyId)) {
+    companyId = await intersectCompanyIdsWithEntity(companyId, parseIdList(query.entityIds));
+    companyId = intersectIds(companyId, parseIdList(query.businessUnitIds));
+  }
 
   const { rows, count } = await timesheetRepository.findAll(
     { startDate, endDate, employeeId, poId, subProjectId, companyId },

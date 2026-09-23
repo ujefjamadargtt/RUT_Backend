@@ -3,8 +3,10 @@
 const costBudgetRepository = require('../repositories/costBudgetRepository');
 const servicePORepository = require('../repositories/servicePORepository');
 const companyAccessControlService = require('./companyAccessControlService');
+const { intersectCompanyIdsWithEntity, intersectIds } = companyAccessControlService;
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
 const { parseMonthString, toMonthString } = require('../helpers/monthPeriodHelper');
+const { parseIdList } = require('../utils/idListParser');
 const logger = require('../utils/logger');
 
 /**
@@ -210,7 +212,14 @@ const listByServicePO = async (servicePOId, req) => {
  * @returns {Promise<object[]>}
  */
 const list = async (query, req) => {
-  const scope = await resolveScope(req);
+  // GET / is on authenticateReadMultiBU (see costBudget.routes.js) —
+  // req.companyIds (always an array) is the caller's role-reach, already
+  // resolved; resolveScope()/req.companyId (singular) is for the write/
+  // single-PO routes only, which stay on the plain `authenticate` chain.
+  let scope = req.companyIds;
+  scope = await intersectCompanyIdsWithEntity(scope, parseIdList(query.entityIds));
+  scope = intersectIds(scope, parseIdList(query.businessUnitIds));
+
   const filters = {};
   if (query.service_po_id !== undefined) filters.service_po_id = query.service_po_id;
   if (query.month !== undefined) {

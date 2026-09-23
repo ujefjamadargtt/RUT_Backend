@@ -523,29 +523,57 @@ async function resolveActorFullReach(authContext) {
 /**
  * Narrows an already-resolved companyIds[] (BU/role reach, e.g. from
  * resolveReportCompanyScope) down to just the Companies that also belong to
- * a given Entity — backs the Reports module's optional `entityId` query
- * param, which is meant to further restrict the caller's existing BU scope,
- * never to replace or widen it.
+ * one (or, now, any) of a set of Entities — backs the Reports/List-Master
+ * modules' optional `entityId`/`entityIds` query param(s), meant to further
+ * restrict the caller's existing BU scope, never to replace or widen it.
  *
- * Returns companyIds unchanged when entityId is null/undefined. An entityId
- * outside the caller's own reach isn't an error — the intersection simply
- * yields [], same "no data" convention managementReportService's
- * getBUPerformanceScorecard already uses for an empty entity/company set.
+ * Returns companyIds unchanged when entityId is null/undefined/an empty
+ * array. An entityId outside the caller's own reach isn't an error — the
+ * intersection simply yields [], same "no data" convention
+ * managementReportService's getBUPerformanceScorecard already uses for an
+ * empty entity/company set.
  *
  * @param {number[]} companyIds - the caller's already-authorized BU reach
- * @param {number|null} [entityId]
+ * @param {number|number[]|null} [entityId] - a single Entity id (legacy
+ *   callers) or an array of Entity ids (new entityIds multi-select filter)
  * @returns {Promise<number[]>}
  */
 async function intersectCompanyIdsWithEntity(companyIds, entityId) {
   if (entityId == null) return companyIds;
+  const entityIds = Array.isArray(entityId) ? entityId : [entityId];
+  if (entityIds.length === 0) return companyIds;
 
   const companies = await Company.findAll({
-    where: { entity_id: entityId, is_deleted: false },
+    where: { entity_id: { [Op.in]: entityIds }, is_deleted: false },
     attributes: ['id'],
   });
   const entityCompanyIds = new Set(companies.map((c) => c.id));
 
   return (companyIds || []).filter((id) => entityCompanyIds.has(id));
+}
+
+/**
+ * Narrow an already-resolved reach array (e.g. companyIds from
+ * resolveReportCompanyScope) down to just the ids also present in a
+ * client-supplied requestedIds array — the `businessUnitIds` multi-select
+ * filter's own intersection step. Unlike intersectCompanyIdsWithEntity(),
+ * this needs no DB lookup: `reachIds` already IS the caller's authorized
+ * Business Unit id set, so narrowing by a client-supplied subset is a plain
+ * array intersection.
+ *
+ * `requestedIds` absent/empty means "no filter" (matches the spec's
+ * "absent/empty = same as today" rule) — returns `reachIds` unchanged, NOT
+ * "match nothing". An id in `requestedIds` outside `reachIds` is silently
+ * dropped, never an error and never widens the result beyond `reachIds`.
+ *
+ * @param {number[]} reachIds - the caller's already-authorized id reach
+ * @param {number[]|undefined|null} requestedIds - client-supplied subset filter
+ * @returns {number[]}
+ */
+function intersectIds(reachIds, requestedIds) {
+  if (!requestedIds || requestedIds.length === 0) return reachIds;
+  const requested = new Set(requestedIds);
+  return (reachIds || []).filter((id) => requested.has(id));
 }
 
 /**
@@ -785,6 +813,7 @@ module.exports = {
   resolveReportCompanyScope,
   resolveActorFullReach,
   intersectCompanyIdsWithEntity,
+  intersectIds,
   resolveImportBusinessUnitId,
   resolveOwningAdminIdForCompany,
   resolveAdminOwnershipForBusinessUnits,

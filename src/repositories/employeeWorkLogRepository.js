@@ -845,6 +845,15 @@ const findForApprovalSummaryByEmployees = async ({ employeeIds, startDate, endDa
  * row's own (creation-time) company_id, silently approving 0 rows — not
  * erroring — whenever they differed, even though the entries were
  * genuinely this employee's own pending work.
+ *
+ * Returns a PER-DATE breakdown, not just a single total — the atomic
+ * `status='pending'` guard on the UPDATE means a date whose rows were
+ * already approved (by another Manager's concurrent bulk-approve on an
+ * overlapping Centralised PO, or simply an earlier action) also comes back
+ * as 0 rows approved for that date, identical to a date that never had
+ * anything pending at all. Without `already_settled`, the caller has no way
+ * to tell "you lost a race, someone already approved this" from "there was
+ * nothing here to approve" — both silently looked like the same bare 0.
  * @param {number} employeeId
  * @param {string[]} dates - "YYYY-MM-DD"
  * @param {object} [transaction]
@@ -854,22 +863,53 @@ const findForApprovalSummaryByEmployees = async ({ employeeIds, startDate, endDa
  *   bulk-approve can never cross into a Service PO they don't manage even
  *   when the employee also logged work against one that isn't theirs.
  *   Omitted (null) for every other tier — behavior unchanged.
- * @returns {Promise<number>} rows updated
+ * @returns {Promise<{ total_rows_approved: number, buckets: Array<{ date: string, rows_approved: number, already_settled: boolean }> }>}
  */
 const approveByEmployeeAndDates = async (employeeId, dates, transaction = null, servicePoIds = null) => {
-  const [count] = await EmployeeWorkLog.update(
+  const poFilter = servicePoIds && servicePoIds.length ? { service_po_id: { [Op.in]: servicePoIds } } : {};
+
+  const [totalRowsApproved, updatedRows] = await EmployeeWorkLog.update(
     { status: 'approved' },
     {
       where: {
         employee_id: employeeId,
         work_date: { [Op.in]: dates },
         status: 'pending',
-        ...(servicePoIds && servicePoIds.length ? { service_po_id: { [Op.in]: servicePoIds } } : {}),
+        ...poFilter,
       },
+      returning: true,
       ...(transaction ? { transaction } : {}),
     }
   );
-  return count;
+
+  const approvedCountByDate = new Map();
+  for (const row of updatedRows) {
+    approvedCountByDate.set(row.work_date, (approvedCountByDate.get(row.work_date) || 0) + 1);
+  }
+
+  // Only for a date this call approved NOTHING: was there ever any row here
+  // at all (any status) under this scope? If so, someone/something else
+  // already settled it — surface that explicitly instead of a bare 0.
+  const untouchedDates = dates.filter((date) => !approvedCountByDate.has(date));
+  const settledDates = new Set();
+  if (untouchedDates.length > 0) {
+    const existingRows = await EmployeeWorkLog.findAll({
+      where: { employee_id: employeeId, work_date: { [Op.in]: untouchedDates }, ...poFilter },
+      attributes: ['work_date'],
+      group: ['work_date'],
+      ...(transaction ? { transaction } : {}),
+      raw: true,
+    });
+    existingRows.forEach((row) => settledDates.add(row.work_date));
+  }
+
+  const buckets = dates.map((date) => ({
+    date,
+    rows_approved: approvedCountByDate.get(date) || 0,
+    already_settled: !approvedCountByDate.has(date) && settledDates.has(date),
+  }));
+
+  return { total_rows_approved: totalRowsApproved, buckets };
 };
 
 /**
@@ -877,37 +917,81 @@ const approveByEmployeeAndDates = async (employeeId, dates, transaction = null, 
  * for one employee within the given month/year pairs to 'approved'.
  *
  * Deliberately NOT company/BU-scoped — same reasoning as
- * approveByEmployeeAndDates() above.
+ * approveByEmployeeAndDates() above. Returns the same PER-BUCKET breakdown
+ * (by month/year instead of by date), for the same "lost a race vs. nothing
+ * was pending" reason documented on approveByEmployeeAndDates() above.
  * @param {number} employeeId
  * @param {Array<{ month: number, year: number }>} months
  * @param {object} [transaction]
  * @param {number[]|null} [servicePoIds] - see approveByEmployeeAndDates's own
  *   doc comment — same Project-Manager-only scoping, same reasoning.
- * @returns {Promise<number>} rows updated
+ * @returns {Promise<{ total_rows_approved: number, buckets: Array<{ month: number, year: number, rows_approved: number, already_settled: boolean }> }>}
  */
 const approveByEmployeeAndMonths = async (employeeId, months, transaction = null, servicePoIds = null) => {
-  const monthYearConditions = months.map(({ month, year }) => {
+  const parsedMonths = months.map(({ month, year }) => {
     const monthNum = parseInt(month, 10);
     const yearNum = parseInt(year, 10);
     if (!Number.isInteger(monthNum) || !Number.isInteger(yearNum)) {
       throw new Error(`approveByEmployeeAndMonths: month/year must be numbers (got month=${month}, year=${year}).`);
     }
-    return literal(`(EXTRACT(MONTH FROM work_date) = ${monthNum} AND EXTRACT(YEAR FROM work_date) = ${yearNum})`);
+    return { month: monthNum, year: yearNum };
   });
+  const monthYearConditions = parsedMonths.map(({ month, year }) =>
+    literal(`(EXTRACT(MONTH FROM work_date) = ${month} AND EXTRACT(YEAR FROM work_date) = ${year})`)
+  );
+  const poFilter = servicePoIds && servicePoIds.length ? { service_po_id: { [Op.in]: servicePoIds } } : {};
 
-  const [count] = await EmployeeWorkLog.update(
+  const [totalRowsApproved, updatedRows] = await EmployeeWorkLog.update(
     { status: 'approved' },
     {
       where: {
         employee_id: employeeId,
         status: 'pending',
         [Op.or]: monthYearConditions,
-        ...(servicePoIds && servicePoIds.length ? { service_po_id: { [Op.in]: servicePoIds } } : {}),
+        ...poFilter,
       },
+      returning: true,
       ...(transaction ? { transaction } : {}),
     }
   );
-  return count;
+
+  const bucketKey = (month, year) => `${year}-${month}`;
+  const approvedCountByBucket = new Map();
+  for (const row of updatedRows) {
+    const workDate = new Date(row.work_date);
+    const key = bucketKey(workDate.getUTCMonth() + 1, workDate.getUTCFullYear());
+    approvedCountByBucket.set(key, (approvedCountByBucket.get(key) || 0) + 1);
+  }
+
+  const untouchedMonths = parsedMonths.filter(({ month, year }) => !approvedCountByBucket.has(bucketKey(month, year)));
+  const settledBuckets = new Set();
+  if (untouchedMonths.length > 0) {
+    const untouchedConditions = untouchedMonths.map(({ month, year }) =>
+      literal(`(EXTRACT(MONTH FROM work_date) = ${month} AND EXTRACT(YEAR FROM work_date) = ${year})`)
+    );
+    const existingRows = await EmployeeWorkLog.findAll({
+      where: { employee_id: employeeId, [Op.or]: untouchedConditions, ...poFilter },
+      attributes: ['work_date'],
+      ...(transaction ? { transaction } : {}),
+      raw: true,
+    });
+    existingRows.forEach((row) => {
+      const workDate = new Date(row.work_date);
+      settledBuckets.add(bucketKey(workDate.getUTCMonth() + 1, workDate.getUTCFullYear()));
+    });
+  }
+
+  const buckets = parsedMonths.map(({ month, year }) => {
+    const key = bucketKey(month, year);
+    return {
+      month,
+      year,
+      rows_approved: approvedCountByBucket.get(key) || 0,
+      already_settled: !approvedCountByBucket.has(key) && settledBuckets.has(key),
+    };
+  });
+
+  return { total_rows_approved: totalRowsApproved, buckets };
 };
 
 /**

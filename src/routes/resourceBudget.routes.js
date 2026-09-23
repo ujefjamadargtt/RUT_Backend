@@ -11,6 +11,7 @@ const express = require('express');
 const router = express.Router();
 
 const authenticate = require('../middlewares/auth');
+const authenticateReadMultiBU = require('../middlewares/authenticateReadMultiBU');
 const authorize = require('../middlewares/authorize');
 const { validate } = require('../middlewares/validateRequest');
 const resourceBudgetController = require('../controllers/resourceBudgetController');
@@ -21,8 +22,14 @@ const {
   listResourceBudgetQuerySchema,
 } = require('../validations/resourceBudgetValidation');
 
-// ─── All routes require authentication ────────────────────────────────────────
-router.use(authenticate);
+// Every route requires authentication. GET / (the list) is on
+// authenticateReadMultiBU instead of the shared `authenticate` chain below
+// — same "no X-Company-Id -> role reach across every BU" contract as every
+// other converted List/Master endpoint, so entityIds/businessUnitIds
+// multi-select narrowing is possible there. Every write/single-PO route
+// still needs exactly one target BU (req.companyId, singular), so those
+// keep the plain `authenticate` chain individually — no more router.use()
+// blanket, since the two contracts can't share one.
 
 /**
  * @swagger
@@ -48,7 +55,7 @@ router.use(authenticate);
  *       404:
  *         description: Service PO not found
  */
-router.get('/service-po/:servicePoId/mapped-employees', resourceBudgetController.getMappedEmployees);
+router.get('/service-po/:servicePoId/mapped-employees', authenticate, resourceBudgetController.getMappedEmployees);
 
 /**
  * @swagger
@@ -69,7 +76,7 @@ router.get('/service-po/:servicePoId/mapped-employees', resourceBudgetController
  *       404:
  *         description: Service PO not found
  */
-router.get('/service-po/:servicePoId', resourceBudgetController.listByServicePO);
+router.get('/service-po/:servicePoId', authenticate, resourceBudgetController.listByServicePO);
 
 /**
  * @swagger
@@ -94,7 +101,7 @@ router.get('/service-po/:servicePoId', resourceBudgetController.listByServicePO)
  *       422:
  *         description: Validation error
  */
-router.get('/', validate(listResourceBudgetQuerySchema, 'query'), resourceBudgetController.list);
+router.get('/', authenticateReadMultiBU, validate(listResourceBudgetQuerySchema, 'query'), resourceBudgetController.list);
 
 /**
  * @swagger
@@ -142,6 +149,7 @@ router.get('/', validate(listResourceBudgetQuerySchema, 'query'), resourceBudget
  */
 router.post(
   '/bulk',
+  authenticate,
   authorize('servicepo.manage_future_budget'),
   validate(bulkResourceBudgetSchema),
   resourceBudgetController.bulkUpsert
@@ -187,6 +195,7 @@ router.post(
  */
 router.post(
   '/',
+  authenticate,
   authorize('servicepo.manage_future_budget'),
   validate(createResourceBudgetSchema),
   resourceBudgetController.create
@@ -233,6 +242,7 @@ router.post(
  */
 router.put(
   '/:id',
+  authenticate,
   authorize('servicepo.manage_future_budget'),
   validate(updateResourceBudgetSchema),
   resourceBudgetController.update
@@ -261,6 +271,7 @@ router.put(
  */
 router.delete(
   '/:id',
+  authenticate,
   authorize('servicepo.manage_future_budget'),
   resourceBudgetController.deactivate
 );

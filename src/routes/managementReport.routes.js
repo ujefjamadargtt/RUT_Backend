@@ -766,4 +766,150 @@ router.get('/month-wise-bench', authenticateMultiBU, managementReportController.
  */
 router.get('/resource-wise-bench', authenticateMultiBU, managementReportController.getResourceWiseBench);
 
+/**
+ * @swagger
+ * /reports/resource-cost-utilization:
+ *   get:
+ *     summary: "[Report 15] Resource Cost / Utilization Report — Emp Code/Name/Expected CTC/Monthly CTC/BU/Billed Status/PM/Client/Project/SPO, with per-month Hours/Logged Hrs/Utilization %/Contribution"
+ *     description: >
+ *       One row per (Employee, Service PO) staffing assignment
+ *       (employee_servicepo_mapping, is_billable Service POs only by
+ *       default), with a `months` array covering every month in the
+ *       requested range. Capped Hours is always the literal 176 (never
+ *       derived). Utilization % - Projection = Resource Budget Hours (from
+ *       resource_budget_master) / 176 x 100. Utilization % - Actual = Logged
+ *       Hours (from timesheets) / 176 x 100. Contribution = that month's own
+ *       Monthly CTC (monthly_costs) x (Logged Hours / 176), using the full
+ *       decimal utilization, not the rounded displayed percentage. Multiple
+ *       Project Managers mapped to the same Service PO (employee_servicepo_
+ *       mapping.is_project_manager = true) are merged into one
+ *       comma-separated `projectManagers` array on the same row — never
+ *       duplicated into separate rows. Expected CTC and Billed Status have
+ *       no data source; both are always null (filled in manually after
+ *       export — see /reports/resource-cost-utilization/export).
+ *     tags: [ManagementReports]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         schema: { type: integer, minimum: 1, maximum: 12 }
+ *         description: Single-month shorthand — equivalent to startMonth=endMonth=month, startYear=endYear=year
+ *       - in: query
+ *         name: year
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: startMonth
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: startYear
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: endMonth
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: endYear
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: employeeId
+ *         schema: { type: string }
+ *         description: Multi-select — single id or comma-separated list. Alias employeeIds also accepted.
+ *       - in: query
+ *         name: clientId
+ *         schema: { type: string }
+ *         description: Multi-select — single id or comma-separated list. Alias clientIds also accepted.
+ *       - in: query
+ *         name: projectId
+ *         schema: { type: string }
+ *         description: Multi-select — single id or comma-separated list. Alias projectIds also accepted.
+ *       - in: query
+ *         name: poId
+ *         schema: { type: string }
+ *         description: Service PO filter — multi-select, single id or comma-separated list. Aliases poIds/spoId/spoIds also accepted.
+ *       - in: query
+ *         name: projectManagerId
+ *         schema: { type: string }
+ *         description: Multi-select — matches Service POs where this employee is explicitly is_project_manager=true. Alias projectManagerIds also accepted.
+ *       - in: query
+ *         name: businessUnitIds
+ *         schema: { type: string }
+ *         description: >
+ *           Optional. Comma-separated Business Unit ids. Narrows the
+ *           caller's existing BU scope (after any entityId/entityIds
+ *           narrowing) — intersected with, never replacing, that scope.
+ *       - in: query
+ *         name: isBillable
+ *         schema: { type: string, enum: ['true', 'false', 'all'] }
+ *         description: Defaults to true — excludes Centralised/non-billable Service POs (Leave, On Bench, Training, etc.) from the roster. Pass false or all to include them.
+ *       - in: query
+ *         name: search
+ *         schema: { type: string }
+ *         description: Matches employee name/code, client, project, Service PO name/code, or any mapped Project Manager's name.
+ *       - in: query
+ *         name: sortBy
+ *         schema: { type: string, enum: [employee_name, employee_code, bu_name, client_name, project_name, service_po_name] }
+ *       - in: query
+ *         name: sortOrder
+ *         schema: { type: string, enum: [ASC, DESC] }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: entityId
+ *         schema: { type: integer }
+ *         description: >
+ *           Optional. Narrows the caller's existing Business Unit scope
+ *           (X-Company-Id header / role reach) to just the Companies under
+ *           this Entity — intersected with, never replacing, that scope.
+ *     responses:
+ *       200: { description: Paginated resource cost/utilization records, plus a per-month full-dataset summary block }
+ *       401: { description: Unauthorized }
+ *       422: { description: A month/year range must be provided }
+ */
+router.get('/resource-cost-utilization', authenticateMultiBU, managementReportController.getResourceCostUtilization);
+
+/**
+ * @swagger
+ * /reports/resource-cost-utilization/export:
+ *   get:
+ *     summary: "[Report 15] Resource Cost / Utilization Report — Excel download (full filtered dataset, not just one page)"
+ *     description: >
+ *       Same filters as GET /reports/resource-cost-utilization. Static
+ *       columns (Emp Code, Emp Name, Expected CTC, Monthly CTC, BU Name,
+ *       Billed Status, Project Manager, Client, Project, SPO) are frozen;
+ *       each month in the range gets one merged column group (Hours, Logged
+ *       Hrs, Utilization % - Projection, Utilization % - Actual,
+ *       Contribution). Expected CTC and Billed Status are left blank for
+ *       manual entry after download — never persisted back to the database.
+ *     tags: [ManagementReports]
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - in: query
+ *         name: month
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: year
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: startMonth
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: startYear
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: endMonth
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: endYear
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet file download
+ *       401: { description: Unauthorized }
+ *       422: { description: A month/year range must be provided }
+ */
+router.get('/resource-cost-utilization/export', authenticateMultiBU, managementReportController.exportResourceCostUtilization);
+
 module.exports = router;

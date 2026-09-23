@@ -145,12 +145,33 @@ router.get(
  *         name: entityId
  *         schema: { type: integer }
  *         description: >
- *           Optional. Narrows the caller's existing Business Unit scope
- *           (X-Company-Id header / role reach) to just the Companies under
- *           this Entity — intersected with, never replacing, that scope.
+ *           Optional, single-value (legacy). Narrows the caller's existing
+ *           Business Unit scope (X-Company-Id header / role reach) to just
+ *           the Companies under this Entity — intersected with, never
+ *           replacing, that scope. Superseded by entityIds below; entityIds
+ *           wins when both are given.
+ *       - in: query
+ *         name: entityIds
+ *         schema: { type: string }
+ *         description: >
+ *           Optional. Comma-separated Entity ids (e.g. "1,4"). Same
+ *           intersect-never-widen narrowing as entityId, for more than one
+ *           Entity at once.
+ *       - in: query
+ *         name: businessUnitIds
+ *         schema: { type: string }
+ *         description: >
+ *           Optional. Comma-separated Business Unit ids (e.g. "10,12,15").
+ *           Further narrows the caller's existing BU scope (after any
+ *           entityId/entityIds narrowing) — intersected with, never
+ *           replacing, that scope. An id outside the caller's reach is
+ *           silently dropped, never an error.
  *     responses:
  *       200:
- *         description: Paginated monthly cost summary with page-level totals
+ *         description: >
+ *           Paginated monthly cost summary. `summary` totals are computed
+ *           over the FULL filtered dataset (every month_year bucket matching
+ *           the current filters), not just the current page.
  *       401:
  *         description: Unauthorized
  *       403:
@@ -883,7 +904,11 @@ router.get(
  *       Computed totals per row: billable_total, non_billable_total, leaves_hours,
  *       total_utilization (total_hours - leaves_hours),
  *       utilization_percentage (total_utilization / monthly_capacity * 100, rounded
- *       to 2 decimals; null if monthly_capacity is unavailable).
+ *       to 2 decimals; null if monthly_capacity is unavailable),
+ *       contributed_percentage (billable_total / monthly_capacity * 100, rounded
+ *       to 2 decimals; null if monthly_capacity is unavailable) — what share of
+ *       this employee's Monthly Capacity (e.g. 176) was billable, e.g. 150
+ *       billable of a 176 capacity -> 85.23.
  *       Only active employees with timesheet entries in the period appear.
  *     tags: [Reports]
  *     security:
@@ -916,9 +941,24 @@ router.get(
  *         name: entityId
  *         schema: { type: integer }
  *         description: >
- *           Optional. Narrows the caller's existing Business Unit scope
- *           (X-Company-Id header / role reach) to just the Companies under
- *           this Entity — intersected with, never replacing, that scope.
+ *           Optional, single-value (legacy). Narrows the caller's existing
+ *           Business Unit scope (X-Company-Id header / role reach) to just
+ *           the Companies under this Entity — intersected with, never
+ *           replacing, that scope. Superseded by entityIds below; entityIds
+ *           wins when both are given.
+ *       - in: query
+ *         name: entityIds
+ *         schema: { type: string }
+ *         description: Optional. Comma-separated Entity ids (e.g. "1,4"). Same intersect-never-widen narrowing as entityId, for more than one Entity at once.
+ *       - in: query
+ *         name: businessUnitIds
+ *         schema: { type: string }
+ *         description: >
+ *           Optional. Comma-separated Business Unit ids (e.g. "10,12,15").
+ *           Further narrows the caller's existing BU scope (after any
+ *           entityId/entityIds narrowing) — intersected with, never
+ *           replacing, that scope. An id outside the caller's reach is
+ *           silently dropped, never an error.
  *     responses:
  *       200:
  *         description: >
@@ -928,8 +968,14 @@ router.get(
  *           monthly_billing_capacity (160), clients (comma-separated string),
  *           hours { [service_type_id]: decimal_hours },
  *           billable_total, non_billable_total, leaves_hours, total_utilization,
- *           utilization_percentage (null if monthly_capacity is unavailable).
- *           summary: page-level totals, incl. utilization_percentage.
+ *           utilization_percentage (null if monthly_capacity is unavailable),
+ *           contributed_percentage (billable_total / monthly_capacity * 100;
+ *           null if monthly_capacity is unavailable).
+ *           summary: totals across the FULL filtered dataset (every employee
+ *           matching the current filters, not just the current page) — also
+ *           carries its own aggregate contributed_percentage, computed from
+ *           the summed billable_total/monthly_capacity, never by averaging
+ *           each employee's own contributed_percentage.
  *       401:
  *         description: Unauthorized
  *       403:
@@ -1129,9 +1175,27 @@ router.get(
  *         name: entityId
  *         schema: { type: integer }
  *         description: >
- *           Optional. Narrows the caller's existing Business Unit scope
- *           (X-Company-Id header / role reach) to just the Companies under
- *           this Entity — intersected with, never replacing, that scope.
+ *           Optional, single-value (legacy). Narrows the caller's existing
+ *           Business Unit scope (X-Company-Id header / role reach) to just
+ *           the Companies under this Entity — intersected with, never
+ *           replacing, that scope. Superseded by entityIds below; entityIds
+ *           wins when both are given.
+ *       - in: query
+ *         name: entityIds
+ *         schema: { type: string }
+ *         description: >
+ *           Optional. Comma-separated Entity ids (e.g. "1,4"). Same
+ *           intersect-never-widen narrowing as entityId, for more than one
+ *           Entity at once.
+ *       - in: query
+ *         name: businessUnitIds
+ *         schema: { type: string }
+ *         description: >
+ *           Optional. Comma-separated Business Unit ids (e.g. "10,12,15").
+ *           Further narrows the caller's existing BU scope (after any
+ *           entityId/entityIds narrowing) — intersected with, never
+ *           replacing, that scope. An id outside the caller's reach is
+ *           silently dropped, never an error.
  *     responses:
  *       200:
  *         description: >
@@ -1139,7 +1203,8 @@ router.get(
  *           month, year, billableHours, nonBillableHours, totalHours,
  *           billableUtilizationPercentage, nonBillableUtilizationPercentage,
  *           overallUtilizationPercentage. summary carries the same fields
- *           aggregated across the full filtered result set.
+ *           aggregated across the full filtered result set (every employee
+ *           matching the current filters, not just the current page).
  *       401:
  *         description: Unauthorized
  *       403:

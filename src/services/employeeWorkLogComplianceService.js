@@ -8,6 +8,8 @@ const complianceRepository = require('../repositories/employeeWorkLogComplianceR
 const dateHelper = require('../helpers/dateHelper');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
 const emailLogService = require('./emailLogService');
+const { intersectCompanyIdsWithEntity, intersectIds } = require('./companyAccessControlService');
+const { parseIdList } = require('../utils/idListParser');
 const {
   buildWorkLogComplianceReminderSubject,
   buildWorkLogComplianceReminderHtml,
@@ -164,7 +166,20 @@ async function resolveAuthorizedEmployeeIds(authContext, companyIds) {
 async function getReport(query, authContext, companyIds) {
   const { startDate, endDate, threshold, periodMeta } = resolvePeriod(query);
 
-  let employeeIds = await resolveAuthorizedEmployeeIds(authContext, companyIds);
+  // BU narrowing — entityIds/businessUnitIds (comma-separated multi-select)
+  // compose with the legacy single-value company_id (both narrow the same
+  // companyIds reach; never widen it). company_id previously had no effect
+  // at all here despite being documented — this also fixes that.
+  let scopedCompanyIds = await intersectCompanyIdsWithEntity(companyIds, parseIdList(query.entityIds));
+  scopedCompanyIds = intersectIds(scopedCompanyIds, parseIdList(query.businessUnitIds));
+  if (query.company_id) {
+    if (!scopedCompanyIds.includes(query.company_id)) {
+      throw forbiddenError('Access denied: the selected Business Unit is not within your authorised scope.');
+    }
+    scopedCompanyIds = [query.company_id];
+  }
+
+  let employeeIds = await resolveAuthorizedEmployeeIds(authContext, scopedCompanyIds);
 
   // Optional single-employee filter (e.g. a manager drilling into one person)
   if (query.employeeId) {
@@ -351,13 +366,18 @@ async function sendBulkReminder(body, authContext, companyIds) {
   const { startDate, endDate, threshold, periodLabel } = resolvePeriod(body);
 
   // ── 1. Resolve the authorised employee set ─────────────────────────────────
-  // If the caller supplied company_id (BU filter), narrow companyIds to that
-  // single BU — but only after verifying it is within their authorised reach.
-  // This is identical to how the GET report handles company_id: the
-  // resolveReportCompanyScope middleware already validated the caller's full
-  // reach into companyIds; we just restrict to the requested subset here.
+  // If the caller supplied company_ids (multi-select BU filter, comma-
+  // separated) or the legacy single-value company_id, narrow companyIds to
+  // that subset — but only after verifying it is within their authorised
+  // reach. This is identical to how the GET report handles the same
+  // narrowing: the resolveReportCompanyScope middleware already validated
+  // the caller's full reach into companyIds; we just restrict to the
+  // requested subset here. company_ids (plural) wins when both are given.
   let effectiveCompanyIds = companyIds;
-  if (body.company_id) {
+  const requestedCompanyIds = parseIdList(body.company_ids);
+  if (requestedCompanyIds) {
+    effectiveCompanyIds = intersectIds(companyIds, requestedCompanyIds);
+  } else if (body.company_id) {
     if (!companyIds.includes(body.company_id)) {
       throw forbiddenError(
         'Access denied: the selected Business Unit is not within your authorised scope.'

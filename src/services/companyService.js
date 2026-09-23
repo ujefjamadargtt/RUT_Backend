@@ -4,6 +4,7 @@ const companyRepository = require('../repositories/companyRepository');
 const employeeBusinessUnitRepository = require('../repositories/employeeBusinessUnitRepository');
 const { createAuditLog } = require('../middlewares/auditLog');
 const { getPaginationMeta } = require('../utils/pagination');
+const { parseIdList } = require('../utils/idListParser');
 const logger = require('../utils/logger');
 
 /**
@@ -36,6 +37,12 @@ const getAll = async (query = {}, entityIds) => {
     search: query.search || null,
     status: query.status || 'active',
     entity_id: query.entity_id || null,
+    // Accepted in either casing — this endpoint's own established
+    // convention is snake_case (entity_id, sort_by, ...), but entityIds/
+    // businessUnitIds (camelCase) is the convention every Report endpoint
+    // uses; snake_case wins when both are somehow given.
+    entity_ids: parseIdList(query.entity_ids ?? query.entityIds) || null,
+    business_unit_ids: parseIdList(query.business_unit_ids ?? query.businessUnitIds) || null,
   };
 
   const sort = {
