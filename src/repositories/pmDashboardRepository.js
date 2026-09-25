@@ -2,6 +2,7 @@
 
 const { sequelize } = require('../models');
 const { QueryTypes } = require('sequelize');
+const { buLessServicePOInTenantSql } = require('../utils/servicePOTenantSql');
 
 /**
  * Project Manager Dashboard Repository
@@ -407,10 +408,10 @@ async function getPortfolioCounts({ companyIds }) {
        (SELECT COUNT(*) FROM projects p
           WHERE p.is_deleted = false AND p.status = 'active' AND (p.company_id IN (:companyIds) OR p.company_id IS NULL)) AS active_projects,
        (SELECT COUNT(*) FROM service_pos sp
-          WHERE sp.is_deleted = false AND (sp.company_id IN (:companyIds) OR sp.company_id IS NULL)) AS total_service_pos,
+          WHERE sp.is_deleted = false AND (sp.company_id IN (:companyIds) OR ${buLessServicePOInTenantSql('sp', 'companyIds')})) AS total_service_pos,
        (SELECT COUNT(*) FROM service_pos sp
           WHERE sp.is_deleted = false AND sp.status IN ('in-progress', 'pending')
-            AND (sp.company_id IN (:companyIds) OR sp.company_id IS NULL)) AS active_service_pos
+            AND (sp.company_id IN (:companyIds) OR ${buLessServicePOInTenantSql('sp', 'companyIds')})) AS active_service_pos
     `,
     { replacements, type: QueryTypes.SELECT }
   );
@@ -431,7 +432,7 @@ async function getLoggedHoursMTD({ companyIds, monthNum, yearNum }) {
     `SELECT COALESCE(SUM(${HOURS_COL}), 0) AS total_hours
      FROM timesheets t
      INNER JOIN service_pos sp ON sp.id = t.service_po_id
-     WHERE (sp.company_id IN (:companyIds) OR sp.company_id IS NULL)
+     WHERE (sp.company_id IN (:companyIds) OR ${buLessServicePOInTenantSql('sp', 'companyIds')})
        AND EXTRACT(MONTH FROM t.timesheet_date) = :monthNum AND EXTRACT(YEAR FROM t.timesheet_date) = :yearNum
     `,
     { replacements, type: QueryTypes.SELECT }
@@ -454,7 +455,7 @@ async function getBudgetVsBilled({ companyIds, monthNum, yearNum }) {
        COALESCE(SUM(spmb.billed_amount), 0) AS total_billed
      FROM service_po_monthly_budgets spmb
      INNER JOIN service_pos sp ON sp.id = spmb.service_po_id
-     WHERE (sp.company_id IN (:companyIds) OR sp.company_id IS NULL)
+     WHERE (sp.company_id IN (:companyIds) OR ${buLessServicePOInTenantSql('sp', 'companyIds')})
        AND spmb.month = :monthNum AND spmb.year = :yearNum
     `,
     { replacements, type: QueryTypes.SELECT }
@@ -481,7 +482,7 @@ async function getAtRiskProjectCount({ companyIds, monthNum, yearNum, asOfDate, 
     `WITH po_scope AS (
        SELECT sp.id, sp.project_id, sp.status, sp.end_date
        FROM service_pos sp
-       WHERE sp.is_deleted = false AND (sp.company_id IN (:companyIds) OR sp.company_id IS NULL)
+       WHERE sp.is_deleted = false AND (sp.company_id IN (:companyIds) OR ${buLessServicePOInTenantSql('sp', 'companyIds')})
          AND sp.project_id IS NOT NULL
      ),
      planned AS (

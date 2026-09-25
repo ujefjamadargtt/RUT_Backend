@@ -3,6 +3,7 @@
 const moment = require('moment-timezone');
 const { sequelize } = require('../models');
 const { QueryTypes } = require('sequelize');
+const { buLessServicePOInTenantSql } = require('../utils/servicePOTenantSql');
 
 /**
  * AI Insight Data Repository
@@ -140,7 +141,7 @@ async function getUnderstaffedActivePOs(limit = 10, companyId) {
      INNER JOIN clients c ON c.id = sp.client_id
      LEFT JOIN service_po_resources spr ON spr.service_po_id = sp.id
      WHERE sp.status = 'in-progress' AND sp.is_deleted = false
-       AND (sp.company_id = :companyId OR sp.company_id IS NULL)
+       AND (sp.company_id = :companyId OR ${buLessServicePOInTenantSql('sp', 'companyId')})
      GROUP BY sp.id, sp.service_po_name, c.client_name
      HAVING COUNT(spr.employee_id) < 3
      ORDER BY assigned_count ASC
@@ -233,7 +234,7 @@ async function getWeeklyResourceDigestData(companyId) {
     sequelize.query(
       `SELECT COUNT(*) AS count FROM service_pos
        WHERE status IN ('completed', 'closed') AND updated_at::date BETWEEN :startDate AND :endDate
-         AND (company_id = :companyId OR company_id IS NULL)`,
+         AND (company_id = :companyId OR ${buLessServicePOInTenantSql(null, 'companyId')})`,
       { replacements: { startDate, endDate, companyId }, type: QueryTypes.SELECT }
     ),
   ]);
@@ -271,7 +272,7 @@ async function getPoEndingAlertsData(companyId) {
      INNER JOIN clients c ON c.id = sp.client_id
      WHERE sp.status = 'in-progress' AND sp.is_deleted = false
        AND sp.end_date BETWEEN :today AND :in30
-       AND (sp.company_id = :companyId OR sp.company_id IS NULL)
+       AND (sp.company_id = :companyId OR ${buLessServicePOInTenantSql('sp', 'companyId')})
      ORDER BY sp.end_date`,
     { replacements: { today, in30, companyId }, type: QueryTypes.SELECT }
   );
@@ -604,7 +605,7 @@ async function getQuarterEndReviewData(companyId) {
     sequelize.query(
       `SELECT COUNT(*) AS count FROM service_pos
        WHERE status IN ('completed', 'closed') AND updated_at::date BETWEEN :start AND :end
-         AND (company_id = :companyId OR company_id IS NULL)`,
+         AND (company_id = :companyId OR ${buLessServicePOInTenantSql(null, 'companyId')})`,
       { replacements: { start, end, companyId }, type: QueryTypes.SELECT }
     ),
     sequelize.query(
@@ -652,7 +653,7 @@ async function getNewPoStaffingSuggestionData(servicePoId, companyId) {
      INNER JOIN clients c ON c.id = sp.client_id
      INNER JOIN service_types st ON st.id = sp.service_type_id
      LEFT JOIN service_categories sc ON sc.id = st.service_category_id
-     WHERE sp.id = :servicePoId AND (sp.company_id = :companyId OR sp.company_id IS NULL)`,
+     WHERE sp.id = :servicePoId AND (sp.company_id = :companyId OR ${buLessServicePOInTenantSql('sp', 'companyId')})`,
     { replacements: { servicePoId, companyId }, type: QueryTypes.SELECT }
   );
 

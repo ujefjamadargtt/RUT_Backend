@@ -9,6 +9,7 @@ const employeeServicePOMappingService = require('./employeeServicePOMappingServi
 const servicePORepository = require('../repositories/servicePORepository');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
 const employeeRepository = require('../repositories/employeeRepository');
+const { resolveCentralisedServicePOTenant } = require('./companyAccessControlService');
 const { createAuditLog } = require('../middlewares/auditLog');
 const logger = require('../utils/logger');
 
@@ -223,14 +224,16 @@ const getMyGrantedServicePOs = async (managerUserId, companyId, hierarchyRank = 
 
   if (hierarchyRank === BU_ADMIN_RANK) {
     const scopeIds = callerBuIds.length > 0 ? callerBuIds : [companyId].filter(Boolean);
-    // Centralised POs (Leave/Bench/Training/HR-Admin) are OR'd in
-    // unconditionally, same as everywhere else Service PO scope is
-    // resolved in this codebase (see servicePORepository.companyScope's
-    // doc comment) — they have no Business Unit of their own to match.
+    // Centralised POs (Leave/Bench/Training/HR-Admin) of this BU Admin's
+    // OWN Admin tenant are OR'd in — never another Admin's (see
+    // servicePORepository.centralisedTenantScope()'s doc comment).
+    const centralisedScope = servicePORepository.centralisedTenantScope(
+      await resolveCentralisedServicePOTenant(scopeIds, managerUserId)
+    );
     return ServicePO.findAll({
       where: {
         is_deleted: false,
-        [Op.or]: [{ company_id: { [Op.in]: scopeIds } }, { is_centralised: true }],
+        [Op.or]: [{ company_id: { [Op.in]: scopeIds } }, ...(centralisedScope ? [centralisedScope] : [])],
       },
       attributes: ['id', 'service_po_code', 'service_po_name', 'status'],
     });
@@ -395,7 +398,18 @@ async function assertOwnEmployeeForApproval(managerUserId, employeeId, companyId
 
     const hasWork = await employeeWorkLogRepository.existsForEmployeeAndServicePOIds(employeeId, poIds);
     if (!hasWork) {
-      throw forbiddenError('This Employee has not logged work against any Service PO you manage.');
+      // Same rule getMyEmployees() uses to LIST this Project Manager's
+      // Employees: an active employee_servicepo_mapping row on one of their
+      // Service POs. Such an Employee (mapped, but no work logged there yet)
+      // is shown in the PM's list, so opening them must not 403 — they get
+      // their (possibly empty) entries on MY Service POs only. The
+      // Centralised-PO widening below still requires real logged work.
+      const activeMappings = await employeeServicePOMappingRepository.findAllByEmployee(employeeId, 'active');
+      const isMappedToMyPO = activeMappings.some((mapping) => poIds.includes(mapping.service_po_id));
+      if (!isMappedToMyPO) {
+        throw forbiddenError('This Employee has not logged work against any Service PO you manage.');
+      }
+      return poIds;
     }
     // This Employee is confirmed to be genuinely mine (real project work
     // logged against one of my POs) — widen the scope to every Centralised
@@ -405,7 +419,11 @@ async function assertOwnEmployeeForApproval(managerUserId, employeeId, companyId
     // bulkApproveTimesheets) always further scopes by this SAME employeeId,
     // so this never leaks a different, unrelated employee's Centralised
     // entries.
-    const centralisedPOs = await servicePORepository.getActiveCentralisedPOIds();
+    // Only this Project Manager's OWN Admin tenant's Centralised POs.
+    const tenantSeedIds = callerBuIds.length > 0 ? callerBuIds : [companyId].filter(Boolean);
+    const centralisedPOs = await servicePORepository.getActiveCentralisedPOIds(
+      await resolveCentralisedServicePOTenant(tenantSeedIds, managerUserId)
+    );
     return [...poIds, ...centralisedPOs.map((po) => po.id)];
   }
 

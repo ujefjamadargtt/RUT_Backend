@@ -48,9 +48,12 @@ function stubEmployeeScope() {
 test('deactivateMapping(): a Centralised PO mapping (company_id NULL) is found and deactivated', async () => {
   let updated;
   employeeServicePOMappingRepository.findByIdUnscoped = async () => centralisedMapping((v) => { updated = v; });
-  servicePORepository.findById = async (poId, scope, createdBy, _c, _m, includeCentralised) => {
+  servicePORepository.findById = async (poId, scope, createdBy, _c, _m, centralisedTenant) => {
     assert.equal(poId, 52);
-    assert.equal(includeCentralised, true);
+    // Tenant-bounded Centralised widening (never a blanket `true`): the
+    // caller's own Admin tenant, incl. the caller as a BU-less owner.
+    assert.ok(centralisedTenant && Array.isArray(centralisedTenant.companyIds));
+    assert.ok(centralisedTenant.ownerIds.includes(9));
     return { id: 52, company_id: null, is_centralised: true };
   };
   stubEmployeeScope();

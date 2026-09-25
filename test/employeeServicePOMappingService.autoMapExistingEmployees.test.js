@@ -64,11 +64,23 @@ test('autoMapExistingEmployeesToCentralisedServicePO: per-company PO -> maps eve
   restore();
 });
 
-test('autoMapExistingEmployeesToCentralisedServicePO: BU-less PO -> maps EVERY active Employee platform-wide, regardless of creator (decided design)', async () => {
-  employeeRepository.findAllActiveIds = async () => [{ id: 201 }, { id: 202 }, { id: 500 }];
-  companyAccessControlService.resolveCompanyIdsOwnedByCreator = async () => {
-    throw new Error('must not be reached — a BU-less Centralised PO is no longer scoped to the creator\'s own ownership hierarchy');
+test('autoMapExistingEmployeesToCentralisedServicePO: BU-less PO -> maps ONLY the creating Admin\'s own tenant (their BUs\' Employees + their own unassigned Employees), never another Admin\'s', async () => {
+  employeeRepository.findAllActiveIds = async () => {
+    throw new Error('must not be reached — a BU-less Centralised PO is never mapped platform-wide');
   };
+  companyAccessControlService.resolveCompanyIdsOwnedByCreator = async (creatorId) => {
+    assert.equal(creatorId, 1);
+    return [10, 11]; // Admin 1's own Business Units
+  };
+  employeeBusinessUnitRepository.findActiveEmployeeIdsByBusinessUnitIds = async (businessUnitIds) => {
+    assert.deepEqual(businessUnitIds, [10, 11]);
+    return [201, 202]; // another Admin's Employee (e.g. 500) is never returned for these BUs
+  };
+  employeeRepository.findActiveUnassignedByCreator = async (creatorId) => {
+    assert.equal(creatorId, 1);
+    return [{ id: 301 }, { id: 302 }];
+  };
+  employeeBusinessUnitRepository.findBusinessUnitsByEmployeeIds = async () => [{ employee_id: 302, id: 10 }];
 
   let capturedRecords;
   employeeServicePOMappingRepository.bulkCreate = async (records) => {
@@ -78,7 +90,7 @@ test('autoMapExistingEmployeesToCentralisedServicePO: BU-less PO -> maps EVERY a
 
   await employeeServicePOMappingService.autoMapExistingEmployeesToCentralisedServicePO(401, null, 1, FAKE_TRANSACTION);
 
-  assert.deepEqual(capturedRecords.map((r) => r.employee_id).sort(), [201, 202, 500]);
+  assert.deepEqual(capturedRecords.map((r) => r.employee_id).sort(), [201, 202, 301]);
   assert.ok(capturedRecords.every((r) => r.company_id === null && r.service_po_id === 401));
 
   restore();

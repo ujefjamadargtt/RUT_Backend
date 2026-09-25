@@ -35,7 +35,34 @@ function restoreModel() {
   ServicePO.findOne = ORIGINAL_MODEL.findOne;
 }
 
-test('findAll(): mappedServicePOIds omitted (null) -> normal BU-based company_id scope, plus Centralised POs unconditionally', async () => {
+// A Centralised PO is visible only within the caller's OWN Admin tenant
+// (centralisedTenant — companyAccessControlService.
+// resolveCentralisedServicePOTenant()), never platform-wide.
+const TENANT = { companyIds: [10, 11], ownerIds: [5] };
+const TENANT_CENTRALISED = {
+  is_centralised: true,
+  [Op.or]: [
+    { company_id: { [Op.in]: [10, 11] } },
+    { company_id: null, created_by: { [Op.in]: [5] } },
+  ],
+};
+
+test("findAll(): mappedServicePOIds omitted (null) -> normal BU-based company_id scope, plus ONLY this tenant's Centralised POs", async () => {
+  let capturedWhere;
+  ServicePO.findAndCountAll = async ({ where }) => {
+    capturedWhere = where;
+    return { rows: [], count: 0 };
+  };
+
+  await servicePORepository.findAll({ companyId: 10, centralisedTenant: TENANT }, {}, {});
+
+  assert.deepEqual(capturedWhere[Op.and][0], {
+    [Op.or]: [{ company_id: 10 }, TENANT_CENTRALISED],
+  });
+  restoreModel();
+});
+
+test('findAll(): no centralisedTenant resolved -> NO Centralised widening at all (fails closed, never an unconditional is_centralised match)', async () => {
   let capturedWhere;
   ServicePO.findAndCountAll = async ({ where }) => {
     capturedWhere = where;
@@ -44,13 +71,12 @@ test('findAll(): mappedServicePOIds omitted (null) -> normal BU-based company_id
 
   await servicePORepository.findAll({ companyId: 10 }, {}, {});
 
-  assert.deepEqual(capturedWhere[Op.and][0], {
-    [Op.or]: [{ company_id: 10 }, { is_centralised: true }],
-  });
+  assert.deepEqual(capturedWhere[Op.and][0], { company_id: 10 });
+  assert.ok(!JSON.stringify(capturedWhere[Op.and]).includes('"is_centralised":true}'));
   restoreModel();
 });
 
-test('findAll(): mappedServicePOIds given (non-null) OVERRIDES companyId/centralisedOwnerIds entirely (never unions with the normal BU scope), but a Centralised PO still shows regardless (decided design)', async () => {
+test("findAll(): mappedServicePOIds given (non-null) OVERRIDES companyId/centralisedOwnerIds entirely (never unions with the normal BU scope), but this tenant's Centralised POs still show", async () => {
   let capturedWhere;
   ServicePO.findAndCountAll = async ({ where }) => {
     capturedWhere = where;
@@ -58,26 +84,26 @@ test('findAll(): mappedServicePOIds given (non-null) OVERRIDES companyId/central
   };
 
   await servicePORepository.findAll(
-    { companyId: 10, createdBy: 900, centralisedOwnerIds: [5, 6], mappedServicePOIds: [1, 2, 3] }, {}, {}
+    { companyId: 10, createdBy: 900, centralisedOwnerIds: [5, 6], mappedServicePOIds: [1, 2, 3], centralisedTenant: TENANT }, {}, {}
   );
 
   assert.deepEqual(capturedWhere[Op.and][0], {
-    [Op.or]: [{ id: { [Op.in]: [1, 2, 3] } }, { is_centralised: true }],
+    [Op.or]: [{ id: { [Op.in]: [1, 2, 3] } }, TENANT_CENTRALISED],
   });
   restoreModel();
 });
 
-test('findAll(): mappedServicePOIds given as an EMPTY array (qualifying role, zero active mappings) -> matches no normal PO, but Centralised POs still show', async () => {
+test("findAll(): mappedServicePOIds given as an EMPTY array (qualifying role, zero active mappings) -> matches no normal PO, but this tenant's Centralised POs still show", async () => {
   let capturedWhere;
   ServicePO.findAndCountAll = async ({ where }) => {
     capturedWhere = where;
     return { rows: [], count: 0 };
   };
 
-  await servicePORepository.findAll({ companyId: 10, mappedServicePOIds: [] }, {}, {});
+  await servicePORepository.findAll({ companyId: 10, mappedServicePOIds: [], centralisedTenant: TENANT }, {}, {});
 
   assert.deepEqual(capturedWhere[Op.and][0], {
-    [Op.or]: [{ id: { [Op.in]: [] } }, { is_centralised: true }],
+    [Op.or]: [{ id: { [Op.in]: [] } }, TENANT_CENTRALISED],
   });
   restoreModel();
 });

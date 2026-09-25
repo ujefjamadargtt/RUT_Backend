@@ -141,6 +141,60 @@ async function resolveCentralisedOwnerCreatorIds(companyIds) {
 }
 
 /**
+ * Resolve the ADMIN TENANT a viewer's Centralised Service PO visibility is
+ * bounded by — `{ companyIds, ownerIds }`, fed straight into
+ * servicePORepository's `centralisedTenant` param (and its
+ * getActiveCentralisedPOIds() auto-map lookup).
+ *
+ * Business rule: a Centralised Service PO is NOT globally visible. It
+ * belongs to the Admin tenant it was created in, and is visible across
+ * every Business Unit of THAT tenant only — never to an unrelated Admin
+ * (the leak this exists to close: one Admin's Leaves/On Bench/... POs
+ * showing up in a second Admin's PO Master, dropdowns and mapping screens).
+ *
+ * Tenant = the viewer's own Business Units (`companyIds`), expanded to every
+ * Company owned by the Admin(s) who own those BUs (entities.created_by ->
+ * resolveOwnedCompanyIds(2, ...)), so a Centralised PO stamped with one BU
+ * stays visible to its sibling BUs under the SAME Admin. `ownerIds` are the
+ * tenant's Admin/Entity Admin employeeIds (resolveCentralisedOwnerCreatorIds)
+ * — the `created_by` anchor for a BU-less (company_id NULL) Centralised PO —
+ * plus `actorEmployeeId` itself, so a company-less Admin still sees a BU-less
+ * PO they created before owning any Entity.
+ *
+ * Platform Admin needs no special case: their resolved reach is every
+ * Company (resolveReportCompanyScope), so their tenant is every Admin's.
+ *
+ * @param {number|number[]|null} companyIds - the viewer's resolved Company scope
+ * @param {number|null} [actorEmployeeId]
+ * @returns {Promise<{ companyIds: number[], ownerIds: number[] }>}
+ */
+async function resolveCentralisedServicePOTenant(companyIds, actorEmployeeId = null) {
+  const ownIds = Array.isArray(companyIds) ? companyIds : (companyIds != null ? [companyIds] : []);
+  let tenantCompanyIds = [...new Set(ownIds)];
+
+  if (tenantCompanyIds.length > 0) {
+    const companies = await Company.findAll({
+      where: { id: { [Op.in]: tenantCompanyIds }, is_deleted: false },
+      attributes: ['entity_id'],
+    });
+    const entityIds = [...new Set(companies.map((c) => c.entity_id).filter((id) => id != null))];
+    if (entityIds.length > 0) {
+      const entities = await Entity.findAll({
+        where: { id: { [Op.in]: entityIds }, is_deleted: false },
+        attributes: ['created_by'],
+      });
+      const adminIds = [...new Set(entities.map((e) => e.created_by).filter((id) => id != null))];
+      const ownedSets = await Promise.all(adminIds.map((adminId) => resolveOwnedCompanyIds(2, adminId)));
+      tenantCompanyIds = [...new Set([...tenantCompanyIds, ...ownedSets.flat().filter((id) => id != null)])];
+    }
+  }
+
+  const ownerIds = new Set(await resolveCentralisedOwnerCreatorIds(tenantCompanyIds));
+  if (actorEmployeeId != null) ownerIds.add(actorEmployeeId);
+  return { companyIds: tenantCompanyIds, ownerIds: [...ownerIds] };
+}
+
+/**
  * Resolve the effective Company scope for any company-scoped resource
  * (Client, ServiceType, ServiceCategory, ServicePO, ...): the actor's own
  * `req.companyId` if they have one, otherwise their RESOLVED list of owned
@@ -931,6 +985,7 @@ module.exports = {
   resolveOwnedCompanyIds,
   resolveCompanyIdsOwnedByCreator,
   resolveCentralisedOwnerCreatorIds,
+  resolveCentralisedServicePOTenant,
   resolveActorCompanyScope,
   resolveActorRecordAccessScope,
   resolveCreateCompanyId,

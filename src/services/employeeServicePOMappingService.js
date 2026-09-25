@@ -96,9 +96,10 @@ const assign = async (employeeId, servicePOId, userId, companyId, isProjectManag
     throw notFoundError(`Employee #${employeeId} was not found in this company.`);
   }
 
-  // includeCentralised: true — a Centralised Service PO must be assignable
-  // regardless of company scope or who created it (decided design).
-  const servicePO = await servicePORepository.findById(servicePOId, companyId, userId, null, null, true);
+  // A Centralised Service PO of the caller's OWN Admin tenant is assignable
+  // regardless of its Business Unit — never another Admin's.
+  const centralisedTenant = await companyAccessControlService.resolveCentralisedServicePOTenant(companyId, userId);
+  const servicePO = await servicePORepository.findById(servicePOId, companyId, userId, null, null, centralisedTenant);
   if (!servicePO) {
     throw notFoundError(`Service PO #${servicePOId} was not found in this company.`);
   }
@@ -150,11 +151,13 @@ const assign = async (employeeId, servicePOId, userId, companyId, isProjectManag
  * transaction as the Employee insert, so a mapping failure rolls back the
  * whole employee creation rather than leaving a partial record.
  *
- * By decided design, a Centralised Service PO is BU-less and is for every
- * Employee — regardless of the new Employee's own Business Unit, and
- * regardless of which Admin created the PO. servicePORepository.
- * getActiveCentralisedPOIds() already returns every is_centralised
- * candidate; every one of them is applicable here unconditionally.
+ * A Centralised Service PO is for every Employee of its OWN Admin tenant —
+ * regardless of which of that tenant's Business Units the new Employee is
+ * in — but never for another Admin's Employees. The tenant is resolved from
+ * the new Employee's Business Unit (`companyId`) or, for an Employee with no
+ * Business Unit yet, from the creating actor's own Entity/Company hierarchy
+ * (companyAccessControlService.resolveCompanyIdsOwnedByCreator(userId)).
+ * See companyAccessControlService.resolveCentralisedServicePOTenant().
  *
  * Each mapping row's own company_id is set to that PO's own company_id
  * (null for a BU-less PO), not the employee's — same "the Service PO owns
@@ -175,7 +178,11 @@ const assign = async (employeeId, servicePOId, userId, companyId, isProjectManag
  * @returns {Promise<void>}
  */
 const autoMapCentralisedServicePOs = async (employeeId, companyId, userId, transaction) => {
-  const candidates = await servicePORepository.getActiveCentralisedPOIds();
+  const tenantSeedCompanyIds = companyId != null
+    ? [companyId]
+    : await companyAccessControlService.resolveCompanyIdsOwnedByCreator(userId);
+  const centralisedTenant = await companyAccessControlService.resolveCentralisedServicePOTenant(tenantSeedCompanyIds, userId);
+  const candidates = await servicePORepository.getActiveCentralisedPOIds(centralisedTenant);
   if (!candidates.length) return;
 
   const records = candidates.map(({ id: service_po_id, company_id }) => ({
@@ -203,12 +210,15 @@ const autoMapCentralisedServicePOs = async (employeeId, companyId, userId, trans
  * reaches existing Centralised POs; this one runs at Service-PO-creation
  * time and reaches existing Employees.
  *
- * By decided design, a Centralised Service PO is BU-less and is for every
- * Employee:
- * - BU-less (companyId == null, the normal case for a Centralised PO): every
- *   active, non-deleted Employee platform-wide (employeeRepository.
- *   findAllActiveIds()) — not scoped to the creating actor's own ownership
- *   hierarchy.
+ * A Centralised Service PO is for every Employee of its OWN Admin tenant,
+ * never another Admin's:
+ * - BU-less (companyId == null, the normal case for a Centralised PO): owned
+ *   by the CREATING actor's (userId's) own Admin/Entity Admin hierarchy —
+ *   (a) every active Employee assigned to ANY Business Unit within it
+ *   (companyAccessControlService.resolveCompanyIdsOwnedByCreator(userId)),
+ *   plus (b) every active, genuinely unassigned Employee (no
+ *   employee_business_units row, no legacy company_id) whose own
+ *   `created_by` is this SAME creating actor.
  * - Scoped to one company (companyId != null — a legacy/edge case): every
  *   ACTIVE Employee actually assigned (employee_business_units, status
  *   'active') to that SAME Business Unit, unchanged from before.
@@ -240,8 +250,22 @@ const autoMapExistingEmployeesToCentralisedServicePO = async (servicePOId, compa
   if (companyId != null) {
     employeeIds = await employeeBusinessUnitRepository.findActiveEmployeeIdsByBusinessUnitIds([companyId]);
   } else {
-    const allActive = await employeeRepository.findAllActiveIds();
-    employeeIds = allActive.map((e) => e.id);
+    const ownedCompanyIds = await companyAccessControlService.resolveCompanyIdsOwnedByCreator(userId);
+    const withinHierarchy = ownedCompanyIds.length > 0
+      ? await employeeBusinessUnitRepository.findActiveEmployeeIdsByBusinessUnitIds(ownedCompanyIds)
+      : [];
+
+    const unassignedCandidates = await employeeRepository.findActiveUnassignedByCreator(userId);
+    let unassignedIds = [];
+    if (unassignedCandidates.length > 0) {
+      const buRows = await employeeBusinessUnitRepository.findBusinessUnitsByEmployeeIds(
+        unassignedCandidates.map((e) => e.id)
+      );
+      const withBU = new Set(buRows.map((row) => row.employee_id));
+      unassignedIds = unassignedCandidates.map((e) => e.id).filter((id) => !withBU.has(id));
+    }
+
+    employeeIds = [...new Set([...withinHierarchy, ...unassignedIds])];
   }
 
   if (!employeeIds.length) return;
@@ -276,8 +300,9 @@ const autoMapExistingEmployeesToCentralisedServicePO = async (servicePOId, compa
  * Employee from "On Bench" always 404'd "Mapping not found." even though the
  * same row showed up in that PO's employee list.
  *
- * A Centralised PO is visible to everyone (includeCentralised), so for one
- * the mapped Employee must ALSO be within the caller's own Employee scope —
+ * A Centralised PO is visible across the caller's whole Admin tenant
+ * (centralisedTenant), so for one the mapped Employee must ALSO be within
+ * the caller's own Employee scope —
  * otherwise any caller could unmap any tenant's Employees from it. That uses
  * resolveEmployeeMappingAccessScope(), so an Admin still reaches a BU-less
  * Employee they created (company_id NULL, no BU grant yet). Callers that have
@@ -297,7 +322,8 @@ async function loadAuthorizedMapping(id, companyId, authContext = null) {
   }
 
   const actorEmployeeId = authContext ? authContext.employeeId : null;
-  const po = await servicePORepository.findById(mapping.service_po_id, companyId, actorEmployeeId, null, null, true);
+  const centralisedTenant = await companyAccessControlService.resolveCentralisedServicePOTenant(companyId, actorEmployeeId);
+  const po = await servicePORepository.findById(mapping.service_po_id, companyId, actorEmployeeId, null, null, centralisedTenant);
   if (!po) {
     throw notFoundError(`Mapping #${id} was not found.`);
   }
@@ -403,9 +429,10 @@ const getEmployeeMappings = async (employeeId, companyId, status) => {
  */
 const getServicePOEmployees = async (servicePOId, authContext, status) => {
   const companyId = await resolveEmployeeMappingScope(authContext);
-  // includeCentralised: true — a Centralised Service PO must be viewable
-  // regardless of company scope or who created it (decided design).
-  const po = await servicePORepository.findById(servicePOId, companyId, authContext.employeeId, null, null, true);
+  // A Centralised Service PO of the caller's OWN Admin tenant is viewable
+  // regardless of its Business Unit — never another Admin's.
+  const centralisedTenant = await companyAccessControlService.resolveCentralisedServicePOTenant(companyId, authContext.employeeId);
+  const po = await servicePORepository.findById(servicePOId, companyId, authContext.employeeId, null, null, centralisedTenant);
   if (!po) {
     throw notFoundError(`Service PO #${servicePOId} was not found.`);
   }
@@ -704,6 +731,7 @@ const getServicePOOptionsForEmployee = async (employeeId, authContext) => {
     createdBy: authContext.employeeId,
     unrestricted,
     businessUnitIds,
+    centralisedTenant: await companyAccessControlService.resolveCentralisedServicePOTenant(companyId, authContext.employeeId),
   });
 
   return {
@@ -794,6 +822,7 @@ const saveEmployeeServicePOMappings = async (employeeId, servicePOEntries, userI
     createdBy: authContext.employeeId,
     unrestricted,
     businessUnitIds,
+    centralisedTenant: await companyAccessControlService.resolveCentralisedServicePOTenant(companyId, authContext.employeeId),
   });
   const eligibleById = new Map(eligiblePOs.map((po) => [po.id, po]));
 
@@ -1085,9 +1114,10 @@ const getEmployeeOptionsForServicePO = async (servicePOId, authContext, options 
   // within their own managed set without X-Company-Id having been set to
   // that exact BU first.
   const tenantScope = await resolveEmployeeMappingScope(authContext);
-  // includeCentralised: true — a Centralised Service PO must be viewable
-  // regardless of company scope or who created it (decided design).
-  const po = await servicePORepository.findById(servicePOId, tenantScope, authContext.employeeId, null, null, true);
+  // A Centralised Service PO of the caller's OWN Admin tenant is viewable
+  // regardless of its Business Unit — never another Admin's.
+  const centralisedTenant = await companyAccessControlService.resolveCentralisedServicePOTenant(tenantScope, authContext.employeeId);
+  const po = await servicePORepository.findById(servicePOId, tenantScope, authContext.employeeId, null, null, centralisedTenant);
   if (!po) {
     throw notFoundError(`Service PO #${servicePOId} was not found.`);
   }

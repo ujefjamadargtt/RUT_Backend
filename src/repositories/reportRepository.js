@@ -2,6 +2,7 @@
 
 const { sequelize } = require('../models');
 const { QueryTypes } = require('sequelize');
+const { buLessServicePOInTenantSql } = require('../utils/servicePOTenantSql');
 
 /**
  * Report Repository
@@ -471,7 +472,7 @@ async function getServicePOUtilisation(filters) {
   const safeOrder = sortOrder.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
 
   const replacements = { limit, offset, companyIds: filters.companyIds };
-  const conditions = ['(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)'];
+  const conditions = ['(sp.company_id IN (:companyIds) OR ' + buLessServicePOInTenantSql('sp', 'companyIds') + ')'];
 
   if (poId) {
     conditions.push('sp.id = :poId');
@@ -2663,7 +2664,7 @@ async function getClientCostAnalyticsCost(filters) {
      FROM service_po_monthly_budgets spmb
      INNER JOIN service_pos sp ON sp.id = spmb.service_po_id
      INNER JOIN clients c      ON c.id  = sp.client_id
-     WHERE (sp.company_id IN (:companyIds) OR sp.company_id IS NULL)
+     WHERE (sp.company_id IN (:companyIds) OR ${buLessServicePOInTenantSql('sp', 'companyIds')})
      GROUP BY c.id, c.client_name`,
     { replacements: { companyIds }, type: QueryTypes.SELECT }
   );
@@ -2692,7 +2693,7 @@ async function getClientCategoryCostMatrixReport(filters) {
      INNER JOIN clients c             ON c.id  = sp.client_id
      INNER JOIN service_types st      ON st.id = sp.service_type_id
      LEFT  JOIN service_categories sc ON sc.id = st.service_category_id
-     WHERE (sp.company_id IN (:companyIds) OR sp.company_id IS NULL)
+     WHERE (sp.company_id IN (:companyIds) OR ${buLessServicePOInTenantSql('sp', 'companyIds')})
      GROUP BY c.id, c.client_name, category_name
      ORDER BY c.client_name, category_name`,
     { replacements: { companyIds }, type: QueryTypes.SELECT }
@@ -2744,7 +2745,7 @@ async function getClientWiseAnalyticsCost(filters) {
   const { companyIds, startDate, endDate, employeeId, clientId, poId, serviceTypeId } = filters;
   const replacements = { companyIds, startPeriodKey: periodKey(startDate), endPeriodKey: periodKey(endDate) };
   const conditions = [
-    '(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)',
+    '(sp.company_id IN (:companyIds) OR ' + buLessServicePOInTenantSql('sp', 'companyIds') + ')',
     '(spmb.year * 12 + spmb.month) BETWEEN :startPeriodKey AND :endPeriodKey',
   ];
 
@@ -2800,7 +2801,7 @@ async function getMonthlyCostByCategory(filters) {
   const { companyIds, startDate, endDate, clientId, poId, serviceTypeId } = filters;
   const replacements = { companyIds, startPeriodKey: periodKey(startDate), endPeriodKey: periodKey(endDate) };
   const conditions = [
-    '(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)',
+    '(sp.company_id IN (:companyIds) OR ' + buLessServicePOInTenantSql('sp', 'companyIds') + ')',
     '(spmb.year * 12 + spmb.month) BETWEEN :startPeriodKey AND :endPeriodKey',
   ];
 
@@ -3046,7 +3047,7 @@ async function getServicePOCostBudgetByMonth(filters) {
   const { companyIds, startDate, endDate, clientId, poId, serviceTypeId } = filters;
   const replacements = { companyIds, startPeriodKey: periodKey(startDate), endPeriodKey: periodKey(endDate) };
   const conditions = [
-    '(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)',
+    '(sp.company_id IN (:companyIds) OR ' + buLessServicePOInTenantSql('sp', 'companyIds') + ')',
     "cbm.status = 'active'",
     '(cbm.year * 12 + cbm.month) BETWEEN :startPeriodKey AND :endPeriodKey',
   ];
@@ -3134,7 +3135,7 @@ async function getBudgetVsBilled(filters) {
   const { companyIds, startDate, endDate, clientId, poId, serviceTypeId } = filters;
   const replacements = { companyIds, startPeriodKey: periodKey(startDate), endPeriodKey: periodKey(endDate) };
   const conditions = [
-    '(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)',
+    '(sp.company_id IN (:companyIds) OR ' + buLessServicePOInTenantSql('sp', 'companyIds') + ')',
     "(cbm.id IS NULL OR cbm.status = 'active')",
     '(COALESCE(cbm.year, spmb.year) * 12 + COALESCE(cbm.month, spmb.month)) BETWEEN :startPeriodKey AND :endPeriodKey',
   ];

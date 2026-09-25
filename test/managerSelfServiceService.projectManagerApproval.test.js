@@ -396,6 +396,63 @@ test('bulkApproveTimesheets (Project Manager): rejected up front when the employ
   }
 });
 
+// Real bug report: a Project Manager's "My Employees" list includes an
+// Employee actively MAPPED to one of their Service POs who has not logged
+// work there yet (getMyEmployees() is mapping-based). Opening that Employee
+// on Timesheet Approval (GET /my-team/timesheets/approval-summary?employee_id=)
+// 403'd "This Employee has not logged work against any Service PO you
+// manage." — the list and the check disagreed, and the approval screen broke.
+test('Project Manager: an Employee MAPPED to my Service PO but with no work logged there yet is allowed, scoped to MY Service POs only (no Centralised widening)', async () => {
+  try {
+    stubPMMapping(501, [201]);
+    stubWorkLogQueries();
+    // Employee 104: actively mapped to PO 201, zero work logs under it.
+    employeeServicePOMappingRepository.findAllByEmployee = async (employeeId, status) => {
+      assert.equal(status, 'active');
+      if (employeeId === 501) return [{ service_po_id: 201 }];
+      if (employeeId === 104) return [{ service_po_id: 201 }, { service_po_id: 56 }];
+      return [];
+    };
+    servicePORepository.getActiveCentralisedPOIds = async () => { throw new Error('Centralised widening requires real logged work'); };
+    sequelize.transaction = async (fn) => fn({ __fakeTransaction: true });
+
+    let capturedPoIds;
+    employeeWorkLogRepository.approveByEmployeeAndDates = async (employeeId, dates, transaction, servicePoIds) => {
+      capturedPoIds = servicePoIds;
+      return { total_rows_approved: 0, buckets: [] };
+    };
+
+    await managerSelfServiceService.bulkApproveTimesheets(
+      501, { employee_id: 104, dates: ['2026-08-01'] }, 10, 501, '127.0.0.1', PROJECT_MANAGER_RANK, []
+    );
+
+    assert.deepEqual(capturedPoIds, [201]);
+  } finally {
+    restore();
+  }
+});
+
+test('Project Manager: an Employee neither mapped to nor working on my Service POs is still rejected with 403', async () => {
+  try {
+    stubPMMapping(501, [201]);
+    stubWorkLogQueries();
+    employeeServicePOMappingRepository.findAllByEmployee = async (employeeId) => {
+      if (employeeId === 501) return [{ service_po_id: 201 }];
+      if (employeeId === 105) return [{ service_po_id: 777 }]; // someone else's PO
+      return [];
+    };
+    sequelize.transaction = async (fn) => fn({ __fakeTransaction: true });
+    employeeWorkLogRepository.approveByEmployeeAndDates = async () => assert.fail('must not run');
+
+    await assert.rejects(
+      () => managerSelfServiceService.bulkApproveTimesheets(501, { employee_id: 105, dates: ['2026-08-01'] }, 10, 501, '127.0.0.1', PROJECT_MANAGER_RANK, []),
+      (err) => err.statusCode === 403
+    );
+  } finally {
+    restore();
+  }
+});
+
 test('Team Lead (rank 7) approval is completely unaffected by the Project Manager redesign — still manager_employee_mappings-based', async () => {
   try {
     let mappingLookupArgs = null;

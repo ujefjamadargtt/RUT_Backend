@@ -2,6 +2,7 @@
 
 const { sequelize } = require('../models');
 const { QueryTypes } = require('sequelize');
+const { buLessServicePOInTenantSql } = require('../utils/servicePOTenantSql');
 
 /**
  * Whether a `companyIds` scope array resolves to "nothing this caller may
@@ -108,7 +109,7 @@ async function getServicePOProfitability(filters) {
   const yearNum = parseInt(year, 10);
 
   const replacements = { monthNum, yearNum, limit, offset, companyIds };
-  const conditions = ['(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)', 'sp.is_billable = true'];
+  const conditions = ['(sp.company_id IN (:companyIds) OR ' + buLessServicePOInTenantSql('sp', 'companyIds') + ')', 'sp.is_billable = true'];
 
   if (clientId) { conditions.push('sp.client_id = :clientId'); replacements.clientId = clientId; }
   if (poId) { conditions.push('sp.id = :poId'); replacements.poId = poId; }
@@ -340,7 +341,7 @@ async function getResourceStaffingPlanAccuracy(filters) {
   // vs actual are compared for the SAME set of POs.
   const cteBlock = `
     WITH in_scope_pos AS (
-      SELECT id FROM service_pos WHERE (company_id IN (:companyIds) OR company_id IS NULL)
+      SELECT id FROM service_pos WHERE (company_id IN (:companyIds) OR ${buLessServicePOInTenantSql(null, 'companyIds')})
     ),
     planned AS (
       SELECT emp_id, service_po_id AS po_id, SUM(hours) AS planned_hours
@@ -776,7 +777,7 @@ async function getServicePOTimelineRiskRaw(filters) {
 
   const replacements = { limit, offset, companyIds };
   const conditions = [
-    '(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)',
+    '(sp.company_id IN (:companyIds) OR ' + buLessServicePOInTenantSql('sp', 'companyIds') + ')',
     'sp.start_date IS NOT NULL',
     'sp.end_date IS NOT NULL',
   ];
@@ -865,7 +866,7 @@ async function getDeliveryHeadPerformance(filters) {
     ? `AND EXISTS (SELECT 1 FROM timesheet_import_history h WHERE h.id = t.timesheet_import_id AND h.is_publish = true)`
     : '';
 
-  const conditions = ['(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)', 'sp.delivery_head_employee_id IS NOT NULL'];
+  const conditions = ['(sp.company_id IN (:companyIds) OR ' + buLessServicePOInTenantSql('sp', 'companyIds') + ')', 'sp.delivery_head_employee_id IS NOT NULL'];
   if (deliveryHeadEmployeeId) {
     conditions.push('sp.delivery_head_employee_id = :deliveryHeadEmployeeId');
     replacements.deliveryHeadEmployeeId = deliveryHeadEmployeeId;
@@ -905,7 +906,7 @@ async function getDeliveryHeadPerformance(filters) {
           ${publishGuard}
         GROUP BY service_po_id
       ) prev ON prev.service_po_id = sp.id
-      WHERE (sp.company_id IN (:companyIds) OR sp.company_id IS NULL) AND sp.delivery_head_employee_id IS NOT NULL
+      WHERE (sp.company_id IN (:companyIds) OR ${buLessServicePOInTenantSql('sp', 'companyIds')}) AND sp.delivery_head_employee_id IS NOT NULL
     )
   `;
 
@@ -975,7 +976,7 @@ async function getInvoiceRealizationTrend(filters) {
     limit, offset, companyIds,
   };
 
-  const conditions = ['(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)', '(spmb.year * 100 + spmb.month) BETWEEN :startPeriod AND :endPeriod'];
+  const conditions = ['(sp.company_id IN (:companyIds) OR ' + buLessServicePOInTenantSql('sp', 'companyIds') + ')', '(spmb.year * 100 + spmb.month) BETWEEN :startPeriod AND :endPeriod'];
   if (clientId) { conditions.push('sp.client_id = :clientId'); replacements.clientId = clientId; }
   if (poId) { conditions.push('sp.id = :poId'); replacements.poId = poId; }
   if (search) {
@@ -1061,7 +1062,7 @@ async function getServiceLineBusinessMix(filters) {
   // employee's hours/cost land under one BU's row while the matching PO's
   // invoice landed under a different BU's row for the same service type,
   // producing a numerically wrong (not just missing) margin.
-  const conditions = ['(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)', 'EXTRACT(MONTH FROM t.timesheet_date) = :monthNum', 'EXTRACT(YEAR FROM t.timesheet_date) = :yearNum'];
+  const conditions = ['(sp.company_id IN (:companyIds) OR ' + buLessServicePOInTenantSql('sp', 'companyIds') + ')', 'EXTRACT(MONTH FROM t.timesheet_date) = :monthNum', 'EXTRACT(YEAR FROM t.timesheet_date) = :yearNum'];
 
   if (serviceCategoryId) { conditions.push('sc.id = :serviceCategoryId'); replacements.serviceCategoryId = serviceCategoryId; }
   if (serviceTypeId) { conditions.push('st.id = :serviceTypeId'); replacements.serviceTypeId = serviceTypeId; }
@@ -1104,7 +1105,7 @@ async function getServiceLineBusinessMix(filters) {
     INNER JOIN service_categories sc ON sc.id = st.service_category_id
     LEFT JOIN service_po_monthly_budgets spmb
            ON spmb.service_po_id = sp.id AND spmb.month = :monthNum AND spmb.year = :yearNum
-    WHERE (sp.company_id IN (:companyIds) OR sp.company_id IS NULL)
+    WHERE (sp.company_id IN (:companyIds) OR ${buLessServicePOInTenantSql('sp', 'companyIds')})
       ${serviceCategoryId ? 'AND sc.id = :serviceCategoryId' : ''}
       ${serviceTypeId ? 'AND st.id = :serviceTypeId' : ''}
     GROUP BY sc.id, st.id
@@ -1458,7 +1459,7 @@ async function getProjectWiseUtilization(filters) {
 
   const conditions = [
     'sp.is_deleted = false',
-    '(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)',
+    '(sp.company_id IN (:companyIds) OR ' + buLessServicePOInTenantSql('sp', 'companyIds') + ')',
     BILLABLE_ENTRY_FILTER_SQL,
   ];
   if (search) {

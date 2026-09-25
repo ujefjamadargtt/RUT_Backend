@@ -116,6 +116,42 @@ function companyScope(companyId, createdBy = null, centralisedOwnerIds = null, m
 }
 
 /**
+ * The Centralised Service POs belonging to one Admin tenant —
+ * `centralisedTenant` is companyAccessControlService.
+ * resolveCentralisedServicePOTenant()'s `{ companyIds, ownerIds }`: a
+ * Centralised PO stamped with one of the tenant's Business Units, or a
+ * BU-less one created by one of the tenant's Admin/Entity Admins.
+ *
+ * A Centralised PO is NOT globally visible — this replaces the former
+ * unconditional `{ is_centralised: true }` OR, which let every Admin see
+ * every other Admin's Centralised POs. `null`/empty (omitted) matches
+ * nothing, so a caller that forgets to resolve a tenant fails closed.
+ *
+ * @param {{ companyIds?: number[], ownerIds?: number[] }|null} centralisedTenant
+ * @returns {object|null} a WHERE fragment, or null when nothing can match
+ */
+function centralisedTenantScope(centralisedTenant) {
+  if (!centralisedTenant || typeof centralisedTenant !== 'object') return null;
+  const { companyIds = [], ownerIds = [] } = centralisedTenant;
+  const clauses = [];
+  if (companyIds.length > 0) clauses.push({ company_id: { [Op.in]: companyIds } });
+  if (ownerIds.length > 0) clauses.push({ company_id: null, created_by: { [Op.in]: ownerIds } });
+  if (clauses.length === 0) return null;
+  return { is_centralised: true, [Op.or]: clauses };
+}
+
+/**
+ * `scope` OR this tenant's Centralised POs (see centralisedTenantScope()).
+ * @param {object} scope
+ * @param {{ companyIds?: number[], ownerIds?: number[] }|null} centralisedTenant
+ * @returns {object}
+ */
+function withCentralisedTenant(scope, centralisedTenant) {
+  const centralised = centralisedTenantScope(centralisedTenant);
+  return centralised ? { [Op.or]: [scope, centralised] } : scope;
+}
+
+/**
  * Retrieve a paginated, filtered list of Service POs.
  * Joins Client and ServiceType for display columns.
  *
@@ -125,7 +161,7 @@ function companyScope(companyId, createdBy = null, centralisedOwnerIds = null, m
  * @returns {Promise<{ rows: ServicePO[], count: number }>}
  */
 const findAll = async (filters = {}, pagination = {}, sort = {}) => {
-  const { search, status, client_id, project_id, service_category_id, service_type_id, service_po_id, is_billable, start_date_from, start_date_to, companyId, createdBy, centralisedOwnerIds, mappedServicePOIds } = filters;
+  const { search, status, client_id, project_id, service_category_id, service_type_id, service_po_id, is_billable, start_date_from, start_date_to, companyId, createdBy, centralisedOwnerIds, mappedServicePOIds, centralisedTenant } = filters;
   const { limit = 10, offset = 0 } = pagination;
   const { sortBy = 'created_at', sortOrder = 'DESC' } = sort;
 
@@ -145,15 +181,13 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
   // POs, even outside their own BU(s) — never a union. See companyScope()'s
   // doc comment.
   //
-  // is_centralised — by decided design, a Centralised Service PO is BU-less
-  // and must be visible to every actor's PO Master list regardless of the
-  // scoping above (including the Project Manager/Delivery Head
-  // mappedServicePOIds override) or who created it — OR'd in unconditionally
-  // here, independent of companyScope()'s own centralisedOwnerIds/createdBy
-  // creator-identity matching.
+  // centralisedTenant — every Centralised PO of the caller's OWN Admin
+  // tenant is OR'd in (including over the Project Manager/Delivery Head
+  // mappedServicePOIds override), never another Admin's. See
+  // centralisedTenantScope()'s doc comment.
   const where = {
     is_deleted: false,
-    [Op.and]: [{ [Op.or]: [companyScope(companyId, createdBy, centralisedOwnerIds, mappedServicePOIds), { is_centralised: true }] }],
+    [Op.and]: [withCentralisedTenant(companyScope(companyId, createdBy, centralisedOwnerIds, mappedServicePOIds), centralisedTenant)],
   };
 
   if (status && status !== 'all') {
@@ -261,18 +295,17 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
  * @param {number[]|null} [mappedServicePOIds] - see companyScope()'s doc
  *   comment; omit/empty so a plain lookup stays strictly BU-scoped (same
  *   default rule as centralisedOwnerIds above).
- * @param {boolean} [includeCentralised] - explicit opt-in, default false:
- *   also match ANY Centralised PO (is_centralised: true) regardless of the
- *   scope above — by decided design a Centralised PO is visible to every
- *   actor, but ONLY for read/view callers that ask for it. Defaults to
- *   false so update()/close()/deleteServicePO() (which never pass this)
- *   keep their existing strict BU-scoped behavior unchanged — a BU-scoped
- *   actor still can't edit/close/delete a Centralised PO just because it's
- *   now unconditionally viewable.
+ * @param {{ companyIds: number[], ownerIds: number[] }|null} [centralisedTenant] -
+ *   explicit opt-in, default null: also match the caller's OWN Admin
+ *   tenant's Centralised POs (see centralisedTenantScope()) — ONLY for
+ *   read/view/map callers that ask for it. Defaults to null so update()/
+ *   close()/deleteServicePO() (which never pass this) keep their strict
+ *   BU-scoped behavior — a BU-scoped actor still can't edit/close/delete a
+ *   Centralised PO just because it's viewable.
  * @returns {Promise<ServicePO|null>}
  */
-const findById = async (id, companyId, createdBy = null, centralisedOwnerIds = null, mappedServicePOIds = null, includeCentralised = false) => {
-  const scope = companyScope(companyId, createdBy, centralisedOwnerIds, mappedServicePOIds);
+const findById = async (id, companyId, createdBy = null, centralisedOwnerIds = null, mappedServicePOIds = null, centralisedTenant = null) => {
+  const scope = withCentralisedTenant(companyScope(companyId, createdBy, centralisedOwnerIds, mappedServicePOIds), centralisedTenant);
   return ServicePO.findOne({
     // Op.and, not object spread: when mappedServicePOIds is given,
     // companyScope() itself returns an `id` key (see its doc comment) —
@@ -282,7 +315,7 @@ const findById = async (id, companyId, createdBy = null, centralisedOwnerIds = n
     where: {
       id,
       is_deleted: false,
-      [Op.and]: [includeCentralised ? { [Op.or]: [scope, { is_centralised: true }] } : scope],
+      [Op.and]: [scope],
     },
     include: [
       {
@@ -487,16 +520,17 @@ const getUtilisation = async (poId, companyId) => {
  * @param {number|number[]|null} companyId
  * @param {number|null} [createdBy] - see companyScope()'s doc comment
  * @param {number[]|null} [centralisedOwnerIds] - see companyScope()'s doc comment
+ * @param {{ companyIds: number[], ownerIds: number[] }|null} [centralisedTenant] - see centralisedTenantScope()'s doc comment
  * @returns {Promise<ServicePO[]>}
  */
-const getActivePOs = async (companyId, createdBy = null, centralisedOwnerIds = null) => {
+const getActivePOs = async (companyId, createdBy = null, centralisedOwnerIds = null, centralisedTenant = null) => {
   return ServicePO.findAll({
     where: {
       status: { [Op.in]: ['in-progress', 'on-hold', 'pending'] },
       is_deleted: false,
-      // By decided design a Centralised PO is visible unconditionally — see
+      // The caller's own Admin tenant's Centralised POs only — see
       // findAll()'s identical comment above.
-      [Op.or]: [companyScope(companyId, createdBy, centralisedOwnerIds), { is_centralised: true }],
+      [Op.and]: [withCentralisedTenant(companyScope(companyId, createdBy, centralisedOwnerIds), centralisedTenant)],
     },
     include: [
       {
@@ -528,21 +562,22 @@ const getActivePOs = async (companyId, createdBy = null, centralisedOwnerIds = n
 
 /**
  * Return { id, company_id, created_by } for every active, non-deleted
- * Centralised Service PO, platform-wide — "active" here is the same status
- * set getActivePOs() already uses, so the definition of "active" stays
- * consistent everywhere. By decided design a Centralised PO is for every
- * Employee regardless of Business Unit or who created it — not scoped to
- * a company, and not restricted to its own creator's ownership hierarchy —
- * so this simply returns every is_centralised row; the caller
- * (employeeServicePOMappingService.autoMapCentralisedServicePOs()) maps the
- * new Employee to all of them unconditionally.
+ * Centralised Service PO of ONE Admin tenant — "active" here is the same
+ * status set getActivePOs() already uses. A Centralised PO is for every
+ * Employee of its own Admin tenant (any of that tenant's Business Units),
+ * never for another Admin's Employees — see centralisedTenantScope().
+ * Fails closed: no tenant (or an empty one) returns [] rather than every
+ * Centralised PO on the platform.
  *
+ * @param {{ companyIds: number[], ownerIds: number[] }|null} centralisedTenant
  * @returns {Promise<{id: number, company_id: number|null, created_by: number|null}[]>}
  */
-const getActiveCentralisedPOIds = async () => {
+const getActiveCentralisedPOIds = async (centralisedTenant) => {
+  const tenantScope = centralisedTenantScope(centralisedTenant);
+  if (!tenantScope) return [];
   const rows = await ServicePO.findAll({
     where: {
-      is_centralised: true,
+      ...tenantScope,
       is_deleted: false,
       status: { [Op.in]: ['in-progress', 'on-hold', 'pending'] },
     },
@@ -609,9 +644,10 @@ const softDelete = async (id, updatedBy, companyId) => {
  * @param {number|null} [params.createdBy] - see companyScope()'s doc comment
  * @param {boolean} params.unrestricted
  * @param {number[]} [params.businessUnitIds]
+ * @param {{ companyIds: number[], ownerIds: number[] }|null} [params.centralisedTenant] - see centralisedTenantScope()
  * @returns {Promise<ServicePO[]>}
  */
-const getEligibleForMapping = async ({ companyId, createdBy = null, unrestricted, businessUnitIds = [] }) => {
+const getEligibleForMapping = async ({ companyId, createdBy = null, unrestricted, businessUnitIds = [], centralisedTenant = null }) => {
   const scopeConditions = [companyScope(companyId, createdBy)];
 
   if (!unrestricted) {
@@ -623,15 +659,12 @@ const getEligibleForMapping = async ({ companyId, createdBy = null, unrestricted
   const where = {
     is_deleted: false,
     status: { [Op.in]: ['in-progress', 'on-hold', 'pending'] },
-    // By decided design, a Centralised Service PO is BU-less and eligible
-    // for every Employee regardless of the caller's own company scope or
-    // the target Employee's Business Unit — so it's OR'd in unconditionally
-    // here, completely independent of the normal company/BU scoping above
-    // (which still applies as before to every non-Centralised PO).
-    [Op.or]: [
-      { [Op.and]: scopeConditions },
-      { is_centralised: true },
-    ],
+    // A Centralised Service PO of the caller's OWN Admin tenant is eligible
+    // for every Employee regardless of the target Employee's Business Unit —
+    // OR'd in independently of the BU scoping above (which still applies to
+    // every non-Centralised PO), but never another Admin's. See
+    // centralisedTenantScope().
+    [Op.and]: [withCentralisedTenant({ [Op.and]: scopeConditions }, centralisedTenant)],
   };
 
   return ServicePO.findAll({
@@ -660,6 +693,7 @@ module.exports = {
   getUtilisation,
   getActivePOs,
   getActiveCentralisedPOIds,
+  centralisedTenantScope,
   findCentralisedIdsAmong,
   getEligibleForMapping,
 };

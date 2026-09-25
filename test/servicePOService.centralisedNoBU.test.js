@@ -34,6 +34,21 @@ function restore() {
   sequelize.transaction = ORIGINAL.transaction;
 }
 
+function stubUnderivableBU() {
+  const { Company } = require('../src/models');
+  const entityRepository = require('../src/repositories/entityRepository');
+  const originalCompanyFindAll = Company.findAll;
+  const originalFindIdsOwnedByAdmin = entityRepository.findIdsOwnedByAdmin;
+  clientRepository.findByIdUnscoped = async () => ({ id: 10, status: 'active', company_id: null });
+  projectRepository.findByIdUnscoped = async () => ({ id: 20, status: 'active', client_id: 10, company_id: null });
+  entityRepository.findIdsOwnedByAdmin = async () => [1];
+  Company.findAll = async () => [{ id: 10 }, { id: 11 }];
+  return () => {
+    Company.findAll = originalCompanyFindAll;
+    entityRepository.findIdsOwnedByAdmin = originalFindIdsOwnedByAdmin;
+  };
+}
+
 function companyLessReq() {
   return { companyId: undefined, hierarchyRank: 2, employeeId: 1, headers: {}, ip: '127.0.0.1' };
 }
@@ -128,6 +143,9 @@ test('create(): a NON-centralised PO never calls autoMapExistingEmployeesToCentr
 });
 
 test('create(): a NON-centralised PO from a company-less actor still requires company_id (regression guard)', async () => {
+  // Nothing to derive a BU from: BU-less Client/Project, an Admin owning
+  // SEVERAL BUs, and no Global BU selected (X-Company-Id).
+  const restoreOwnership = stubUnderivableBU();
   await assert.rejects(
     () => servicePOService.create(basePayload({ is_centralised: false }), 1, companyLessReq()),
     (err) => {
@@ -137,10 +155,14 @@ test('create(): a NON-centralised PO from a company-less actor still requires co
     }
   );
 
+  restoreOwnership();
   restore();
 });
 
 test('create(): is_centralised omitted (Joi default false) still requires company_id, same as explicit false', async () => {
+  // Nothing to derive a BU from: BU-less Client/Project, an Admin owning
+  // SEVERAL BUs, and no Global BU selected (X-Company-Id).
+  const restoreOwnership = stubUnderivableBU();
   await assert.rejects(
     () => servicePOService.create(basePayload(), 1, companyLessReq()),
     (err) => {
@@ -149,5 +171,6 @@ test('create(): is_centralised omitted (Joi default false) still requires compan
     }
   );
 
+  restoreOwnership();
   restore();
 });

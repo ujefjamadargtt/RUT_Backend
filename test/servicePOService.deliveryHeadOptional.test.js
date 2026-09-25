@@ -104,7 +104,16 @@ test('create(): still validates delivery_head_employee_id when one IS supplied',
   restore();
 });
 
-test('create(): a company-less actor (Admin) MUST supply company_id — Business Unit stays mandatory for Service PO', async () => {
+test('create(): a company-less actor (Admin) with a BU-less Client/Project, several owned BUs and no Global BU selected MUST supply company_id — Business Unit stays mandatory for Service PO', async () => {
+  const { Company } = require('../src/models');
+  const entityRepository = require('../src/repositories/entityRepository');
+  const originalCompanyFindAll = Company.findAll;
+  const originalFindIdsOwnedByAdmin = entityRepository.findIdsOwnedByAdmin;
+  clientRepository.findByIdUnscoped = async () => ({ id: 10, status: 'active', company_id: null });
+  projectRepository.findByIdUnscoped = async () => ({ id: 20, status: 'active', client_id: 10, company_id: null });
+  entityRepository.findIdsOwnedByAdmin = async () => [1];
+  Company.findAll = async () => [{ id: 10 }, { id: 11 }];
+
   await assert.rejects(
     () => servicePOService.create(basePayload(), 1, { companyId: undefined, hierarchyRank: 2, employeeId: 1, headers: {}, ip: '127.0.0.1' }),
     (err) => {
@@ -114,6 +123,8 @@ test('create(): a company-less actor (Admin) MUST supply company_id — Business
     }
   );
 
+  Company.findAll = originalCompanyFindAll;
+  entityRepository.findIdsOwnedByAdmin = originalFindIdsOwnedByAdmin;
   restore();
 });
 
