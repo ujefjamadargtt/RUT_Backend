@@ -5,7 +5,7 @@ const managementReportRepo = require('../repositories/managementReportRepository
 const { Company } = require('../models');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
 const logger = require('../utils/logger');
-const { intersectCompanyIdsWithEntity, intersectIds } = require('./companyAccessControlService');
+const { intersectCompanyIdsWithEntity, intersectIdsWithBuHierarchy } = require('./companyAccessControlService');
 const { parseIdList } = require('../utils/idListParser');
 
 /**
@@ -90,7 +90,7 @@ function parseCommonFilters(query) {
  */
 async function applyEntityBuFilters(companyIds, filters) {
   const scoped = await intersectCompanyIdsWithEntity(companyIds, filters.entityIds ?? filters.entityId);
-  return intersectIds(scoped, filters.businessUnitIds);
+  return intersectIdsWithBuHierarchy(scoped, filters.businessUnitIds);
 }
 
 // ---------------------------------------------------------------------------

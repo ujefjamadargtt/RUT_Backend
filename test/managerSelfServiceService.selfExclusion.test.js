@@ -31,7 +31,7 @@ const ORIGINAL = {
   findByManager: managerEmployeeMappingRepository.findByManager,
   findByManagerAndEmployee: managerEmployeeMappingRepository.findByManagerAndEmployee,
   findAllByEmployee: employeeServicePOMappingRepository.findAllByEmployee,
-  findDistinctEmployeeIdsByServicePOIds: employeeWorkLogRepository.findDistinctEmployeeIdsByServicePOIds,
+  findByServicePOs: employeeServicePOMappingRepository.findByServicePOs,
   workLogFindById: employeeWorkLogRepository.findById,
   approveById: employeeWorkLogRepository.approveById,
   employeeFindById: employeeRepository.findById,
@@ -43,7 +43,7 @@ function restore() {
   managerEmployeeMappingRepository.findByManager = ORIGINAL.findByManager;
   managerEmployeeMappingRepository.findByManagerAndEmployee = ORIGINAL.findByManagerAndEmployee;
   employeeServicePOMappingRepository.findAllByEmployee = ORIGINAL.findAllByEmployee;
-  employeeWorkLogRepository.findDistinctEmployeeIdsByServicePOIds = ORIGINAL.findDistinctEmployeeIdsByServicePOIds;
+  employeeServicePOMappingRepository.findByServicePOs = ORIGINAL.findByServicePOs;
   employeeWorkLogRepository.findById = ORIGINAL.workLogFindById;
   employeeWorkLogRepository.approveById = ORIGINAL.approveById;
   employeeRepository.findById = ORIGINAL.employeeFindById;
@@ -74,10 +74,13 @@ test('getMyEmployees (Team Lead tier): the caller\'s own Employee row is exclude
   }
 });
 
-test('getMyEmployees (Project Manager tier): the caller\'s own Employee row is excluded even though they logged work against their own managed Service PO', async () => {
+test('getMyEmployees (Project Manager tier): the caller\'s own Employee row is excluded even though they are themselves mapped to their own managed Service PO', async () => {
   try {
     employeeServicePOMappingRepository.findAllByEmployee = async (employeeId) => (employeeId === 501 ? [{ service_po_id: 201 }] : []);
-    employeeWorkLogRepository.findDistinctEmployeeIdsByServicePOIds = async () => [501, 101, 102]; // PM 501 logged hours too
+    employeeServicePOMappingRepository.findByServicePOs = async (poIds, status) => {
+      assert.equal(status, 'active');
+      return poIds.includes(201) ? [{ employee_id: 501 }, { employee_id: 101 }, { employee_id: 102 }] : []; // PM 501 is also mapped to their own PO
+    };
     Employee.findAll = async ({ where }) => where.id.map((id) => ({
       id, employee_code: `EMP-${id}`, full_name: `Employee ${id}`, designation: 'x', status: 'active', businessUnits: [],
     }));

@@ -5,7 +5,7 @@ const resourceBudgetRepository = require('../repositories/resourceBudgetReposito
 const servicePORepository = require('../repositories/servicePORepository');
 const employeeRepository = require('../repositories/employeeRepository');
 const companyAccessControlService = require('./companyAccessControlService');
-const { intersectCompanyIdsWithEntity, intersectIds } = companyAccessControlService;
+const { intersectCompanyIdsWithEntity, intersectIdsWithBuHierarchy } = companyAccessControlService;
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
 const { parseMonthString, toMonthString } = require('../helpers/monthPeriodHelper');
 const { MAX_MONTHLY_HOURS } = require('../config/resourceBudget.config');
@@ -324,7 +324,7 @@ const list = async (query, req) => {
   // single-PO routes only, which stay on the plain `authenticate` chain.
   let companyId = req.companyIds;
   companyId = await intersectCompanyIdsWithEntity(companyId, parseIdList(query.entityIds));
-  companyId = intersectIds(companyId, parseIdList(query.businessUnitIds));
+  companyId = await intersectIdsWithBuHierarchy(companyId, parseIdList(query.businessUnitIds));
 
   const filters = {};
   if (query.emp_id !== undefined) filters.emp_id = query.emp_id;

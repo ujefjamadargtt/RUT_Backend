@@ -11,7 +11,7 @@ const servicePOHierarchyRepository = require('../repositories/servicePOHierarchy
 const timesheetRepository = require('../repositories/timesheetRepository');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
 const employeeServicePOMappingService = require('./employeeServicePOMappingService');
-const { resolveActorCompanyScope, resolveCreateCompanyIdForActor, resolveActorCompanyScopeForSelectedBU, resolveActorFullReach, resolveCentralisedOwnerCreatorIds, intersectCompanyIdsWithEntity, intersectIds } = require('./companyAccessControlService');
+const { resolveActorCompanyScope, resolveCreateCompanyIdForActor, resolveActorCompanyScopeForSelectedBU, resolveActorFullReach, resolveCentralisedOwnerCreatorIds, intersectCompanyIdsWithEntity, intersectIdsWithBuHierarchy, areSameOrRelatedBusinessUnits } = require('./companyAccessControlService');
 const { Employee, Company, sequelize } = require('../models');
 const { Op } = require('sequelize');
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
@@ -81,12 +81,19 @@ function assertProjectBelongsToClient(project, clientId) {
  * and checked after, so an unrelated company's record still simply resolves
  * "not found" below, never leaking cross-company existence.
  *
+ * BU Hierarchy / Sub-BU support: also true when `candidate.company_id` and
+ * `companyId` are the same tenant one hop apart in the hierarchy (a Sub-BU
+ * referencing its Parent's shared Client/Project, or vice versa) — see
+ * companyAccessControlService.areSameOrRelatedBusinessUnits().
+ *
  * @param {{company_id: number|null}|null} candidate
  * @param {number} companyId
- * @returns {boolean}
+ * @returns {Promise<boolean>}
  */
-function belongsToCompanyOrUnassigned(candidate, companyId) {
-  return !!candidate && (candidate.company_id === companyId || candidate.company_id === null);
+async function belongsToCompanyOrUnassigned(candidate, companyId) {
+  if (!candidate) return false;
+  if (candidate.company_id === null || candidate.company_id === companyId) return true;
+  return areSameOrRelatedBusinessUnits(candidate.company_id, companyId);
 }
 
 /**
@@ -226,8 +233,8 @@ const getAll = async (query = {}, authContext, headerCompanyId = null) => {
     // accepted as equivalent narrowing filters; all compose via
     // intersection when more than one is given.
     companyId = await intersectCompanyIdsWithEntity(companyId, parseIdList(query.entityIds));
-    companyId = intersectIds(companyId, parseIdList(query.businessUnitIds));
-    companyId = intersectIds(companyId, parseIdList(query.company_ids));
+    companyId = await intersectIdsWithBuHierarchy(companyId, parseIdList(query.businessUnitIds));
+    companyId = await intersectIdsWithBuHierarchy(companyId, parseIdList(query.company_ids));
   }
   const { page, limit, offset } = getPaginationParams(query);
   const mappedServicePOIds = await resolveIndividuallyMappedServicePOIds(authContext.employeeId, authContext.roleNames);
@@ -303,6 +310,34 @@ const getById = async (id, authContext) => {
 };
 
 /**
+ * Resolve a single Service PO the caller may act on, by id, with exactly the
+ * same reach as GET /service-pos/:id: every Business Unit the actor can
+ * reach (all mapped/owned BUs plus their Sub-BUs — never narrowed to the
+ * currently active X-Company-Id), their tenant's Centralised POs, and, for a
+ * Project Manager/Delivery Head, their individually-mapped POs. Shared by
+ * servicePOController.getServicePOById and servicePOHierarchyService so a PO
+ * that opens in the UI never 404s on its own sub-screens.
+ *
+ * @param {number} id
+ * @param {object} req - needs hierarchyRank, employeeId, employeeBusinessUnits, employeeRoleNames
+ * @returns {Promise<ServicePO>}
+ * @throws {Error} 404 'Service PO not found.'
+ */
+const getAccessibleById = async (id, req) => {
+  const fullReachCompanyIds = await resolveActorFullReach({
+    hierarchyRank: req.hierarchyRank,
+    employeeId: req.employeeId,
+    employeeBusinessUnits: req.employeeBusinessUnits,
+  });
+  return getById(id, {
+    companyId: fullReachCompanyIds,
+    hierarchyRank: req.hierarchyRank,
+    employeeId: req.employeeId,
+    roleNames: req.employeeRoleNames,
+  });
+};
+
+/**
  * Create a new Service PO.
  * - Validates that start_date < end_date
  * - Validates that client and service type exist and are active
@@ -363,7 +398,7 @@ const create = async (data, userId, req) => {
   // has no company assigned yet — see belongsToCompanyOrUnassigned()) —
   // otherwise a PO could be attached to another company's client.
   const client = preFetchedClient || await clientRepository.findByIdUnscoped(data.client_id);
-  if (!belongsToCompanyOrUnassigned(client, companyId)) {
+  if (!(await belongsToCompanyOrUnassigned(client, companyId))) {
     const err = new Error('Client not found.');
     err.statusCode = 404;
     throw err;
@@ -377,7 +412,7 @@ const create = async (data, userId, req) => {
   // Validate project exists, is active, AND belongs to the same company —
   // same pattern as the client_id check above (independent grouping).
   const project = await projectRepository.findByIdUnscoped(data.project_id);
-  if (!belongsToCompanyOrUnassigned(project, companyId)) {
+  if (!(await belongsToCompanyOrUnassigned(project, companyId))) {
     const err = new Error('Project not found.');
     err.statusCode = 404;
     throw err;
@@ -528,7 +563,7 @@ const update = async (id, data, userId, req) => {
     err.statusCode = 404;
     throw err;
   }
-  const companyId = existing.company_id;
+  const currentCompanyId = existing.company_id;
 
   if (existing.status === 'closed' || existing.status === 'cancelled') {
     const err = new Error(`Cannot update a Service PO with status "${existing.status}".`);
@@ -536,36 +571,51 @@ const update = async (id, data, userId, req) => {
     throw err;
   }
 
-  // If the caller is changing the service_po_code, ensure it is not taken by
-  // any other PO in this company, regardless of its status or soft-delete state.
-  if (data.service_po_code && data.service_po_code !== existing.service_po_code) {
-    const taken = await servicePORepository.findByCode(data.service_po_code, companyId);
+  // Moving the Service PO to another Business Unit — the target BU must be
+  // one the caller could CREATE a Service PO in (same 403 rules as
+  // create()). Every check below then validates against the TARGET BU, so
+  // the PO's client/project/Delivery Head/code/name must all still fit there.
+  const companyChanged = data.company_id != null && data.company_id !== currentCompanyId;
+  const companyId = companyChanged
+    ? await resolveCreateCompanyIdForActor(req, data.company_id, { required: true, resourceLabel: 'a Service PO' })
+    : currentCompanyId;
+  if (companyChanged) {
+    data = { ...data, company_id: companyId };
+  }
+
+  // If the caller is changing the service_po_code (or moving the PO to
+  // another BU), ensure it is not taken by any other PO in the target
+  // company, regardless of its status or soft-delete state.
+  const effectiveCode = data.service_po_code || existing.service_po_code;
+  if (companyChanged || effectiveCode !== existing.service_po_code) {
+    const taken = await servicePORepository.findByCode(effectiveCode, companyId);
     if (taken && taken.id !== id) {
-      const err = new Error(`Service PO code "${data.service_po_code}" is already in use.`);
+      const err = new Error(`Service PO code "${effectiveCode}" is already in use.`);
       err.statusCode = 409;
       throw err;
     }
   }
 
-  // Same rule as create() — a renamed Service PO can't collide with
-  // another Service PO's name in the same company.
-  if (data.service_po_name && data.service_po_name.trim().toLowerCase() !== existing.service_po_name.toLowerCase()) {
-    const nameConflict = await servicePORepository.findByName(data.service_po_name, companyId);
+  // Same rule as create() — a renamed (or moved) Service PO can't collide
+  // with another Service PO's name in the target company.
+  const effectiveName = data.service_po_name || existing.service_po_name;
+  if (companyChanged || effectiveName.trim().toLowerCase() !== existing.service_po_name.toLowerCase()) {
+    const nameConflict = await servicePORepository.findByName(effectiveName, companyId);
     if (nameConflict && nameConflict.id !== id) {
-      const err = new Error(`Service PO "${data.service_po_name}" already exists.`);
+      const err = new Error(`Service PO "${effectiveName}" already exists.`);
       err.statusCode = 409;
       throw err;
     }
   }
 
-  // If client_id is being changed, validate the new client — belongs to the
-  // same company, or has no company assigned yet (see
-  // belongsToCompanyOrUnassigned()); a client belonging to another company
-  // entirely still simply 404s.
-  const clientChanged = data.client_id && data.client_id !== existing.client_id;
+  // If client_id is being changed (or the PO is moving BU), validate the
+  // resulting client — belongs to the target company, or has no company
+  // assigned yet (see belongsToCompanyOrUnassigned()); a client belonging to
+  // another company entirely still simply 404s.
+  const clientChanged = (data.client_id && data.client_id !== existing.client_id) || companyChanged;
   if (clientChanged) {
-    const client = await clientRepository.findByIdUnscoped(data.client_id);
-    if (!belongsToCompanyOrUnassigned(client, companyId)) {
+    const client = await clientRepository.findByIdUnscoped(data.client_id || existing.client_id);
+    if (!(await belongsToCompanyOrUnassigned(client, companyId))) {
       const err = new Error('Client not found.');
       err.statusCode = 404;
       throw err;
@@ -579,11 +629,11 @@ const update = async (id, data, userId, req) => {
 
   // If project_id is being changed, validate the new project — same
   // conditional-on-change pattern as client_id above.
-  const projectChanged = data.project_id && data.project_id !== existing.project_id;
+  const projectChanged = (data.project_id && data.project_id !== existing.project_id) || companyChanged;
   let projectForCrossCheck = null;
   if (projectChanged) {
-    const project = await projectRepository.findByIdUnscoped(data.project_id);
-    if (!belongsToCompanyOrUnassigned(project, companyId)) {
+    const project = await projectRepository.findByIdUnscoped(data.project_id || existing.project_id);
+    if (!(await belongsToCompanyOrUnassigned(project, companyId))) {
       const err = new Error('Project not found.');
       err.statusCode = 404;
       throw err;
@@ -612,8 +662,10 @@ const update = async (id, data, userId, req) => {
   // one must not be broken; see database/migrations/
   // 20260849_add_service_pos_delivery_head.sql), but validated the same
   // way as create() whenever it IS being set/changed.
-  if (data.delivery_head_employee_id) {
-    await assertValidDeliveryHead(data.delivery_head_employee_id, companyId);
+  const deliveryHeadToCheck = data.delivery_head_employee_id
+    || (companyChanged ? existing.delivery_head_employee_id : null);
+  if (deliveryHeadToCheck) {
+    await assertValidDeliveryHead(deliveryHeadToCheck, companyId);
   }
 
   // Cross-field date validation when one or both dates are being changed
@@ -626,6 +678,7 @@ const update = async (id, data, userId, req) => {
   }
 
   const oldValues = {
+    company_id:          existing.company_id,
     service_po_name:     existing.service_po_name,
     client_id:           existing.client_id,
     project_id:          existing.project_id,
@@ -642,7 +695,20 @@ const update = async (id, data, userId, req) => {
   };
 
   const payload = { ...data, updated_by: userId };
-  const updated = await servicePORepository.update(id, payload, companyId);
+  // WHERE uses the PO's CURRENT BU — the row still lives there until this
+  // update moves it. Its Employee mappings move with it (same transaction),
+  // since they're read back company-scoped.
+  let updated;
+  if (companyChanged && currentCompanyId != null) {
+    await sequelize.transaction(async (transaction) => {
+      updated = await servicePORepository.update(id, payload, currentCompanyId, { transaction });
+      await employeeServicePOMappingRepository.moveServicePOToCompany(
+        id, currentCompanyId, companyId, userId, { transaction }
+      );
+    });
+  } else {
+    updated = await servicePORepository.update(id, payload, currentCompanyId);
+  }
 
   await createAuditLog(
     userId,
@@ -955,6 +1021,7 @@ const deleteServicePO = async (id, userId, req) => {
 module.exports = {
   getAll,
   getById,
+  getAccessibleById,
   create,
   update,
   close,

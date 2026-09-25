@@ -72,6 +72,19 @@ const findById = async (id, companyId) => {
 };
 
 /**
+ * Find a single mapping row by primary key WITHOUT a company filter — for
+ * callers that authorize through the mapping's Service PO instead
+ * (employeeServicePOMappingService.loadAuthorizedMapping()). Needed because
+ * a Centralised Service PO's mapping rows carry company_id NULL, which the
+ * company-scoped findById() above can never match.
+ * @param {number} id
+ * @returns {Promise<EmployeeServicePOMapping|null>}
+ */
+const findByIdUnscoped = async (id) => {
+  return EmployeeServicePOMapping.findByPk(id);
+};
+
+/**
  * Insert a new mapping row.
  * @param {object} data - { company_id, employee_id, service_po_id, status, created_by, updated_by }
  * @returns {Promise<EmployeeServicePOMapping>}
@@ -421,9 +434,30 @@ const bulkUpdateStatus = async (ids, status, updatedBy) => {
   return count;
 };
 
+/**
+ * Move every mapping row of one Service PO from its old Business Unit to a
+ * new one — used when the Service PO itself is moved to another BU
+ * (servicePOService.update()), since every company-scoped read in this file
+ * would otherwise stop matching those rows under the PO's new BU.
+ * @param {number} servicePOId
+ * @param {number} fromCompanyId
+ * @param {number} toCompanyId
+ * @param {number} updatedBy
+ * @param {object} [options] - Sequelize options, e.g. { transaction }
+ * @returns {Promise<number>} rows updated
+ */
+const moveServicePOToCompany = async (servicePOId, fromCompanyId, toCompanyId, updatedBy, options) => {
+  const [count] = await EmployeeServicePOMapping.update(
+    { company_id: toCompanyId, updated_by: updatedBy },
+    { where: { service_po_id: servicePOId, company_id: fromCompanyId }, ...options }
+  );
+  return count;
+};
+
 module.exports = {
   findByEmployeeAndPO,
   findById,
+  findByIdUnscoped,
   create,
   bulkCreate,
   updateStatus,
@@ -438,4 +472,5 @@ module.exports = {
   findByServicePOs,
   findByEmployeeAndPOIds,
   bulkUpdateStatus,
+  moveServicePOToCompany,
 };

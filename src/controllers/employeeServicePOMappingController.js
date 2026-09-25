@@ -35,6 +35,15 @@ const { sendSuccess, sendCreated, sendError, sendNotFound } = require('../utils/
  * @param {import('express').Request} req
  * @returns {Promise<number|number[]>}
  */
+function buildAuthContext(req) {
+  return {
+    companyId: req.companyId,
+    hierarchyRank: req.hierarchyRank,
+    employeeId: req.employeeId,
+    employeeBusinessUnits: (req.employeeBusinessUnits || []).map((bu) => bu.id),
+  };
+}
+
 function resolveScope(req) {
   return employeeServicePOMappingService.resolveEmployeeMappingScope({
     companyId: req.companyId,
@@ -91,7 +100,8 @@ const updateProjectManagerFlag = async (req, res, next) => {
       id,
       req.body.is_project_manager,
       req.userId,
-      await resolveScope(req)
+      await resolveScope(req),
+      buildAuthContext(req)
     );
     return sendSuccess(res, mapping, 'Mapping updated successfully.');
   } catch (err) {
@@ -114,7 +124,7 @@ const removeMapping = async (req, res, next) => {
     if (isNaN(id)) {
       return sendError(res, 'Invalid mapping ID.', 400);
     }
-    await employeeServicePOMappingService.removeMapping(id, await resolveScope(req));
+    await employeeServicePOMappingService.removeMapping(id, await resolveScope(req), buildAuthContext(req));
     return sendSuccess(res, null, 'Mapping removed successfully.');
   } catch (err) {
     if (err.statusCode === 404) {
@@ -133,7 +143,7 @@ const activateMapping = async (req, res, next) => {
     if (isNaN(id)) {
       return sendError(res, 'Invalid mapping ID.', 400);
     }
-    const mapping = await employeeServicePOMappingService.activateMapping(id, req.userId, await resolveScope(req));
+    const mapping = await employeeServicePOMappingService.activateMapping(id, req.userId, await resolveScope(req), buildAuthContext(req));
     return sendSuccess(res, mapping, 'Mapping activated successfully.');
   } catch (err) {
     if (err.statusCode === 404) {
@@ -152,7 +162,7 @@ const deactivateMapping = async (req, res, next) => {
     if (isNaN(id)) {
       return sendError(res, 'Invalid mapping ID.', 400);
     }
-    const mapping = await employeeServicePOMappingService.deactivateMapping(id, req.userId, await resolveScope(req));
+    const mapping = await employeeServicePOMappingService.deactivateMapping(id, req.userId, await resolveScope(req), buildAuthContext(req));
     return sendSuccess(res, mapping, 'Mapping deactivated successfully.');
   } catch (err) {
     if (err.statusCode === 404) {

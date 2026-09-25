@@ -137,7 +137,90 @@ const findAllForEntities = async (entityIds, filters = {}, pagination = {}, sort
     limit,
     offset,
     order: [[safeSortBy, safeSortOrder]],
-    include: [{ model: Entity, as: 'entity', attributes: ['id', 'entity_name', 'entity_code'] }],
+    include: [
+      { model: Entity, as: 'entity', attributes: ['id', 'entity_name', 'entity_code'] },
+      // BU Hierarchy — the nested `parent` relation is what lets the BU
+      // Master UI/hierarchical selectors render "Technology -> Development"
+      // from this same paginated, filtered list, with no separate tree
+      // endpoint. A Parent BU's own `parent` is simply null.
+      { model: Company, as: 'parent', attributes: ['id', 'company_name', 'company_code'] },
+    ],
+  });
+};
+
+/**
+ * Every non-deleted Company whose parent_business_unit_id is one of the
+ * given ids — one indexed query, depth-1 only (Sub-BUs never have children
+ * of their own, so this never needs to recurse). The shared building block
+ * for BU-hierarchy-aware filtering — see
+ * companyAccessControlService.expandBusinessUnitIdsWithDescendants(), which
+ * every report/list BU filter chokepoint funnels through.
+ *
+ * @param {number[]} parentIds
+ * @returns {Promise<number[]>}
+ */
+const findChildIds = async (parentIds) => {
+  if (!parentIds || parentIds.length === 0) return [];
+  const children = await Company.findAll({
+    where: { parent_business_unit_id: { [Op.in]: parentIds }, is_deleted: false },
+    attributes: ['id'],
+  });
+  return children.map((c) => c.id);
+};
+
+/**
+ * Whether the given Company currently has any (non-deleted) Sub-BU —
+ * companyService.js's "can't turn an existing parent into a child" /
+ * "can't nest a 3rd level" guard.
+ *
+ * @param {number} companyId
+ * @returns {Promise<boolean>}
+ */
+const hasChildren = async (companyId) => {
+  const count = await Company.count({ where: { parent_business_unit_id: companyId, is_deleted: false } });
+  return count > 0;
+};
+
+/**
+ * Batched version of hasChildren() — of the given ids, which ones currently
+ * have at least one (non-deleted) Sub-BU. One query, not N. Backs the
+ * "Employee mapping must target the specific Sub-BU, not a Parent BU that
+ * has Sub-BUs" rule — see employeeService.resolveBusinessUnitIds().
+ *
+ * @param {number[]} ids
+ * @returns {Promise<number[]>} the subset of `ids` that have children
+ */
+const findIdsWithChildren = async (ids) => {
+  if (!ids || ids.length === 0) return [];
+  const children = await Company.findAll({
+    where: { parent_business_unit_id: { [Op.in]: ids }, is_deleted: false },
+    attributes: ['parent_business_unit_id'],
+  });
+  return [...new Set(children.map((c) => c.parent_business_unit_id))];
+};
+
+/**
+ * Every non-deleted Company that is one of the given "root" ids (a
+ * top-level Parent BU), OR a direct child of one of them — the full
+ * Parent + Sub-BU "family" for each root, one query, depth-1 only. Backs
+ * "a BU Admin with a foothold anywhere in a family (mapped to the Parent,
+ * or to just one of its Sub-BUs) sees the WHOLE family" — see
+ * companyService.getAllForEmployee()'s doc comment.
+ *
+ * @param {number[]} rootIds
+ * @returns {Promise<Company[]>}
+ */
+const findFamilyMembers = async (rootIds) => {
+  if (!rootIds || rootIds.length === 0) return [];
+  return Company.findAll({
+    where: {
+      is_deleted: false,
+      [Op.or]: [
+        { id: { [Op.in]: rootIds } },
+        { parent_business_unit_id: { [Op.in]: rootIds } },
+      ],
+    },
+    include: [{ model: Company, as: 'parent', attributes: ['id', 'company_name', 'company_code'] }],
   });
 };
 
@@ -170,7 +253,10 @@ const findIdsByEntityIds = async (entityIds) => {
  */
 const findByIdForEntities = async (id, entityIds) => {
   if (!entityIds || entityIds.length === 0) return null;
-  return Company.findOne({ where: { id, entity_id: { [Op.in]: entityIds }, is_deleted: false } });
+  return Company.findOne({
+    where: { id, entity_id: { [Op.in]: entityIds }, is_deleted: false },
+    include: [{ model: Company, as: 'parent', attributes: ['id', 'company_name', 'company_code'] }],
+  });
 };
 
 /**
@@ -204,4 +290,8 @@ module.exports = {
   findByIdForEntities,
   findAllForEntities,
   findByIdsWithEntity,
+  findChildIds,
+  hasChildren,
+  findIdsWithChildren,
+  findFamilyMembers,
 };

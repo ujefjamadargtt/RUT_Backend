@@ -22,7 +22,7 @@ const { QueryTypes } = require('sequelize');
  *
  * Leave/no-work hours reuse the EXACT SAME service-type/PO-name heuristic
  * dashboardRepository.js's getLeaveHoursTrend()/getNoWorkTrend() already use
- * (LOWER(service_type_name) = 'leaves'; LOWER(service_po_name) IN ('idle',
+ * (LOWER(service_type_name) IN ('leave', 'leaves'); LOWER(service_po_name) IN ('idle',
  * 'on bench')) — there is no structured leave/absence model in this
  * codebase (confirmed by the audit), so this is the same convention-based
  * proxy the existing Dashboard already relies on, not a new business rule.
@@ -268,7 +268,7 @@ async function getTeamCapacity(filters) {
       INNER JOIN service_types st ON st.id = sp.service_type_id
       WHERE EXTRACT(MONTH FROM t.timesheet_date) = :monthNum AND EXTRACT(YEAR FROM t.timesheet_date) = :yearNum
         AND t.employee_id IN (:employeeIds)
-        AND LOWER(st.service_type_name) = 'leaves'
+        AND LOWER(TRIM(st.service_type_name)) IN ('leave', 'leaves')
       GROUP BY t.employee_id
     ),
     no_work AS (

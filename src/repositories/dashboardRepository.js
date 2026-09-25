@@ -401,7 +401,7 @@ async function getRecentTimesheetActivityForPeriod(startDate, endDate, hoursSour
      INNER JOIN service_pos sp ON sp.id = t.service_po_id
      WHERE t.timesheet_date >= :startDate
        AND t.timesheet_date <= :endDate
-       AND (t.company_id IN (:companyId) OR sp.company_id IN (:companyId) OR sp.company_id IS NULL)
+       AND ${TIMESHEET_COMPANY_SCOPE_SQL}
        ${publishGuard}
      ORDER BY t.employee_id, t.timesheet_date DESC
      LIMIT 5`,
@@ -587,7 +587,7 @@ async function getEmployeeCountByCategoryForPeriod(startDate, endDate, roleId, c
      WHERE t.timesheet_date >= :startDate
        AND t.timesheet_date <= :endDate
        AND t.hours_logged > 0
-       AND (t.company_id IN (:companyId) OR sp.company_id IN (:companyId) OR sp.company_id IS NULL)
+       AND ${TIMESHEET_COMPANY_SCOPE_SQL}
        ${publishGuard}
      GROUP BY sc.name, sc.report_bucket_key`,
     { replacements: { startDate, endDate, companyId }, type: QueryTypes.SELECT }
@@ -982,6 +982,29 @@ async function getTopEmployeesByPO(filters) {
 }
 
 /**
+ * BU scope for a timesheet row (`t` joined to `sp`), bound to :companyId.
+ *
+ * A row counts for the scope when it was logged under one of those BUs
+ * (t.company_id) or is against a Service PO of one of those BUs
+ * (sp.company_id) — both needed, see buildAnalyticsFilters()'s comment on
+ * cross-BU resourcing.
+ *
+ * A Centralised/BU-less Service PO (sp.company_id IS NULL — Leaves, On
+ * Bench, HR & Admin, ...) belongs to no BU, so its rows only count when the
+ * EMPLOYEE belongs to the scope. It used to be a bare `OR sp.company_id IS
+ * NULL`, which pulled in every such row from EVERY BU: narrowing
+ * /dashboard/analytics to a 5-person Sub-BU still reported tiles.
+ * active_employees = 72 (everyone org-wide who logged leave/bench time).
+ * Unfiltered (full reach) results are unchanged.
+ */
+const TIMESHEET_COMPANY_SCOPE_SQL = `(t.company_id IN (:companyId) OR sp.company_id IN (:companyId) OR (sp.company_id IS NULL AND EXISTS (
+      SELECT 1 FROM employee_business_units ebu_scope
+      WHERE ebu_scope.employee_id = t.employee_id
+        AND ebu_scope.status = 'active'
+        AND ebu_scope.business_unit_id IN (:companyId)
+    )))`;
+
+/**
  * Billable vs non-billable hours per Service PO, per calendar month, across a
  * date window. Used to build the billable/non-billable trend chart and to
  * diff consecutive months to explain WHY the totals moved (which POs/service
@@ -1062,7 +1085,7 @@ function buildAnalyticsFilters(filters, replacements) {
     // used everywhere else in this file) recovers those rows instead of
     // silently zeroing out tiles/charts for an otherwise-correctly-scoped
     // actor.
-    '(t.company_id IN (:companyId) OR sp.company_id IN (:companyId) OR sp.company_id IS NULL)',
+    TIMESHEET_COMPANY_SCOPE_SQL,
   ];
   replacements.startDate = startDate;
   replacements.endDate = endDate;
@@ -1608,7 +1631,7 @@ async function getLeaveHoursTrend(filters) {
      INNER JOIN service_pos sp   ON sp.id = t.service_po_id
      INNER JOIN service_types st ON st.id = sp.service_type_id
      WHERE ${whereClause}
-       AND LOWER(st.service_type_name) = 'leaves'
+       AND LOWER(TRIM(st.service_type_name)) IN ('leave', 'leaves')
      GROUP BY year, month
      ORDER BY year, month`,
     { replacements, type: QueryTypes.SELECT }
@@ -1931,7 +1954,7 @@ async function getClientWiseCostAnalytics(hoursSource, roleId, companyId) {
      FROM timesheets t
      INNER JOIN service_pos sp ON sp.id = t.service_po_id
      INNER JOIN clients c      ON c.id  = sp.client_id
-     WHERE (t.company_id IN (:companyId) OR sp.company_id IN (:companyId) OR sp.company_id IS NULL)
+     WHERE ${TIMESHEET_COMPANY_SCOPE_SQL}
      GROUP BY c.id, c.client_name`,
     { replacements: { companyId }, type: QueryTypes.SELECT }
   );

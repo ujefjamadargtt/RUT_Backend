@@ -25,11 +25,15 @@ const findBusinessUnitsByEmployeeId = async (employeeId) => {
       {
         model: Company,
         as: 'businessUnit',
-        attributes: ['id', 'company_code', 'company_name', 'status', 'is_original_data_visible', 'saturday_off_rule', 'entity_id'],
+        attributes: ['id', 'company_code', 'company_name', 'status', 'is_original_data_visible', 'saturday_off_rule', 'entity_id', 'parent_business_unit_id'],
         where: { is_deleted: false },
         required: true,
         include: [
           { model: Entity, as: 'entity', attributes: ['id', 'entity_name'], required: false },
+          // BU Hierarchy — lets a caller render "Technology -> Development"
+          // for a Sub-BU mapping without a second round trip; null for a
+          // Parent BU (or a legacy BU with no hierarchy configured).
+          { model: Company, as: 'parent', attributes: ['id', 'company_name', 'company_code'], required: false },
         ],
       },
     ],
@@ -66,9 +70,13 @@ const findBusinessUnitsByEmployeeIds = async (employeeIds) => {
       {
         model: Company,
         as: 'businessUnit',
-        attributes: ['id', 'company_name'],
+        attributes: ['id', 'company_name', 'parent_business_unit_id'],
         where: { is_deleted: false },
         required: true,
+        // BU Hierarchy — one batched join (not per-row) so the Employee
+        // Master list can render "Technology -> Development" for every row
+        // on the page; null for a Parent BU.
+        include: [{ model: Company, as: 'parent', attributes: ['id', 'company_name'], required: false }],
       },
     ],
   });
@@ -76,6 +84,8 @@ const findBusinessUnitsByEmployeeIds = async (employeeIds) => {
     employee_id: grant.employee_id,
     id: grant.businessUnit.id,
     name: grant.businessUnit.company_name,
+    parent_business_unit_id: grant.businessUnit.parent_business_unit_id,
+    parent_business_unit_name: grant.businessUnit.parent ? grant.businessUnit.parent.company_name : null,
   }));
 };
 

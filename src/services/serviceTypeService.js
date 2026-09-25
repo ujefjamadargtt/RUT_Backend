@@ -149,7 +149,7 @@ const update = async (id, data, userId, authContext) => {
     data.service_type_name &&
     data.service_type_name.trim().toLowerCase() !== existing.service_type_name.toLowerCase()
   ) {
-    const conflict = await serviceTypeRepository.findByName(data.service_type_name, existing.company_id);
+    const conflict = await serviceTypeRepository.findByName(data.service_type_name, GLOBAL_COMPANY_ID);
     if (conflict) {
       const err = new Error(`Service type "${data.service_type_name}" already exists.`);
       err.statusCode = 409;
@@ -157,10 +157,10 @@ const update = async (id, data, userId, authContext) => {
     }
   }
 
-  await assertCategoryExists(data.service_category_id, existing.company_id);
+  await assertCategoryExists(data.service_category_id, GLOBAL_COMPANY_ID);
 
   const payload = { ...data, updated_by: userId };
-  const updated = await serviceTypeRepository.update(id, payload, existing.company_id);
+  const updated = await serviceTypeRepository.update(id, payload, GLOBAL_COMPANY_ID);
 
   logger.info('Service type updated', { serviceTypeId: id, userId });
 
@@ -175,7 +175,7 @@ const deleteServiceType = async (id, userId, authContext) => {
     throw err;
   }
 
-  await serviceTypeRepository.softDelete(id, userId, existing.company_id);
+  await serviceTypeRepository.softDelete(id, userId, GLOBAL_COMPANY_ID);
 
   logger.info('Service type soft-deleted', { serviceTypeId: id, userId });
 };

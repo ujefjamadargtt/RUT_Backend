@@ -91,7 +91,13 @@ test('entityIds resolves to the Companies under those Entities via a real Entity
 test('entityIds AND businessUnitIds together: intersected (Companies under the Entities, narrowed further to the requested BU ids)', async () => {
   const getCaptured = stubRepositoryCapture();
   try {
-    Company.findAll = async () => [{ id: 1 }, { id: 2 }, { id: 3 }];
+    Company.findAll = async ({ where }) => {
+      // BU-hierarchy expansion (parent_business_unit_id lookup) — no
+      // Sub-BUs configured in this scenario, distinct from the entity_id
+      // "Companies under this Entity" lookup below.
+      if (where && where.parent_business_unit_id) return [];
+      return [{ id: 1 }, { id: 2 }, { id: 3 }];
+    };
     await employeeService.getAll({ entityIds: '5', businessUnitIds: '2,999' }, AUTH_CONTEXT);
     // 999 isn't under entity 5's Companies ([1,2,3]) — dropped, never an error.
     assert.deepEqual(getCaptured().businessUnitId, [2]);

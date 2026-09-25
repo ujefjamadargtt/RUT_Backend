@@ -6,7 +6,7 @@ const { ServicePO, Timesheet } = require('../models');
 const { createAuditLog } = require('../middlewares/auditLog');
 const { generateSubProjectCode } = require('../helpers/codeGenerator');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
-const { intersectCompanyIdsWithEntity, intersectIds } = require('./companyAccessControlService');
+const { intersectCompanyIdsWithEntity, intersectIdsWithBuHierarchy } = require('./companyAccessControlService');
 const { parseIdList } = require('../utils/idListParser');
 const logger = require('../utils/logger');
 
@@ -30,7 +30,7 @@ const getAll = async (query = {}, companyId) => {
   // intersectIds()'s own doc comments.
   if (Array.isArray(companyId)) {
     companyId = await intersectCompanyIdsWithEntity(companyId, parseIdList(query.entityIds));
-    companyId = intersectIds(companyId, parseIdList(query.businessUnitIds));
+    companyId = await intersectIdsWithBuHierarchy(companyId, parseIdList(query.businessUnitIds));
   }
 
   const filters = {

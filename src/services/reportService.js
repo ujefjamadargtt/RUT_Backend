@@ -5,7 +5,7 @@ const serviceCategoryRepo = require('../repositories/serviceCategoryRepository')
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
 const logger = require('../utils/logger');
 const dateHelper = require('../helpers/dateHelper');
-const { resolveCentralisedOwnerCreatorIds, intersectCompanyIdsWithEntity, intersectIds } = require('./companyAccessControlService');
+const { resolveCentralisedOwnerCreatorIds, intersectCompanyIdsWithEntity, intersectIdsWithBuHierarchy } = require('./companyAccessControlService');
 const { parseIdList } = require('../utils/idListParser');
 
 /**
@@ -63,7 +63,7 @@ function parseCommonFilters(query) {
  */
 async function applyEntityBuFilters(companyIds, filters) {
   const scoped = await intersectCompanyIdsWithEntity(companyIds, filters.entityIds ?? filters.entityId);
-  return intersectIds(scoped, filters.businessUnitIds);
+  return intersectIdsWithBuHierarchy(scoped, filters.businessUnitIds);
 }
 
 /**
@@ -1031,7 +1031,7 @@ async function getResourseProjectUtilizationReport(query, companyIds) {
 
   const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
   companyIds = await intersectCompanyIdsWithEntity(companyIds, parseIdList(query.entityIds) ?? entityId);
-  companyIds = intersectIds(companyIds, parseIdList(query.businessUnitIds));
+  companyIds = await intersectIdsWithBuHierarchy(companyIds, parseIdList(query.businessUnitIds));
 
   const filters = {
     month,
@@ -1200,7 +1200,7 @@ async function getClientServicePOHoursReport(query, companyIds) {
 
   const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
   companyIds = await intersectCompanyIdsWithEntity(companyIds, parseIdList(query.entityIds) ?? entityId);
-  companyIds = intersectIds(companyIds, parseIdList(query.businessUnitIds));
+  companyIds = await intersectIdsWithBuHierarchy(companyIds, parseIdList(query.businessUnitIds));
 
   const filters = {
     companyIds,
@@ -1313,7 +1313,7 @@ async function getClientCostAnalytics(query, companyIds) {
   const hoursSource = query.hoursSource;
   const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
   companyIds = await intersectCompanyIdsWithEntity(companyIds, parseIdList(query.entityIds) ?? entityId);
-  companyIds = intersectIds(companyIds, parseIdList(query.businessUnitIds));
+  companyIds = await intersectIdsWithBuHierarchy(companyIds, parseIdList(query.businessUnitIds));
 
   const [hoursRows, costRows, categories, matrixRows] = await Promise.all([
     reportRepo.getClientCostAnalyticsHours({ companyIds, hoursSource }),
@@ -1402,7 +1402,7 @@ async function getClientWiseAnalyticsReport(query, companyIds) {
 
   const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
   companyIds = await intersectCompanyIdsWithEntity(companyIds, parseIdList(query.entityIds) ?? entityId);
-  companyIds = intersectIds(companyIds, parseIdList(query.businessUnitIds));
+  companyIds = await intersectIdsWithBuHierarchy(companyIds, parseIdList(query.businessUnitIds));
 
   const filters = {
     companyIds,
@@ -1498,7 +1498,7 @@ async function getMonthlyHoursTrend(query, companyIds) {
 
   const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
   companyIds = await intersectCompanyIdsWithEntity(companyIds, parseIdList(query.entityIds) ?? entityId);
-  companyIds = intersectIds(companyIds, parseIdList(query.businessUnitIds));
+  companyIds = await intersectIdsWithBuHierarchy(companyIds, parseIdList(query.businessUnitIds));
 
   const filters = {
     companyIds,
@@ -1609,7 +1609,7 @@ async function getEmployeeBenchPercentage(query, companyIds) {
 
   const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
   companyIds = await intersectCompanyIdsWithEntity(companyIds, parseIdList(query.entityIds) ?? entityId);
-  companyIds = intersectIds(companyIds, parseIdList(query.businessUnitIds));
+  companyIds = await intersectIdsWithBuHierarchy(companyIds, parseIdList(query.businessUnitIds));
 
   const filters = {
     companyIds,
@@ -1686,7 +1686,7 @@ async function getBudgetVsBilledReport(query, companyIds) {
 
   const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
   companyIds = await intersectCompanyIdsWithEntity(companyIds, parseIdList(query.entityIds) ?? entityId);
-  companyIds = intersectIds(companyIds, parseIdList(query.businessUnitIds));
+  companyIds = await intersectIdsWithBuHierarchy(companyIds, parseIdList(query.businessUnitIds));
 
   const filters = {
     companyIds,
@@ -1796,7 +1796,7 @@ async function getResourceUtilizationTrendReport(query, companyIds) {
 
   const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
   companyIds = await intersectCompanyIdsWithEntity(companyIds, parseIdList(query.entityIds) ?? entityId);
-  companyIds = intersectIds(companyIds, parseIdList(query.businessUnitIds));
+  companyIds = await intersectIdsWithBuHierarchy(companyIds, parseIdList(query.businessUnitIds));
 
   const filters = {
     companyIds,
@@ -1869,7 +1869,7 @@ async function getServicePOHoursBudgetReport(query, companyIds) {
 
   const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
   companyIds = await intersectCompanyIdsWithEntity(companyIds, parseIdList(query.entityIds) ?? entityId);
-  companyIds = intersectIds(companyIds, parseIdList(query.businessUnitIds));
+  companyIds = await intersectIdsWithBuHierarchy(companyIds, parseIdList(query.businessUnitIds));
 
   const filters = {
     companyIds,

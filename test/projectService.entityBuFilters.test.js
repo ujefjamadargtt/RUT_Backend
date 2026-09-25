@@ -108,7 +108,13 @@ test('entityIds narrows the companyId array via a real Entity->Company lookup', 
 test('entityIds and businessUnitIds compose: entity narrowing runs first, then businessUnitIds narrows further', async () => {
   const getCaptured = stubFilterCapture();
   try {
-    Company.findAll = async () => [{ id: 1 }, { id: 2 }];
+    Company.findAll = async ({ where }) => {
+      // BU-hierarchy expansion (parent_business_unit_id lookup) — no
+      // Sub-BUs configured in this scenario, distinct from the entity_id
+      // "Companies under this Entity" lookup below.
+      if (where && where.parent_business_unit_id) return [];
+      return [{ id: 1 }, { id: 2 }];
+    };
     await projectService.getAll({ entityIds: '5', businessUnitIds: '2' }, AUTH_CONTEXT);
     assert.deepEqual(getCaptured().companyId, [2]);
   } finally {
@@ -116,12 +122,17 @@ test('entityIds and businessUnitIds compose: entity narrowing runs first, then b
   }
 });
 
-test('a BU-scoped actor with a single already-selected companyId (not an array) is left untouched — nothing left to narrow', async () => {
+test('a BU-scoped actor with a single already-selected companyId (a childless, parent-less BU) expands to just itself — nothing left to narrow', async () => {
   const getCaptured = stubFilterCapture();
   try {
+    // BU Hierarchy / Sub-BU support — projectService.getAll() now expands a
+    // BU-scoped actor's companyId to its Parent+Sub-BU family
+    // (expandBusinessUnitIdsToFamily()), always returning an array; for a
+    // company with no parent and no children that's just [companyId] — the
+    // same single-BU scope as before, in array form.
     const singleBuAuthContext = { userId: 1, employeeId: 1, companyId: 5, hierarchyRank: 7, employeeBusinessUnits: [] };
     await projectService.getAll({ businessUnitIds: '5' }, singleBuAuthContext);
-    assert.equal(getCaptured().companyId, 5);
+    assert.deepEqual(getCaptured().companyId, [5]);
   } finally {
     restore();
   }

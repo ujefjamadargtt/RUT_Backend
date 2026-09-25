@@ -27,9 +27,9 @@ const ORIGINAL = {
   findByManager: managerEmployeeMappingRepository.findByManager,
   findByManagerAndEmployee: managerEmployeeMappingRepository.findByManagerAndEmployee,
   findAllByEmployee: employeeServicePOMappingRepository.findAllByEmployee,
+  findByServicePOs: employeeServicePOMappingRepository.findByServicePOs,
   findCentralisedIdsAmong: servicePORepository.findCentralisedIdsAmong,
   getActiveCentralisedPOIds: servicePORepository.getActiveCentralisedPOIds,
-  findDistinctEmployeeIdsByServicePOIds: employeeWorkLogRepository.findDistinctEmployeeIdsByServicePOIds,
   existsForEmployeeAndServicePOIds: employeeWorkLogRepository.existsForEmployeeAndServicePOIds,
   findById: employeeWorkLogRepository.findById,
   approveById: employeeWorkLogRepository.approveById,
@@ -45,9 +45,9 @@ function restore() {
   managerEmployeeMappingRepository.findByManager = ORIGINAL.findByManager;
   managerEmployeeMappingRepository.findByManagerAndEmployee = ORIGINAL.findByManagerAndEmployee;
   employeeServicePOMappingRepository.findAllByEmployee = ORIGINAL.findAllByEmployee;
+  employeeServicePOMappingRepository.findByServicePOs = ORIGINAL.findByServicePOs;
   servicePORepository.findCentralisedIdsAmong = ORIGINAL.findCentralisedIdsAmong;
   servicePORepository.getActiveCentralisedPOIds = ORIGINAL.getActiveCentralisedPOIds;
-  employeeWorkLogRepository.findDistinctEmployeeIdsByServicePOIds = ORIGINAL.findDistinctEmployeeIdsByServicePOIds;
   employeeWorkLogRepository.existsForEmployeeAndServicePOIds = ORIGINAL.existsForEmployeeAndServicePOIds;
   employeeWorkLogRepository.findById = ORIGINAL.findById;
   employeeWorkLogRepository.approveById = ORIGINAL.approveById;
@@ -62,8 +62,14 @@ function restore() {
 const PROJECT_MANAGER_RANK = 6;
 const TEAM_LEAD_RANK = 7;
 
-// PO1 -> employees A(101), B(102), C(103). PO2 -> employee A(101) only.
-const WORKLOG_BY_PO = {
+// PO1 -> employees A(101), B(102), C(103) actively MAPPED to it. PO2 ->
+// employee A(101) only. (Renamed from the pre-fix WORKLOG_BY_PO: "My
+// Employees" is now driven by employee_servicepo_mapping, not by whether the
+// employee has ever logged work — see the bug fix this file was updated
+// for. existsForEmployeeAndServicePOIds below is unrelated: it backs the
+// approve/reject actions, which legitimately require a real logged entry to
+// act on, and reuses this same fixture data for convenience.)
+const MAPPED_EMPLOYEES_BY_PO = {
   201: [101, 102, 103], // PO1
   202: [101],           // PO2
 };
@@ -79,17 +85,18 @@ function stubPMMapping(pmEmployeeId, servicePoIds) {
 }
 
 function stubWorkLogQueries() {
-  employeeWorkLogRepository.findDistinctEmployeeIdsByServicePOIds = async (poIds) => {
+  employeeServicePOMappingRepository.findByServicePOs = async (poIds, status) => {
+    assert.equal(status, 'active');
     const ids = new Set();
-    poIds.forEach((poId) => (WORKLOG_BY_PO[poId] || []).forEach((empId) => ids.add(empId)));
-    return [...ids];
+    poIds.forEach((poId) => (MAPPED_EMPLOYEES_BY_PO[poId] || []).forEach((empId) => ids.add(empId)));
+    return [...ids].map((employee_id) => ({ employee_id }));
   };
   employeeWorkLogRepository.existsForEmployeeAndServicePOIds = async (employeeId, poIds) => {
-    return poIds.some((poId) => (WORKLOG_BY_PO[poId] || []).includes(employeeId));
+    return poIds.some((poId) => (MAPPED_EMPLOYEES_BY_PO[poId] || []).includes(employeeId));
   };
 }
 
-test('getMyEmployees (Project Manager, one PO): returns every employee who logged work against that PO', async () => {
+test('getMyEmployees (Project Manager, one PO): returns every employee actively MAPPED to that PO, regardless of logged work', async () => {
   try {
     stubPMMapping(501, [201]);
     stubWorkLogQueries();
@@ -102,6 +109,38 @@ test('getMyEmployees (Project Manager, one PO): returns every employee who logge
 
     assert.deepEqual(employees.map((e) => e.id).sort(), [101, 102, 103]);
     assert.ok(employees.every((e) => e.mapping_type === null), 'mapping_type does not apply to Service-PO-based PM scope');
+  } finally {
+    restore();
+  }
+});
+
+// Regression test for a real bug: a newly-mapped Employee with ZERO
+// employee_work_logs rows must still appear immediately after POST
+// /my-team/employees(-equivalent Service PO mapping) succeeds. The prior
+// implementation derived this list from
+// employeeWorkLogRepository.findDistinctEmployeeIdsByServicePOIds (an
+// employee_work_logs query), which silently dropped any mapped employee who
+// had not yet logged any work. It must now come from the mapping table
+// (employee_servicepo_mapping) alone.
+test('getMyEmployees (Project Manager): a freshly-mapped employee with NO work log entries still appears', async () => {
+  try {
+    stubPMMapping(501, [201]);
+    // Employee 104 is actively MAPPED to PO 201 but has never logged any
+    // work — deliberately absent from MAPPED_EMPLOYEES_BY_PO/any work-log
+    // fixture, to prove this path never consults work logs at all.
+    employeeServicePOMappingRepository.findByServicePOs = async (poIds, status) => {
+      assert.deepEqual(poIds, [201]);
+      assert.equal(status, 'active');
+      return [{ employee_id: 104 }];
+    };
+    Employee.findAll = async ({ where }) => {
+      assert.deepEqual(where.id, [104]);
+      return where.id.map((id) => ({ id, employee_code: `EMP-${id}`, full_name: `Employee ${id}`, designation: 'x', status: 'active', businessUnits: [] }));
+    };
+
+    const employees = await managerSelfServiceService.getMyEmployees(501, [], PROJECT_MANAGER_RANK, null);
+
+    assert.deepEqual(employees.map((e) => e.id), [104]);
   } finally {
     restore();
   }
@@ -136,9 +175,10 @@ test('getMyEmployees (Project Manager): a Centralised PO (e.g. "Leaves") the PM 
       assert.deepEqual(ids.slice().sort((a, b) => a - b), [201, 999]);
       return [999];
     };
-    employeeWorkLogRepository.findDistinctEmployeeIdsByServicePOIds = async (poIds) => {
+    employeeServicePOMappingRepository.findByServicePOs = async (poIds, status) => {
+      assert.equal(status, 'active');
       assert.deepEqual(poIds, [201], 'the Centralised PO (999) must already be filtered out before this query runs');
-      return WORKLOG_BY_PO[201];
+      return MAPPED_EMPLOYEES_BY_PO[201].map((employee_id) => ({ employee_id }));
     };
     Employee.findAll = async ({ where }) => where.id.map((id) => ({ id, employee_code: `EMP-${id}`, full_name: `Employee ${id}`, designation: 'x', status: 'active', businessUnits: [] }));
 
@@ -227,7 +267,7 @@ test('approveTimesheet (Project Manager): CANNOT approve the same employee\'s en
 test('approveTimesheet (Project Manager): CAN approve a Centralised PO entry (e.g. Leaves) for an employee who genuinely has real project work under this PM', async () => {
   try {
     stubPMMapping(501, [201]); // PM's only real project is PO 201
-    stubWorkLogQueries(); // employee 101 has real work logged against PO 201 (WORKLOG_BY_PO)
+    stubWorkLogQueries(); // employee 101 has real work logged against PO 201 (MAPPED_EMPLOYEES_BY_PO)
     // findCentralisedIdsAmong is called once to filter the PM's own mapped
     // POs ([201], via getProjectManagerServicePOIds) and again for the
     // entry's own servicePoId ([999]) — behave like a real filter, not a
@@ -249,7 +289,7 @@ test('approveTimesheet (Project Manager): CAN approve a Centralised PO entry (e.
 test('approveTimesheet (Project Manager): CANNOT approve a Centralised PO entry (Leaves) for an employee who has no real project work under this PM — a stranger\'s Leave', async () => {
   try {
     stubPMMapping(501, [201]);
-    stubWorkLogQueries(); // employee 999 never appears under PO 201 in WORKLOG_BY_PO
+    stubWorkLogQueries(); // employee 999 never appears under PO 201 in MAPPED_EMPLOYEES_BY_PO
     servicePORepository.findCentralisedIdsAmong = async () => [999];
     employeeWorkLogRepository.findById = async (id) => ({ id, employee_id: 999, service_po_id: 999, status: 'pending' });
     let approveCalled = false;
@@ -342,7 +382,7 @@ test('bulkApproveTimesheets (Project Manager): rejected up front when the employ
     let repoCalled = false;
     employeeWorkLogRepository.approveByEmployeeAndDates = async () => { repoCalled = true; return { total_rows_approved: 0, buckets: [] }; };
 
-    // Employee 999 never appears in WORKLOG_BY_PO for PO1.
+    // Employee 999 never appears in MAPPED_EMPLOYEES_BY_PO for PO1.
     await assert.rejects(
       () => managerSelfServiceService.bulkApproveTimesheets(501, { employee_id: 999, dates: ['2026-08-01'] }, 10, 501, '127.0.0.1', PROJECT_MANAGER_RANK, []),
       (err) => {

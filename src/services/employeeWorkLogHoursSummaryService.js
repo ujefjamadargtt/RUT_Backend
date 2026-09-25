@@ -4,7 +4,7 @@ const { Op } = require('sequelize');
 const { Employee } = require('../models');
 const employeeRepository = require('../repositories/employeeRepository');
 const employeeAccessControlService = require('./employeeAccessControlService');
-const { intersectCompanyIdsWithEntity, intersectIds } = require('./companyAccessControlService');
+const { intersectCompanyIdsWithEntity, intersectIdsWithBuHierarchy } = require('./companyAccessControlService');
 const summaryRepository = require('../repositories/employeeWorkLogHoursSummaryRepository');
 const dateHelper = require('../helpers/dateHelper');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
@@ -28,8 +28,8 @@ const { parseIdList } = require('../utils/idListParser');
 async function applyEntityBuFilters(companyIds, query) {
   const entityId = query.entityId ? parseInt(query.entityId, 10) : undefined;
   let scoped = await intersectCompanyIdsWithEntity(companyIds, parseIdList(query.entity_ids) ?? entityId);
-  scoped = intersectIds(scoped, parseIdList(query.company_ids));
-  scoped = intersectIds(scoped, parseIdList(query.business_unit_ids));
+  scoped = await intersectIdsWithBuHierarchy(scoped, parseIdList(query.company_ids));
+  scoped = await intersectIdsWithBuHierarchy(scoped, parseIdList(query.business_unit_ids));
   return scoped;
 }
 

@@ -10,7 +10,7 @@ const assert = require('node:assert/strict');
 // property here is visible to the service's own calls. No mocking library
 // needed, consistent with this repo's plain node:test setup.
 const servicePOHierarchyRepository = require('../src/repositories/servicePOHierarchyRepository');
-const servicePORepository = require('../src/repositories/servicePORepository');
+const servicePOService = require('../src/services/servicePOService');
 const employeeWorkLogRepository = require('../src/repositories/employeeWorkLogRepository');
 const servicePOHierarchyService = require('../src/services/servicePOHierarchyService');
 
@@ -18,7 +18,7 @@ const ORIGINAL = {
   findById: servicePOHierarchyRepository.findById,
   findChildren: servicePOHierarchyRepository.findChildren,
   deleteByIds: servicePOHierarchyRepository.deleteByIds,
-  poFindById: servicePORepository.findById,
+  getAccessibleById: servicePOService.getAccessibleById,
   existsForHierarchyNodes: employeeWorkLogRepository.existsForHierarchyNodes,
 };
 
@@ -26,7 +26,7 @@ function restore() {
   servicePOHierarchyRepository.findById = ORIGINAL.findById;
   servicePOHierarchyRepository.findChildren = ORIGINAL.findChildren;
   servicePOHierarchyRepository.deleteByIds = ORIGINAL.deleteByIds;
-  servicePORepository.findById = ORIGINAL.poFindById;
+  servicePOService.getAccessibleById = ORIGINAL.getAccessibleById;
   employeeWorkLogRepository.existsForHierarchyNodes = ORIGINAL.existsForHierarchyNodes;
 }
 
@@ -49,7 +49,7 @@ const CHILDREN_OF = {
 const EXPECTED_MESSAGE = 'This hierarchy node cannot be deleted because work log entries exist.';
 
 function stubBase() {
-  servicePORepository.findById = async () => FAKE_PO;
+  servicePOService.getAccessibleById = async () => FAKE_PO;
   servicePOHierarchyRepository.findChildren = async (parentId) => CHILDREN_OF[parentId] || [];
   servicePOHierarchyRepository.deleteByIds = async () => {
     throw new Error('deleteByIds should NOT be called when a work log exists');

@@ -77,7 +77,7 @@ const update = async (id, data, userId, authContext) => {
   }
 
   if (data.name && data.name.trim().toLowerCase() !== existing.name.toLowerCase()) {
-    const conflict = await serviceCategoryRepository.findByName(data.name, existing.company_id);
+    const conflict = await serviceCategoryRepository.findByName(data.name, GLOBAL_COMPANY_ID);
     if (conflict) {
       const err = new Error(`Service category "${data.name}" already exists.`);
       err.statusCode = 409;
@@ -86,7 +86,7 @@ const update = async (id, data, userId, authContext) => {
   }
 
   const payload = { ...data, updated_by: userId };
-  const updated = await serviceCategoryRepository.update(id, payload, existing.company_id);
+  const updated = await serviceCategoryRepository.update(id, payload, GLOBAL_COMPANY_ID);
 
   logger.info('Service category updated', { categoryId: id, userId });
 
@@ -101,7 +101,7 @@ const deleteCategory = async (id, userId, authContext) => {
     throw err;
   }
 
-  await serviceCategoryRepository.softDelete(id, userId, existing.company_id);
+  await serviceCategoryRepository.softDelete(id, userId, GLOBAL_COMPANY_ID);
 
   logger.info('Service category soft-deleted', { categoryId: id, userId });
 };

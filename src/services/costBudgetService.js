@@ -3,7 +3,7 @@
 const costBudgetRepository = require('../repositories/costBudgetRepository');
 const servicePORepository = require('../repositories/servicePORepository');
 const companyAccessControlService = require('./companyAccessControlService');
-const { intersectCompanyIdsWithEntity, intersectIds } = companyAccessControlService;
+const { intersectCompanyIdsWithEntity, intersectIdsWithBuHierarchy } = companyAccessControlService;
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
 const { parseMonthString, toMonthString } = require('../helpers/monthPeriodHelper');
 const { parseIdList } = require('../utils/idListParser');
@@ -218,7 +218,7 @@ const list = async (query, req) => {
   // single-PO routes only, which stay on the plain `authenticate` chain.
   let scope = req.companyIds;
   scope = await intersectCompanyIdsWithEntity(scope, parseIdList(query.entityIds));
-  scope = intersectIds(scope, parseIdList(query.businessUnitIds));
+  scope = await intersectIdsWithBuHierarchy(scope, parseIdList(query.businessUnitIds));
 
   const filters = {};
   if (query.service_po_id !== undefined) filters.service_po_id = query.service_po_id;

@@ -48,6 +48,19 @@ module.exports = (sequelize) => {
         isIn: { args: [['active', 'inactive']], msg: 'Status must be active or inactive.' },
       },
     },
+    // BU Hierarchy / Sub-BU support — NULL means this Company is a
+    // Parent/Main BU; a non-NULL value means it's a Sub-BU of that parent.
+    // Capped at 2 levels (Parent BU -> Sub-BU) — enforced in
+    // companyService.js, not here. See database/migrations/
+    // 20260904_add_parent_business_unit_id_to_companies.sql.
+    parent_business_unit_id: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      references: {
+        model: 'companies',
+        key: 'id',
+      },
+    },
     is_deleted: {
       type: DataTypes.BOOLEAN,
       allowNull: false,

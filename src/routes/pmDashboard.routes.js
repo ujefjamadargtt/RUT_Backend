@@ -284,8 +284,8 @@ router.get('/action-required', authenticatePMDashboard, pmDashboardController.ge
  *       team, one full calendar year (Jan-Dec) at a time.
  *     description: >
  *       BU narrowing uses the SAME mechanism as every other endpoint in this
- *       module — the `company_id` query param or `X-Company-Id` header —
- *       there is no separate `buId` parameter. `required_hours` is a flat
+ *       module — the `company_id` query param / `X-Company-Id` header, or
+ *       the multi-select `businessUnitIds` (+ `buId=all`). `required_hours` is a flat
  *       current-team-headcount x 160h/employee/month figure applied to
  *       every month shown (see the response's own required_hours_note) —
  *       this schema has no historical team-roster data, so it cannot

@@ -181,6 +181,14 @@ const createServicePOSchema = Joi.object({
  * PUT /service-pos/:id — Update Service PO
  */
 const updateServicePOSchema = Joi.object({
+  // Moving a Service PO to another Business Unit. Was missing here entirely,
+  // so validateRequest's stripUnknown silently dropped it and PUT returned
+  // 200 with the old company_id. The target BU is authorized in
+  // servicePOService.update() via resolveCreateCompanyIdForActor().
+  company_id: Joi.number().integer().positive().optional().messages({
+    'number.base': 'Business Unit (company_id) must be a number.',
+  }),
+
   service_po_code: Joi.string()
     .trim()
     .uppercase()

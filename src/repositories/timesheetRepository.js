@@ -640,7 +640,7 @@ const getImportIdsByMonth = async (month, year, transaction = null, companyId) =
         literal(`EXTRACT(YEAR  FROM timesheet_date) = ${parseInt(year, 10)}`),
         { timesheet_import_id: { [Op.not]: null } },
       ],
-      company_id: companyId,
+      ...companyScope(companyId),
     },
     group: ['timesheet_import_id'],
     raw: true,
@@ -670,7 +670,7 @@ const deleteByMonth = async (month, year, transaction = null, companyId) => {
         literal(`EXTRACT(MONTH FROM timesheet_date) = ${parseInt(month, 10)}`),
         literal(`EXTRACT(YEAR  FROM timesheet_date) = ${parseInt(year, 10)}`),
       ],
-      company_id: companyId,
+      ...companyScope(companyId),
     },
     ...(transaction ? { transaction } : {}),
   });

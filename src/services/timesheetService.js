@@ -8,6 +8,7 @@ const { Op } = require('sequelize');
 const { Employee, ServicePO, ServiceType, SubProject, Company, EmployeeServicePOMapping, sequelize } = require('../models');
 const timesheetRepository = require('../repositories/timesheetRepository');
 const timesheetImportRepository = require('../repositories/timesheetImportRepository');
+const companyRepository = require('../repositories/companyRepository');
 const { createAuditLog } = require('../middlewares/auditLog');
 const logger = require('../utils/logger');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
@@ -15,7 +16,7 @@ const dateHelper = require('../helpers/dateHelper');
 const { applyHoursVisibility } = require('../utils/hoursVisibility');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
 const timesheetPublishPolicy = require('../utils/timesheetPublishPolicy');
-const { intersectCompanyIdsWithEntity, intersectIds } = require('./companyAccessControlService');
+const { intersectCompanyIdsWithEntity, intersectIdsWithBuHierarchy } = require('./companyAccessControlService');
 const { parseIdList } = require('../utils/idListParser');
 
 /**
@@ -767,6 +768,11 @@ function mergeDuplicateRows(validRows) {
  *  6. Sub-project (if provided) exists and belongs to the resolved PO
  *  7. No duplicate entry exists in the timesheets table
  *
+ * BU Hierarchy / Sub-BU support: Sync/Import now runs strictly per-Business-
+ * Unit — a BU with Sub-BUs is rejected before this is ever reached (see
+ * timesheetService.previewPmsImport()), so `companyId` here is always a
+ * single, genuinely childless BU. No hierarchy expansion needed.
+ *
  * @param {object[]} rows - Output from parseFile()
  * @param {number} companyId
  * @returns {Promise<{ validRows: object[], errorRows: object[] }>}
@@ -1100,6 +1106,12 @@ const MONTH_ABBREVIATIONS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'A
  * this same period), runImportPreview() UPDATES that same row instead of
  * creating a new one — Sync behaves as an overwrite, not an append.
  *
+ * BU Hierarchy / Sub-BU support: a Business Unit that currently has Sub-BUs
+ * cannot be synced directly — the caller must sync each Sub-BU individually
+ * (rejected below with a 400). A Business Unit with no Sub-BUs (the common
+ * case, and every BU before this feature existed) keeps the existing
+ * single-company sync behavior completely unchanged.
+ *
  * @param {number} month
  * @param {number} year
  * @param {number} userId
@@ -1108,6 +1120,12 @@ const MONTH_ABBREVIATIONS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'A
  */
 const previewPmsImport = async (month, year, userId, companyId) => {
   logger.info('Employee Work Log sync preview started', { userId, month, year, companyId });
+
+  if (await companyRepository.hasChildren(companyId)) {
+    const err = new Error('This Business Unit has Sub-BUs — select the specific Sub-BU to sync instead.');
+    err.statusCode = 400;
+    throw err;
+  }
 
   const workLogs = await employeeWorkLogRepository.findForSync(companyId, month, year);
   const parsedRows = mapWorkLogsToImportRows(workLogs);
@@ -1277,6 +1295,16 @@ const confirmImport = async (importId, userId, ipAddress = null, companyId) => {
       'This import has no valid rows. Nothing to insert.'
     );
     err.statusCode = 422;
+    throw err;
+  }
+
+  // BU Hierarchy / Sub-BU support — same guard as previewPmsImport(): a
+  // 'pms'-source import can only exist for a childless Business Unit (that
+  // flow rejects it up front), but re-check here too in case a Sub-BU got
+  // configured under this BU AFTER the import was first created.
+  if (importRecord.source === 'pms' && await companyRepository.hasChildren(companyId)) {
+    const err = new Error('This Business Unit has Sub-BUs — select the specific Sub-BU to sync instead.');
+    err.statusCode = 400;
     throw err;
   }
 
@@ -1506,7 +1534,7 @@ const getImportHistory = async (query = {}, companyId) => {
   // the endpoint returned an identical total with or without it.
   if (Array.isArray(companyId)) {
     companyId = await intersectCompanyIdsWithEntity(companyId, parseIdList(query.entityIds));
-    companyId = intersectIds(companyId, parseIdList(query.businessUnitIds));
+    companyId = await intersectIdsWithBuHierarchy(companyId, parseIdList(query.businessUnitIds));
   }
 
   const month = query.month ? parseInt(query.month, 10) : undefined;
@@ -2237,7 +2265,7 @@ const getAllTimesheets = async (query = {}, companyId) => {
   // this route is on authenticateReadMultiBU). Never widens access.
   if (Array.isArray(companyId)) {
     companyId = await intersectCompanyIdsWithEntity(companyId, parseIdList(query.entityIds));
-    companyId = intersectIds(companyId, parseIdList(query.businessUnitIds));
+    companyId = await intersectIdsWithBuHierarchy(companyId, parseIdList(query.businessUnitIds));
   }
 
   const { rows, count } = await timesheetRepository.findAll(

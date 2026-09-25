@@ -8,7 +8,7 @@ const complianceRepository = require('../repositories/employeeWorkLogComplianceR
 const dateHelper = require('../helpers/dateHelper');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
 const emailLogService = require('./emailLogService');
-const { intersectCompanyIdsWithEntity, intersectIds } = require('./companyAccessControlService');
+const { intersectCompanyIdsWithEntity, intersectIdsWithBuHierarchy } = require('./companyAccessControlService');
 const { parseIdList } = require('../utils/idListParser');
 const {
   buildWorkLogComplianceReminderSubject,
@@ -171,7 +171,7 @@ async function getReport(query, authContext, companyIds) {
   // companyIds reach; never widen it). company_id previously had no effect
   // at all here despite being documented — this also fixes that.
   let scopedCompanyIds = await intersectCompanyIdsWithEntity(companyIds, parseIdList(query.entityIds));
-  scopedCompanyIds = intersectIds(scopedCompanyIds, parseIdList(query.businessUnitIds));
+  scopedCompanyIds = await intersectIdsWithBuHierarchy(scopedCompanyIds, parseIdList(query.businessUnitIds));
   if (query.company_id) {
     if (!scopedCompanyIds.includes(query.company_id)) {
       throw forbiddenError('Access denied: the selected Business Unit is not within your authorised scope.');
@@ -376,7 +376,7 @@ async function sendBulkReminder(body, authContext, companyIds) {
   let effectiveCompanyIds = companyIds;
   const requestedCompanyIds = parseIdList(body.company_ids);
   if (requestedCompanyIds) {
-    effectiveCompanyIds = intersectIds(companyIds, requestedCompanyIds);
+    effectiveCompanyIds = await intersectIdsWithBuHierarchy(companyIds, requestedCompanyIds);
   } else if (body.company_id) {
     if (!companyIds.includes(body.company_id)) {
       throw forbiddenError(

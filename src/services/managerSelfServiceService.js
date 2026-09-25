@@ -80,15 +80,22 @@ const getMyEmployees = async (managerUserId, companyIds, hierarchyRank, explicit
 
   if (isProjectManagerTier) {
     // Project Manager "My Employees" is Service-PO-based, not
-    // manager_employee_mappings-based: every Employee who has logged work
-    // against a Service PO this Project Manager is mapped to, via the
-    // EXISTING employee_servicepo_mapping table (see
-    // employeeServicePOMappingService.getProjectManagerServicePOIds — no
-    // new PM<->PO table). mapping_type stays null for these employees
+    // manager_employee_mappings-based: every Employee actively MAPPED
+    // (employee_servicepo_mapping, status = active) to a Service PO this
+    // Project Manager is mapped to, via the EXISTING employee_servicepo_mapping
+    // table (see employeeServicePOMappingService.getProjectManagerServicePOIds
+    // — no new PM<->PO table). mapping_type stays null for these employees
     // below (mappings is left empty) since that concept doesn't apply here.
+    //
+    // Deliberately driven by the mapping table alone, NOT by
+    // employee_work_logs existence — a newly-mapped Employee who has not
+    // logged any work yet must still appear here immediately (they have to,
+    // to even be assignable a Service PO / show up for Timesheet Approval
+    // before their first entry exists).
     const poIds = await employeeServicePOMappingService.getProjectManagerServicePOIds(managerUserId);
     if (poIds.length === 0) return [];
-    const employeeIds = await employeeWorkLogRepository.findDistinctEmployeeIdsByServicePOIds(poIds);
+    const mappedRows = await employeeServicePOMappingRepository.findByServicePOs(poIds, 'active');
+    const employeeIds = [...new Set(mappedRows.map((row) => row.employee_id))];
     if (employeeIds.length === 0) return [];
     employeeWhere = { id: employeeIds };
   } else if (!isAdminOrBuAdminTier) {

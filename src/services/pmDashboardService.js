@@ -513,9 +513,10 @@ async function getActionRequired(query, authContext, companyIds) {
  * on the team then — flagged here and in the route's own swagger doc.
  *
  * BU narrowing uses the SAME mechanism as every other endpoint in this
- * module — the `company_id` query param or `X-Company-Id` header, resolved
- * by resolveReportCompanyScope into `companyIds` before this function ever
- * runs. There is no separate `buId` parameter.
+ * module — the `company_id` query param / `X-Company-Id` header, or the
+ * multi-select `businessUnitIds` (+ `buId=all`) — all resolved into
+ * `companyIds` by pmDashboardController.resolvePMDashboardCompanyIds()
+ * before this function ever runs.
  *
  * @param {object} query - { year }
  * @param {object} authContext

@@ -5,6 +5,7 @@ const { sequelize, Role, Company } = require('../models');
 const employeeRepository = require('../repositories/employeeRepository');
 const employeeRoleRepository = require('../repositories/employeeRoleRepository');
 const employeeBusinessUnitRepository = require('../repositories/employeeBusinessUnitRepository');
+const companyRepository = require('../repositories/companyRepository');
 const managerEmployeeMappingRepository = require('../repositories/managerEmployeeMappingRepository');
 const employeeServicePOMappingService = require('./employeeServicePOMappingService');
 const servicePORepository = require('../repositories/servicePORepository');
@@ -198,7 +199,15 @@ async function attachRoleAndBusinessUnitInfo(employees) {
   const businessUnitsByEmployee = new Map();
   buGrants.forEach((grant) => {
     if (!businessUnitsByEmployee.has(grant.employee_id)) businessUnitsByEmployee.set(grant.employee_id, []);
-    businessUnitsByEmployee.get(grant.employee_id).push({ id: grant.id, name: grant.name });
+    // BU Hierarchy — parent_business_unit_id/parent_business_unit_name (null
+    // for a Parent BU) let the Employee Master screens render "Technology ->
+    // Development" without a second round trip.
+    businessUnitsByEmployee.get(grant.employee_id).push({
+      id: grant.id,
+      name: grant.name,
+      parent_business_unit_id: grant.parent_business_unit_id,
+      parent_business_unit_name: grant.parent_business_unit_name,
+    });
   });
 
   return employees.map((employee) => {
@@ -231,7 +240,12 @@ async function attachBusinessUnitInfo(employees) {
   const businessUnitsByEmployee = new Map();
   grants.forEach((grant) => {
     if (!businessUnitsByEmployee.has(grant.employee_id)) businessUnitsByEmployee.set(grant.employee_id, []);
-    businessUnitsByEmployee.get(grant.employee_id).push({ id: grant.id, name: grant.name });
+    businessUnitsByEmployee.get(grant.employee_id).push({
+      id: grant.id,
+      name: grant.name,
+      parent_business_unit_id: grant.parent_business_unit_id,
+      parent_business_unit_name: grant.parent_business_unit_name,
+    });
   });
 
   return employees.map((employee) => {
@@ -342,7 +356,14 @@ const getAll = async (query = {}, authContext) => {
   const requestedEntityIds = parseIdList(query.entityIds);
   const requestedBusinessUnitIds = parseIdList(query.businessUnitIds);
   if (requestedEntityIds || requestedBusinessUnitIds) {
-    let multiBusinessUnitIds = requestedBusinessUnitIds || null;
+    // BU Hierarchy / Sub-BU support — a requested Parent BU also pulls in
+    // its Sub-BUs (same "select parent -> parent + children" rule every
+    // other BU filter follows); a Sub-BU or childless BU id expands to
+    // itself unchanged. Expanded BEFORE the entityIds intersection below so
+    // a Sub-BU under a requested Entity is never dropped by it.
+    let multiBusinessUnitIds = requestedBusinessUnitIds
+      ? await companyAccessControlService.expandBusinessUnitIdsWithDescendants(requestedBusinessUnitIds)
+      : null;
     if (requestedEntityIds) {
       const companiesUnderEntities = await Company.findAll({
         where: { entity_id: { [Op.in]: requestedEntityIds }, is_deleted: false },
@@ -354,6 +375,13 @@ const getAll = async (query = {}, authContext) => {
         : entityCompanyIds;
     }
     businessUnitId = multiBusinessUnitIds;
+  } else if (businessUnitId != null) {
+    // Legacy single-value business_unit_id — also hierarchy-aware, so
+    // filtering by a Parent BU still surfaces its Sub-BUs' employees. Stays
+    // a plain scalar (unchanged type) when it has no Sub-BUs — the common
+    // case, and what every existing caller of this filter still expects.
+    const expanded = await companyAccessControlService.expandBusinessUnitIdsWithDescendants([businessUnitId]);
+    businessUnitId = expanded.length > 1 ? expanded : businessUnitId;
   }
 
   // Role list-filter (the "Role" dropdown on the Employee Master filter
@@ -508,7 +536,7 @@ const getMappings = async (id, authContext) => {
  *
  * @param {number} id
  * @param {object} authContext - { userId, employeeId, companyId, hierarchyRank, roleNames }
- * @returns {Promise<{ employee_id: number, businessUnits: {id: number, name: string, is_original_data_visible: boolean, saturday_off_rule: string, source: string}[] }>}
+ * @returns {Promise<{ employee_id: number, businessUnits: {id: number, name: string, is_original_data_visible: boolean, saturday_off_rule: string, source: string, parent_business_unit_id: number|null, parent_business_unit_name: string|null}[] }>}
  */
 const getBusinessUnits = async (id, authContext) => {
   // Self-lookup ("my own mapped BUs") is unconditionally allowed — no
@@ -537,6 +565,11 @@ const getBusinessUnits = async (id, authContext) => {
       is_original_data_visible: !!bu.is_original_data_visible,
       saturday_off_rule: bu.saturday_off_rule,
       source: 'mapped',
+      // BU Hierarchy — null for a Parent BU (or a legacy BU with no
+      // hierarchy configured), so the BU switcher can render "Technology ->
+      // Development" for a Sub-BU without a second round trip.
+      parent_business_unit_id: bu.parent_business_unit_id ?? null,
+      parent_business_unit_name: bu.parent ? bu.parent.company_name : null,
     }])
   );
 
@@ -615,11 +648,23 @@ async function assertValidRoles(roleIds) {
  * Validate every requested Business Unit: must exist, be an active,
  * non-deleted Company. `companyId` (the actor's own home BU) is
  * auto-injected if the caller supplied one and it isn't already in the
- * list. Business Unit assignment is OPTIONAL at Employee create/update
- * time — BU mapping is done separately (a dedicated mapping flow, not the
- * Employee form) — so an empty/omitted `businessUnitIds` with no
- * `companyId` to fall back to simply resolves to no BUs at all, rather
- * than failing the request.
+ * list — UNLESS it currently has Sub-BUs (see the BU Hierarchy rule below),
+ * in which case it's silently skipped rather than injecting an id that
+ * would fail that same rule; the caller never explicitly chose it, so this
+ * degrades to "no default BU" instead of erroring on a convenience default.
+ * Business Unit assignment is OPTIONAL at Employee create/update time — BU
+ * mapping is done separately (a dedicated mapping flow, not the Employee
+ * form) — so an empty/omitted `businessUnitIds` with no `companyId` to fall
+ * back to simply resolves to no BUs at all, rather than failing the request.
+ *
+ * BU Hierarchy / Sub-BU support: a Business Unit that currently has Sub-BUs
+ * can't be mapped ALONE — mapping "must map BU + Sub-BU," i.e. the caller
+ * must also pick at least one of its Sub-BUs. Parent and Sub-BU are then
+ * BOTH kept: a Sub-BU is part of its Parent (like a department), not a
+ * separate BU, so picking a Sub-BU never unmaps the Parent. This only guards
+ * NEW writes (every id explicitly passed here); an Employee already mapped
+ * to a Business Unit that has Sub-BUs TODAY is left untouched unless that
+ * id is resubmitted without any of its Sub-BUs.
  *
  * Ownership check: every id, after the exists-and-active check, must also
  * fall within the caller's own permitted scope (`ownedScope` — either a
@@ -650,11 +695,14 @@ async function assertValidRoles(roleIds) {
  * @param {number|number[]} ownedScope
  * @returns {number|number[]}
  */
-function resolveBUAssignmentScope(authContext, ownedScope) {
+async function resolveBUAssignmentScope(authContext, ownedScope) {
   if (authContext.companyId != null) {
     const mappedIds = authContext.employeeBusinessUnits || [];
     if (mappedIds.length > 0) {
-      return mappedIds;
+      // BU Hierarchy — a Sub-BU is part of its Parent BU (like a
+      // department), so an actor mapped to the Parent may also assign any of
+      // its Sub-BUs, same reach resolveReportCompanyScope already gives them.
+      return companyAccessControlService.expandBusinessUnitIdsWithDescendants(mappedIds);
     }
   }
   return ownedScope;
@@ -663,7 +711,10 @@ function resolveBUAssignmentScope(authContext, ownedScope) {
 async function resolveBusinessUnitIds(businessUnitIds, companyId, ownedScope) {
   const ids = [...new Set(businessUnitIds && businessUnitIds.length > 0 ? businessUnitIds : [])];
   if (companyId && !ids.includes(companyId)) {
-    ids.push(companyId);
+    const homeHasChildren = await companyRepository.hasChildren(companyId);
+    if (!homeHasChildren) {
+      ids.push(companyId);
+    }
   }
   if (ids.length === 0) {
     return ids;
@@ -676,13 +727,51 @@ async function resolveBusinessUnitIds(businessUnitIds, companyId, ownedScope) {
     throw notFoundError(`Business Unit(s) not found: ${missing.join(', ')}.`);
   }
 
+  // BU Hierarchy / Sub-BU support — "map BU + Sub-BU, compulsory": a
+  // Business Unit that currently has Sub-BUs is never a valid standalone
+  // Employee assignment; the caller must also pick at least one of its
+  // Sub-BUs. When a Sub-BU IS picked, the Parent is KEPT alongside it — a
+  // Sub-BU is part of its Parent (like a department), not a separate BU, so
+  // mapping the Sub-BU must never unmap the Parent. Only a GENUINELY bare
+  // parent (no child of it present at all) is an error.
+  const parentIdsWithChildren = await companyRepository.findIdsWithChildren(ids);
+  const effectiveIds = ids;
+  if (parentIdsWithChildren.length > 0) {
+    const childRows = await Company.findAll({
+      where: { parent_business_unit_id: { [Op.in]: parentIdsWithChildren }, is_deleted: false },
+      attributes: ['id', 'parent_business_unit_id'],
+    });
+    const childIdsByParent = new Map();
+    childRows.forEach((c) => {
+      if (!childIdsByParent.has(c.parent_business_unit_id)) childIdsByParent.set(c.parent_business_unit_id, []);
+      childIdsByParent.get(c.parent_business_unit_id).push(c.id);
+    });
+
+    const requestedSet = new Set(ids);
+    const bareParentIds = parentIdsWithChildren.filter((parentId) => {
+      const children = childIdsByParent.get(parentId) || [];
+      return !children.some((childId) => requestedSet.has(childId));
+    });
+
+    if (bareParentIds.length > 0) {
+      const names = companies
+        .filter((c) => bareParentIds.includes(c.id))
+        .map((c) => c.company_name);
+      throw badRequestError(
+        `Business Unit(s) ${names.join(', ')} have Sub-BUs — map the Employee to the specific Sub-BU(s) instead.`
+      );
+    }
+  }
+
+  // Ownership: every id written (Parent included) must be within the
+  // caller's own assignable scope.
   const allowedIds = Array.isArray(ownedScope) ? new Set(ownedScope) : null;
-  const disallowed = ids.filter((id) => (allowedIds ? !allowedIds.has(id) : id !== ownedScope));
+  const disallowed = effectiveIds.filter((id) => (allowedIds ? !allowedIds.has(id) : id !== ownedScope));
   if (disallowed.length > 0) {
     throw forbiddenError(`Business Unit(s) not one of your own: ${disallowed.join(', ')}.`);
   }
 
-  return ids;
+  return effectiveIds;
 }
 
 /**
@@ -757,7 +846,7 @@ const create = async (data, userId, ipAddress = null, authContext) => {
   const resolvedRoleIds = await resolveDefaultRoleIds(roleIds);
   const resolvedRoles = await assertValidRoles(resolvedRoleIds);
   const resolvedBusinessUnitIds = await resolveBusinessUnitIds(
-    businessUnitIds, companyId, resolveBUAssignmentScope(authContext, ownedScope)
+    businessUnitIds, companyId, await resolveBUAssignmentScope(authContext, ownedScope)
   );
 
   // Admin holds no timesheet of its own to approve — never held-back
@@ -933,7 +1022,7 @@ const update = async (id, data, userId, ipAddress = null, authContext) => {
   // this Employee already belongs to. Widened further for a multi-BU
   // BU-scoped actor via resolveBUAssignmentScope() — see its doc comment.
   const resolvedBusinessUnitIds = businessUnitIds !== undefined
-    ? await resolveBusinessUnitIds(businessUnitIds, companyId, resolveBUAssignmentScope(authContext, ownedScope))
+    ? await resolveBusinessUnitIds(businessUnitIds, companyId, await resolveBUAssignmentScope(authContext, ownedScope))
     : null;
 
   if (primaryManagerEmployeeId) {

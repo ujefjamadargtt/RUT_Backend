@@ -366,12 +366,15 @@ const create = async (data, options) => {
  *
  * @param {number} id
  * @param {object} data
+ * @param {number|number[]} companyId - the PO's CURRENT company_id (WHERE scope)
+ * @param {object} [options] - Sequelize options, e.g. { transaction }
  * @returns {Promise<ServicePO|null>}
  */
-const update = async (id, data, companyId) => {
+const update = async (id, data, companyId, options) => {
   const [affectedRows, [updated]] = await ServicePO.update(data, {
     where: { id, ...companyScope(companyId) },
     returning: true,
+    ...options,
   });
 
   if (affectedRows === 0) {

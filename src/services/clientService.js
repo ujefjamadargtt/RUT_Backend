@@ -31,7 +31,7 @@ const logger = require('../utils/logger');
  * created_by = them`).
  */
 
-const { resolveActorRecordAccessScope, resolveOptionalCreateCompanyId, resolveActorFullReach, intersectCompanyIdsWithEntity, intersectIds } = companyAccessControlService;
+const { resolveActorRecordAccessScope, resolveOptionalCreateCompanyId, resolveActorFullReach, intersectCompanyIdsWithEntity, intersectIdsWithBuHierarchy, expandBusinessUnitIdsToFamily, resolveCreateCompanyIdForActor } = companyAccessControlService;
 
 /**
  * Retrieve a paginated list of clients with optional filters.
@@ -43,6 +43,22 @@ const { resolveActorRecordAccessScope, resolveOptionalCreateCompanyId, resolveAc
 const getAll = async (query = {}, authContext) => {
   const { page, limit, offset } = getPaginationParams(query);
   let companyId = await resolveActorRecordAccessScope(authContext);
+
+  // BU Hierarchy / Sub-BU support — a BU-scoped actor's own single active
+  // BU is expanded to its whole Parent + Sub-BU family (see
+  // expandBusinessUnitIdsToFamily()'s doc comment), so the Client dropdown
+  // used by Project/Service PO creation — and this same Client Master list —
+  // surfaces a shared Client that still lives at the Parent level (e.g.
+  // created before Sub-BUs existed) even while working under one specific
+  // Sub-BU. Matches what creating a record under that Sub-BU already allows
+  // (resolveCreateCompanyIdForActor's own identical family expansion) — a
+  // dropdown that couldn't show an option the backend would otherwise
+  // accept would be worse than not offering the option at all. A no-op for
+  // a company-less actor (companyId is an object/array there, not a plain
+  // number) and for a childless, parent-less BU (expands to itself only).
+  if (typeof companyId === 'number') {
+    companyId = await expandBusinessUnitIdsToFamily([companyId]);
+  }
 
   // Optional entityIds/businessUnitIds multi-select narrowing. Handles BOTH
   // shapes resolveActorRecordAccessScope() can return: a plain array (most
@@ -58,7 +74,7 @@ const getAll = async (query = {}, authContext) => {
   if (entityIds || businessUnitIds) {
     let scopeArray = Array.isArray(companyId) ? companyId : companyId.ownedCompanyIds;
     scopeArray = await intersectCompanyIdsWithEntity(scopeArray, entityIds);
-    scopeArray = intersectIds(scopeArray, businessUnitIds);
+    scopeArray = await intersectIdsWithBuHierarchy(scopeArray, businessUnitIds);
     companyId = scopeArray;
   }
 
@@ -127,36 +143,17 @@ const getById = async (id, authContext) => {
 const create = async (data, userId, req) => {
   const { company_id: bodyCompanyId, ...clientFields } = data;
 
-  let companyId;
-
-  if (req.companyId != null) {
-    // BU-scoped actor (BU Admin and below) — req.companyId is set by
-    // resolveCompany.js from the X-Company-Id header (the "active" BU).
-    // If the body carries an explicit company_id that belongs to this actor's
-    // mapped BUs, honour it — a multi-BU BU Admin selecting a specific BU
-    // from a dropdown should create the client there, not in whichever BU
-    // happens to be in the header.
-    if (bodyCompanyId != null && bodyCompanyId !== req.companyId) {
-      const mappedBuIds = (req.employeeBusinessUnits || []).map((bu) => bu.id);
-      if (mappedBuIds.includes(bodyCompanyId)) {
-        companyId = bodyCompanyId;
-      } else {
-        const err = new Error(`Business Unit #${bodyCompanyId} is not one of your mapped Business Units.`);
-        err.statusCode = 403;
-        throw err;
-      }
-    } else {
-      companyId = req.companyId;
-    }
-  } else {
-    // Company-less actor (Admin/Entity Admin) — BU assignment is optional.
-    // Use explicit body company_id if given (validated against owned companies),
-    // otherwise create BU-less (company_id = NULL).
-    companyId = await resolveOptionalCreateCompanyId(
-      { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId },
-      bodyCompanyId != null ? bodyCompanyId : null
-    );
-  }
+  // Unified BU resolution (resolveCreateCompanyIdForActor) — was previously
+  // a hand-copied inline duplicate of this exact logic that never received
+  // the BU Hierarchy / Sub-BU family-expansion fix applied to the shared
+  // function (a BU Admin mapped to only one Sub-BU could create a Client
+  // there, but not under a sibling Sub-BU their BU Admin role also covers).
+  // required: false — a company-less actor (Admin/Entity Admin) may still
+  // create a Client with no Business Unit assigned yet (company_id = NULL).
+  const companyId = await resolveCreateCompanyIdForActor(req, bodyCompanyId ?? null, {
+    required: false,
+    resourceLabel: 'a Client',
+  });
 
   // Reject a duplicate client_name up front (case-insensitive, scoped to
   // this company) — client_code uniqueness alone doesn't stop the same
@@ -261,7 +258,13 @@ const update = async (id, data, userId, req) => {
   let targetCompanyId = existing.company_id;
   if (bodyCompanyId != null && bodyCompanyId !== existing.company_id) {
     if (req.companyId != null) {
-      const mappedBuIds = (req.employeeBusinessUnits || []).map((bu) => bu.id);
+      // BU Hierarchy / Sub-BU support — expanded to the actor's whole
+      // Parent + Sub-BU family (see expandBusinessUnitIdsToFamily()'s doc
+      // comment), same as resolveCreateCompanyIdForActor()/create() above:
+      // a BU Admin mapped to only one Sub-BU may still reassign a Client to
+      // any of its siblings, not just their own literal mapping.
+      const rawMappedIds = (req.employeeBusinessUnits || []).map((bu) => bu.id);
+      const mappedBuIds = await expandBusinessUnitIdsToFamily(rawMappedIds);
       if (!mappedBuIds.includes(bodyCompanyId)) {
         const err = new Error(`Business Unit #${bodyCompanyId} is not one of your mapped Business Units.`);
         err.statusCode = 403;

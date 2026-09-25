@@ -27,6 +27,7 @@ const ORIGINAL = {
   poFindById: servicePORepository.findById,
   getEligibleForMapping: servicePORepository.getEligibleForMapping,
   mappingFindById: employeeServicePOMappingRepository.findById,
+  mappingFindByIdUnscoped: employeeServicePOMappingRepository.findByIdUnscoped,
   findByEmployeeAndPO: employeeServicePOMappingRepository.findByEmployeeAndPO,
   create: employeeServicePOMappingRepository.create,
   updateProjectManagerFlag: employeeServicePOMappingRepository.updateProjectManagerFlag,
@@ -45,6 +46,7 @@ function restore() {
   servicePORepository.findById = ORIGINAL.poFindById;
   servicePORepository.getEligibleForMapping = ORIGINAL.getEligibleForMapping;
   employeeServicePOMappingRepository.findById = ORIGINAL.mappingFindById;
+  employeeServicePOMappingRepository.findByIdUnscoped = ORIGINAL.mappingFindByIdUnscoped;
   employeeServicePOMappingRepository.findByEmployeeAndPO = ORIGINAL.findByEmployeeAndPO;
   employeeServicePOMappingRepository.create = ORIGINAL.create;
   employeeServicePOMappingRepository.updateProjectManagerFlag = ORIGINAL.updateProjectManagerFlag;
@@ -141,24 +143,27 @@ test('Test 4 — assign(): the Project Manager ROLE alone is never sufficient �
 
 test('Test 5 — setMappingProjectManagerFlag(): false -> true succeeds when the mapping\'s employee holds the Project Manager role', async () => {
   try {
-    employeeServicePOMappingRepository.findById = async (id, companyId) => {
+    let captured;
+    employeeServicePOMappingRepository.findByIdUnscoped = async (id) => {
       assert.equal(id, 55);
+      return {
+        id: 55, employee_id: 101, service_po_id: 401, is_project_manager: false,
+        async update(values) { captured = values; return { id: 55, ...values }; },
+      };
+    };
+    servicePORepository.findById = async (poId, companyId) => {
+      assert.equal(poId, 401);
       assert.equal(companyId, 10);
-      return { id: 55, employee_id: 101, service_po_id: 401, is_project_manager: false };
+      return { id: 401, company_id: 10, is_centralised: false };
     };
     employeeRoleRepository.findRolesByEmployeeId = async (employeeId) => {
       assert.equal(employeeId, 101);
       return [{ role_name: 'Project Manager' }];
     };
-    let captured;
-    employeeServicePOMappingRepository.updateProjectManagerFlag = async (id, isProjectManager, userId, companyId) => {
-      captured = { id, isProjectManager, userId, companyId };
-      return { id, is_project_manager: isProjectManager };
-    };
 
     const result = await employeeServicePOMappingService.setMappingProjectManagerFlag(55, true, 1, 10);
 
-    assert.deepEqual(captured, { id: 55, isProjectManager: true, userId: 1, companyId: 10 });
+    assert.deepEqual(captured, { is_project_manager: true, updated_by: 1 });
     assert.equal(result.is_project_manager, true);
   } finally {
     restore();
@@ -167,19 +172,20 @@ test('Test 5 — setMappingProjectManagerFlag(): false -> true succeeds when the
 
 test('Test 6 — setMappingProjectManagerFlag(): true -> false is always allowed, without any role check, and the mapping row is kept (not deleted)', async () => {
   try {
-    employeeServicePOMappingRepository.findById = async () => ({ id: 55, employee_id: 101, service_po_id: 401, is_project_manager: true });
+    let captured;
+    employeeServicePOMappingRepository.findByIdUnscoped = async () => ({
+      id: 55, employee_id: 101, service_po_id: 401, is_project_manager: true,
+      async update(values) { captured = values; return { id: 55, ...values }; },
+      async destroy() { throw new Error('must not delete the mapping row'); },
+    });
+    servicePORepository.findById = async () => ({ id: 401, company_id: 10, is_centralised: false });
     employeeRoleRepository.findRolesByEmployeeId = async () => {
       throw new Error('must not be called — turning PM OFF never requires a role check');
-    };
-    let captured;
-    employeeServicePOMappingRepository.updateProjectManagerFlag = async (id, isProjectManager) => {
-      captured = { id, isProjectManager };
-      return { id, is_project_manager: isProjectManager };
     };
 
     const result = await employeeServicePOMappingService.setMappingProjectManagerFlag(55, false, 1, 10);
 
-    assert.deepEqual(captured, { id: 55, isProjectManager: false });
+    assert.deepEqual(captured, { is_project_manager: false, updated_by: 1 });
     assert.equal(result.is_project_manager, false);
   } finally {
     restore();
@@ -188,11 +194,12 @@ test('Test 6 — setMappingProjectManagerFlag(): true -> false is always allowed
 
 test('Test 7 — setMappingProjectManagerFlag(): false -> true rejected with 400 when the mapping\'s employee does not hold the Project Manager role', async () => {
   try {
-    employeeServicePOMappingRepository.findById = async () => ({ id: 55, employee_id: 101, service_po_id: 401, is_project_manager: false });
+    employeeServicePOMappingRepository.findByIdUnscoped = async () => ({
+      id: 55, employee_id: 101, service_po_id: 401, is_project_manager: false,
+      async update() { throw new Error('must not be reached — role validation must reject first'); },
+    });
+    servicePORepository.findById = async () => ({ id: 401, company_id: 10, is_centralised: false });
     employeeRoleRepository.findRolesByEmployeeId = async () => [{ role_name: 'Employee' }];
-    employeeServicePOMappingRepository.updateProjectManagerFlag = async () => {
-      throw new Error('must not be reached — role validation must reject first');
-    };
 
     await assert.rejects(
       () => employeeServicePOMappingService.setMappingProjectManagerFlag(55, true, 1, 10),
@@ -208,7 +215,7 @@ test('Test 7 — setMappingProjectManagerFlag(): false -> true rejected with 400
 
 test('Test 8 — setMappingProjectManagerFlag(): 404s when the mapping does not exist (or falls outside the caller\'s scope)', async () => {
   try {
-    employeeServicePOMappingRepository.findById = async () => null;
+    employeeServicePOMappingRepository.findByIdUnscoped = async () => null;
 
     await assert.rejects(
       () => employeeServicePOMappingService.setMappingProjectManagerFlag(999, true, 1, 10),

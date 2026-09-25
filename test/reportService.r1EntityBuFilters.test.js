@@ -117,7 +117,13 @@ test('getResourceAllocation: businessUnitIds narrows companyIds before the repo 
 
 test('getResourseProjectUtilizationReport: entityIds/businessUnitIds narrow companyIds before the repo call', async () => {
   try {
-    Company.findAll = async () => [{ id: 1 }, { id: 2 }];
+    Company.findAll = async ({ where }) => {
+      // BU-hierarchy expansion (parent_business_unit_id lookup) — no
+      // Sub-BUs configured in this scenario, distinct from the entity_id
+      // "Companies under this Entity" lookup below.
+      if (where && where.parent_business_unit_id) return [];
+      return [{ id: 1 }, { id: 2 }];
+    };
     let received;
     reportRepo.getResourseProjectUtilizationReport = async (filters) => {
       received = filters.companyIds;

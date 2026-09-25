@@ -130,6 +130,12 @@ Employee.hasMany(Entity, { foreignKey: 'entity_admin_employee_id', as: 'ownedEnt
 Entity.hasMany(Company, { foreignKey: 'entity_id', as: 'companies' });
 Company.belongsTo(Entity, { foreignKey: 'entity_id', as: 'entity' });
 
+// BU Hierarchy / Sub-BU support — a Company may belong to one parent
+// Company (Parent BU -> Sub-BU, capped at 2 levels; see
+// companyService.js). Self-referencing, so both ends are on Company.
+Company.belongsTo(Company, { foreignKey: 'parent_business_unit_id', as: 'parent' });
+Company.hasMany(Company, { foreignKey: 'parent_business_unit_id', as: 'children' });
+
 // Role <-> User: users.role_id is the sole PRIMARY role and the sole
 // source of truth for hierarchy rank / company-entity scoping / the
 // role-creation matrix — the old user_roles many-to-many table was dropped

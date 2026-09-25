@@ -33,7 +33,7 @@ const ORIGINAL = {
   update: projectRepository.update,
   softDelete: projectRepository.softDelete,
   countServicePOsByProject: projectRepository.countServicePOsByProject,
-  clientFindById: clientRepository.findById,
+  clientFindByIdUnscoped: clientRepository.findByIdUnscoped,
   resolveOwnedCompanyIds: companyAccessControlService.resolveOwnedCompanyIds,
 };
 
@@ -44,7 +44,7 @@ function restore() {
   projectRepository.update = ORIGINAL.update;
   projectRepository.softDelete = ORIGINAL.softDelete;
   projectRepository.countServicePOsByProject = ORIGINAL.countServicePOsByProject;
-  clientRepository.findById = ORIGINAL.clientFindById;
+  clientRepository.findByIdUnscoped = ORIGINAL.clientFindByIdUnscoped;
   companyAccessControlService.resolveOwnedCompanyIds = ORIGINAL.resolveOwnedCompanyIds;
 }
 
@@ -137,17 +137,21 @@ test('update(): a company-less actor (Admin) reassigning company_id validates ag
 test('update(): client_id reassignment validates the new Client against the DESTINATION company (the BU being moved to, not the Project\'s old BU)', async () => {
   try {
     projectRepository.findById = async () => ({ id: 5, client_id: 10, project_code: 'PRJ-1', project_name: 'Acme Project', project_description: '', status: 'active', company_id: 7 });
-    let capturedClientScope;
-    clientRepository.findById = async (clientId, scope) => {
-      capturedClientScope = scope;
+    let capturedClientId;
+    // The Client lives in BU 3 (the destination), NOT BU 7 (the Project's
+    // old BU) — if the code mistakenly checked against the old company_id
+    // (7) instead, this would 404 ("Client not found").
+    clientRepository.findByIdUnscoped = async (clientId) => {
+      capturedClientId = clientId;
       return { id: 20, status: 'active', company_id: 3 };
     };
     projectRepository.update = async (id, payload) => ({ id, ...payload });
 
     // Move the Project to BU 3 AND reassign it to a Client that lives in BU 3.
-    await projectService.update(5, { company_id: 3, client_id: 20 }, 900, MULTI_BU_REQ);
+    const updated = await projectService.update(5, { company_id: 3, client_id: 20 }, 900, MULTI_BU_REQ);
 
-    assert.equal(capturedClientScope, 3); // validated against the NEW company_id, not the old one (7)
+    assert.equal(capturedClientId, 20);
+    assert.equal(updated.client_id, 20);
   } finally {
     restore();
   }

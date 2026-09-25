@@ -17,7 +17,10 @@ const express = require('express');
 const router = express.Router();
 
 const servicePOHierarchyController = require('../controllers/servicePOHierarchyController');
-const authenticate = require('../middlewares/auth');
+// Same auth as GET /service-pos/:id (servicePO.routes.js) — identity only,
+// no mandatory X-Company-Id for a multi-BU actor. Access to the Service PO
+// itself is enforced in servicePOHierarchyService via getAccessibleById().
+const authenticateReadMultiBU = require('../middlewares/authenticateReadMultiBU');
 const { validate } = require('../middlewares/validateRequest');
 const {
   createHierarchyNodeSchema,
@@ -45,7 +48,7 @@ const {
  */
 router.get(
   '/:servicePoId/hierarchy',
-  authenticate,
+  authenticateReadMultiBU,
   servicePOHierarchyController.getHierarchy
 );
 
@@ -80,7 +83,7 @@ router.get(
  */
 router.post(
   '/:servicePoId/hierarchy/parent',
-  authenticate,
+  authenticateReadMultiBU,
   validate(createHierarchyNodeSchema),
   servicePOHierarchyController.createParent
 );
@@ -122,7 +125,7 @@ router.post(
  */
 router.post(
   '/:servicePoId/hierarchy/:parentId/child',
-  authenticate,
+  authenticateReadMultiBU,
   validate(createHierarchyNodeSchema),
   servicePOHierarchyController.createChild
 );
@@ -156,7 +159,7 @@ router.post(
  */
 router.put(
   '/hierarchy/:hierarchyId',
-  authenticate,
+  authenticateReadMultiBU,
   validate(renameHierarchyNodeSchema),
   servicePOHierarchyController.renameNode
 );
@@ -182,7 +185,7 @@ router.put(
  */
 router.delete(
   '/hierarchy/:hierarchyId',
-  authenticate,
+  authenticateReadMultiBU,
   servicePOHierarchyController.deleteNode
 );
 

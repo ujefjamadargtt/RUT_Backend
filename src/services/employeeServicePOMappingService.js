@@ -265,17 +265,66 @@ const autoMapExistingEmployeesToCentralisedServicePO = async (servicePOId, compa
 };
 
 /**
- * Hard-delete a mapping row.
+ * Load one mapping row the caller may act on (activate/deactivate/remove/
+ * PM flag), authorizing through its SERVICE PO — the same rule
+ * getServicePOEmployees() uses to list these rows — instead of the mapping
+ * row's own company_id.
+ *
+ * The old company-scoped lookup (`company_id IN (:scope)`) could never match
+ * a Centralised Service PO's mapping rows (Leaves, On Bench, ...): they carry
+ * company_id NULL (see autoMapCentralisedServicePOs()), so e.g. unmapping an
+ * Employee from "On Bench" always 404'd "Mapping not found." even though the
+ * same row showed up in that PO's employee list.
+ *
+ * A Centralised PO is visible to everyone (includeCentralised), so for one
+ * the mapped Employee must ALSO be within the caller's own Employee scope —
+ * otherwise any caller could unmap any tenant's Employees from it. That uses
+ * resolveEmployeeMappingAccessScope(), so an Admin still reaches a BU-less
+ * Employee they created (company_id NULL, no BU grant yet). Callers that have
+ * already authorized the Employee themselves (managerSelfServiceService's
+ * assertOwnEmployee) pass no authContext and skip this extra check.
+ *
  * @param {number} id
- * @param {number} companyId
- * @returns {Promise<void>}
+ * @param {number|number[]} companyId - resolveEmployeeMappingScope() result
+ * @param {{ companyId: number|null, hierarchyRank: number|null, employeeId: number|null, employeeBusinessUnits: number[] }|null} [authContext]
+ * @returns {Promise<EmployeeServicePOMapping>}
+ * @throws {Error} 404 when missing or outside the caller's reach (never discloses which)
  */
-const removeMapping = async (id, companyId) => {
-  const mapping = await employeeServicePOMappingRepository.findById(id, companyId);
+async function loadAuthorizedMapping(id, companyId, authContext = null) {
+  const mapping = await employeeServicePOMappingRepository.findByIdUnscoped(id);
   if (!mapping) {
     throw notFoundError(`Mapping #${id} was not found.`);
   }
-  await employeeServicePOMappingRepository.remove(id, companyId);
+
+  const actorEmployeeId = authContext ? authContext.employeeId : null;
+  const po = await servicePORepository.findById(mapping.service_po_id, companyId, actorEmployeeId, null, null, true);
+  if (!po) {
+    throw notFoundError(`Mapping #${id} was not found.`);
+  }
+
+  if (po.is_centralised && authContext) {
+    const employeeScope = await resolveEmployeeMappingAccessScope(authContext);
+    const employee = await employeeRepository.findByIdWithEmail(
+      mapping.employee_id, employeeScope.companyId, employeeScope.accessWhere
+    );
+    if (!employee) {
+      throw notFoundError(`Mapping #${id} was not found.`);
+    }
+  }
+
+  return mapping;
+}
+
+/**
+ * Hard-delete a mapping row.
+ * @param {number} id
+ * @param {number|number[]} companyId
+ * @param {object|null} [authContext] - see loadAuthorizedMapping()
+ * @returns {Promise<void>}
+ */
+const removeMapping = async (id, companyId, authContext = null) => {
+  const mapping = await loadAuthorizedMapping(id, companyId, authContext);
+  await mapping.destroy();
   logger.info('Employee-ServicePO mapping removed', { mappingId: id });
 };
 
@@ -283,14 +332,13 @@ const removeMapping = async (id, companyId) => {
  * Set a mapping row's status to 'active'.
  * @param {number} id
  * @param {number} userId
- * @param {number} companyId
+ * @param {number|number[]} companyId
+ * @param {object|null} [authContext] - see loadAuthorizedMapping()
  * @returns {Promise<EmployeeServicePOMapping>}
  */
-const activateMapping = async (id, userId, companyId) => {
-  const updated = await employeeServicePOMappingRepository.updateStatus(id, 'active', userId, companyId);
-  if (!updated) {
-    throw notFoundError(`Mapping #${id} was not found.`);
-  }
+const activateMapping = async (id, userId, companyId, authContext = null) => {
+  const mapping = await loadAuthorizedMapping(id, companyId, authContext);
+  const updated = await mapping.update({ status: 'active', updated_by: userId });
   logger.info('Employee-ServicePO mapping activated', { mappingId: id, userId });
   return updated;
 };
@@ -299,14 +347,13 @@ const activateMapping = async (id, userId, companyId) => {
  * Set a mapping row's status to 'inactive'.
  * @param {number} id
  * @param {number} userId
- * @param {number} companyId
+ * @param {number|number[]} companyId
+ * @param {object|null} [authContext] - see loadAuthorizedMapping()
  * @returns {Promise<EmployeeServicePOMapping>}
  */
-const deactivateMapping = async (id, userId, companyId) => {
-  const updated = await employeeServicePOMappingRepository.updateStatus(id, 'inactive', userId, companyId);
-  if (!updated) {
-    throw notFoundError(`Mapping #${id} was not found.`);
-  }
+const deactivateMapping = async (id, userId, companyId, authContext = null) => {
+  const mapping = await loadAuthorizedMapping(id, companyId, authContext);
+  const updated = await mapping.update({ status: 'inactive', updated_by: userId });
   logger.info('Employee-ServicePO mapping deactivated', { mappingId: id, userId });
   return updated;
 };
@@ -1110,17 +1157,14 @@ const getEmployeeOptionsForServicePO = async (servicePOId, authContext, options 
  * @throws {{ statusCode: 404 }} mapping not found (or outside the caller's scope)
  * @throws {{ statusCode: 400 }} isProjectManager=true but the employee doesn't hold the Project Manager role
  */
-const setMappingProjectManagerFlag = async (id, isProjectManager, userId, companyId) => {
-  const mapping = await employeeServicePOMappingRepository.findById(id, companyId);
-  if (!mapping) {
-    throw notFoundError(`Mapping #${id} was not found.`);
-  }
+const setMappingProjectManagerFlag = async (id, isProjectManager, userId, companyId, authContext = null) => {
+  const mapping = await loadAuthorizedMapping(id, companyId, authContext);
 
   if (isProjectManager) {
     await assertEmployeeHoldsProjectManagerRole(mapping.employee_id);
   }
 
-  const updated = await employeeServicePOMappingRepository.updateProjectManagerFlag(id, isProjectManager, userId, companyId);
+  const updated = await mapping.update({ is_project_manager: isProjectManager, updated_by: userId });
   logger.info('Employee-ServicePO mapping PM flag updated', { mappingId: id, isProjectManager, userId });
   return updated;
 };

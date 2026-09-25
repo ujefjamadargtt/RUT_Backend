@@ -6,7 +6,7 @@ const logger = require('../utils/logger');
 const dateHelper = require('../helpers/dateHelper');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
 const publishVisibilityService = require('./publishVisibilityService');
-const { intersectCompanyIdsWithEntity, intersectIds } = require('./companyAccessControlService');
+const { intersectCompanyIdsWithEntity, intersectIdsWithBuHierarchy } = require('./companyAccessControlService');
 const { parseIdList } = require('../utils/idListParser');
 
 /**
@@ -25,7 +25,7 @@ const { parseIdList } = require('../utils/idListParser');
 async function applyEntityBuFilters(companyId, query) {
   if (!Array.isArray(companyId)) return companyId;
   let scoped = await intersectCompanyIdsWithEntity(companyId, parseIdList(query.entityIds));
-  scoped = intersectIds(scoped, parseIdList(query.businessUnitIds));
+  scoped = await intersectIdsWithBuHierarchy(scoped, parseIdList(query.businessUnitIds));
   return scoped;
 }
 const round2 = (n) => Math.round(parseFloat(n || 0) * 100) / 100;

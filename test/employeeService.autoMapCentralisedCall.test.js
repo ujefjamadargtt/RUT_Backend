@@ -11,6 +11,7 @@ const employeeRoleRepository = require('../src/repositories/employeeRoleReposito
 const employeeBusinessUnitRepository = require('../src/repositories/employeeBusinessUnitRepository');
 const employeeServicePOMappingService = require('../src/services/employeeServicePOMappingService');
 const companyAccessControlService = require('../src/services/companyAccessControlService');
+const companyRepository = require('../src/repositories/companyRepository');
 const { Role, Company, sequelize } = require('../src/models');
 const employeeService = require('../src/services/employeeService');
 
@@ -24,6 +25,8 @@ const ORIGINAL = {
   resolveActorCompanyScope: companyAccessControlService.resolveActorCompanyScope,
   roleFindOne: Role.findOne,
   companyFindAll: Company.findAll,
+  hasChildren: companyRepository.hasChildren,
+  findIdsWithChildren: companyRepository.findIdsWithChildren,
   transaction: sequelize.transaction,
 };
 
@@ -37,6 +40,8 @@ function restore() {
   companyAccessControlService.resolveActorCompanyScope = ORIGINAL.resolveActorCompanyScope;
   Role.findOne = ORIGINAL.roleFindOne;
   Company.findAll = ORIGINAL.companyFindAll;
+  companyRepository.hasChildren = ORIGINAL.hasChildren;
+  companyRepository.findIdsWithChildren = ORIGINAL.findIdsWithChildren;
   sequelize.transaction = ORIGINAL.transaction;
 }
 
@@ -48,6 +53,11 @@ function stubCommonCreatePath({ companies, ownedScope }) {
   employeeBusinessUnitRepository.replaceForEmployee = async () => {};
   Role.findOne = async () => ({ id: 8, role_name: 'Employee', status: 'active', hierarchy_rank: 8 });
   Company.findAll = async () => companies;
+  // No hierarchy configured in these scenarios — none of the involved BUs
+  // have Sub-BUs (see employeeService.resolveBusinessUnitIds()'s BU
+  // Hierarchy guard).
+  companyRepository.hasChildren = async () => false;
+  companyRepository.findIdsWithChildren = async () => [];
   // Only relevant for a company-less actor (resolveBusinessUnitIds()'s
   // ownership check) — a BU-scoped actor's own companyId always wins
   // before this is even consulted, so a plain number here is harmless.

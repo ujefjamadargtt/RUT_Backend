@@ -2919,7 +2919,7 @@ async function getLeaveHoursTrendReport(filters) {
      INNER JOIN service_pos sp   ON sp.id = t.service_po_id
      INNER JOIN service_types st ON st.id = sp.service_type_id
      WHERE ${whereClause}
-       AND LOWER(st.service_type_name) = 'leaves'
+       AND LOWER(TRIM(st.service_type_name)) IN ('leave', 'leaves')
      GROUP BY year, month
      ORDER BY year, month`,
     { replacements, type: QueryTypes.SELECT }

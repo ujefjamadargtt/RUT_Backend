@@ -3,7 +3,7 @@
 const projectRepository = require('../repositories/projectRepository');
 const clientRepository = require('../repositories/clientRepository');
 const companyAccessControlService = require('./companyAccessControlService');
-const { resolveActorCompanyScope, resolveCreateCompanyIdForActor, resolveActorFullReach, intersectCompanyIdsWithEntity, intersectIds } = companyAccessControlService;
+const { resolveActorCompanyScope, resolveCreateCompanyIdForActor, resolveActorFullReach, intersectCompanyIdsWithEntity, intersectIdsWithBuHierarchy, expandBusinessUnitIdsToFamily } = companyAccessControlService;
 const { generateProjectCode } = require('../helpers/codeGenerator');
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
@@ -25,15 +25,27 @@ const logger = require('../utils/logger');
  */
 const getAll = async (query = {}, authContext) => {
   let companyId = await resolveActorCompanyScope(authContext);
+
+  // BU Hierarchy / Sub-BU support — a BU-scoped actor's own single active
+  // BU is expanded to its whole Parent + Sub-BU family (see
+  // expandBusinessUnitIdsToFamily()'s doc comment), so the Project dropdown
+  // used by Service PO creation — and this same Project Master list —
+  // surfaces a shared Project that still lives at the Parent level even
+  // while working under one specific Sub-BU, matching clientService.getAll()'s
+  // identical fix and resolveCreateCompanyIdForActor()'s create-side one.
+  if (typeof companyId === 'number') {
+    companyId = await expandBusinessUnitIdsToFamily([companyId]);
+  }
+
   // Optional entityIds/businessUnitIds multi-select narrowing on top of the
-  // already-resolved BU/role scope — only meaningful when that scope is an
-  // array (a BU-scoped actor with a single X-Company-Id-selected companyId
-  // is already narrowed to one BU; these filters have nothing left to
-  // narrow there). Never widens access — see intersectCompanyIdsWithEntity()/
-  // intersectIds()'s own doc comments.
+  // already-resolved BU/role scope — meaningful whenever that scope is an
+  // array: a company-less actor's owned-Companies reach, OR (since the
+  // family expansion above) a BU-scoped actor's own Parent+Sub-BU family.
+  // Never widens access — see intersectCompanyIdsWithEntity()/intersectIds()'s
+  // own doc comments.
   if (Array.isArray(companyId)) {
     companyId = await intersectCompanyIdsWithEntity(companyId, parseIdList(query.entityIds));
-    companyId = intersectIds(companyId, parseIdList(query.businessUnitIds));
+    companyId = await intersectIdsWithBuHierarchy(companyId, parseIdList(query.businessUnitIds));
   }
   const { page, limit, offset } = getPaginationParams(query);
 
@@ -149,18 +161,26 @@ const create = async (data, userId, req) => {
 
   // Client lookup: when this Project is being created WITH a Business
   // Unit, `companyId` is that one concrete company and the referenced
-  // Client must belong to it, same as before. When a company-less actor
-  // creates a Project with NO Business Unit, the Client they picked can
-  // either belong to one of that actor's OWN owned Companies, or itself
-  // have no Business Unit — companyScope()'s array form can't express
-  // "IN (...) OR IS NULL" (SQL IN never matches NULL), so fetch unscoped
-  // and verify manually instead (same pattern as
-  // servicePOService.js's assertValidDeliveryHead()).
+  // Client must belong to it — OR, BU Hierarchy / Sub-BU support, to a
+  // Business Unit one hop apart in the hierarchy from it (a Sub-BU
+  // referencing its Parent's shared Client, or vice versa; see
+  // companyAccessControlService.areSameOrRelatedBusinessUnits()), same as
+  // servicePOService.create()'s identical fix. Fetch unscoped and verify
+  // manually rather than clientRepository.findById()'s exact-match
+  // companyScope(), since that can't express the hierarchy relationship.
+  // When a company-less actor creates a Project with NO Business Unit, the
+  // Client they picked can either belong to one of that actor's OWN owned
+  // Companies, or itself have no Business Unit — companyScope()'s array
+  // form can't express "IN (...) OR IS NULL" (SQL IN never matches NULL)
+  // either, so the same fetch-unscoped-then-verify pattern applies there.
   let client;
   if (companyId != null) {
-    client = preFetchedClient && preFetchedClient.company_id === companyId
-      ? preFetchedClient
-      : await clientRepository.findById(data.client_id, companyId);
+    const candidate = preFetchedClient || await clientRepository.findByIdUnscoped(data.client_id);
+    const clientInScope = !!candidate && (
+      candidate.company_id === companyId ||
+      await companyAccessControlService.areSameOrRelatedBusinessUnits(candidate.company_id, companyId)
+    );
+    client = clientInScope ? candidate : null;
   } else {
     const ownedCompanyIds = await resolveActorCompanyScope(authContext);
     const candidate = await clientRepository.findByIdUnscoped(data.client_id);
@@ -284,7 +304,13 @@ const update = async (id, data, userId, req) => {
   let companyId = existing.company_id;
   if (bodyCompanyId != null && bodyCompanyId !== existing.company_id) {
     if (req.companyId != null) {
-      const mappedBuIds = (req.employeeBusinessUnits || []).map((bu) => bu.id);
+      // BU Hierarchy / Sub-BU support — expanded to the actor's whole
+      // Parent + Sub-BU family (see expandBusinessUnitIdsToFamily()'s doc
+      // comment), same as resolveCreateCompanyIdForActor()/create() above:
+      // a BU Admin mapped to only one Sub-BU may still reassign a Project
+      // to any of its siblings, not just their own literal mapping.
+      const rawMappedIds = (req.employeeBusinessUnits || []).map((bu) => bu.id);
+      const mappedBuIds = await expandBusinessUnitIdsToFamily(rawMappedIds);
       if (!mappedBuIds.includes(bodyCompanyId)) {
         const err = new Error(`Business Unit #${bodyCompanyId} is not one of your mapped Business Units.`);
         err.statusCode = 403;
@@ -304,10 +330,18 @@ const update = async (id, data, userId, req) => {
   // If client_id is being changed, validate the new client — same
   // conditional-on-change pattern servicePOService.update() uses. Checked
   // against the DESTINATION company (the new BU when one is being
-  // assigned), consistent with the uniqueness checks below.
+  // assigned), consistent with the uniqueness checks below. BU Hierarchy /
+  // Sub-BU support: fetched unscoped and checked via
+  // areSameOrRelatedBusinessUnits() (same fix as create() above), not
+  // clientRepository.findById()'s exact-match companyScope(), so a Sub-BU
+  // can still reassign to its Parent's shared Client (and vice versa).
   if (data.client_id && data.client_id !== existing.client_id) {
-    const client = await clientRepository.findById(data.client_id, companyId);
-    if (!client) {
+    const client = await clientRepository.findByIdUnscoped(data.client_id);
+    const clientInScope = !!client && (
+      client.company_id === companyId ||
+      await companyAccessControlService.areSameOrRelatedBusinessUnits(client.company_id, companyId)
+    );
+    if (!clientInScope) {
       const err = new Error('Client not found.');
       err.statusCode = 404;
       throw err;

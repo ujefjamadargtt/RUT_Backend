@@ -7,6 +7,7 @@ const { generateProjectCode } = require('../helpers/codeGenerator');
 const {
   resolveCreateCompanyIdForActor,
   resolveOwnedCompanyIds,
+  areSameOrRelatedBusinessUnits,
 } = require('./companyAccessControlService');
 const logger = require('../utils/logger');
 
@@ -271,11 +272,13 @@ async function importProjects(filePath, userId, req) {
     }
 
     // Same membership rule as projectService.create(): a BU-scoped actor's
-    // Client must belong to that exact company; a company-less actor's
-    // Client may belong to any of their own owned Companies, or have no
-    // Business Unit at all.
+    // Client must belong to that exact company, OR — BU Hierarchy / Sub-BU
+    // support — a Business Unit one hop apart in the hierarchy from it (see
+    // companyAccessControlService.areSameOrRelatedBusinessUnits()); a
+    // company-less actor's Client may belong to any of their own owned
+    // Companies, or have no Business Unit at all.
     const clientInScope = companyId != null
-      ? client.company_id === companyId
+      ? client.company_id === companyId || await areSameOrRelatedBusinessUnits(client.company_id, companyId)
       : (client.company_id === null || ownedCompanyIds.includes(client.company_id));
 
     if (!clientInScope) {

@@ -8,7 +8,7 @@ const employeeServicePOMappingRepository = require('../repositories/employeeServ
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
 const dateHelper = require('../helpers/dateHelper');
 const { getDeadlineInfo, assertWithinEditWindow } = require('../config/servicePOMonthlyBudget.config');
-const { intersectCompanyIdsWithEntity, intersectIds } = require('./companyAccessControlService');
+const { intersectCompanyIdsWithEntity, intersectIdsWithBuHierarchy } = require('./companyAccessControlService');
 const { parseIdList } = require('../utils/idListParser');
 const logger = require('../utils/logger');
 
@@ -157,7 +157,7 @@ const listMonthlyBudgets = async (query, companyId, userId, roleName, employeeId
   // route). Never widens access.
   if (Array.isArray(companyId)) {
     companyId = await intersectCompanyIdsWithEntity(companyId, parseIdList(query.entityIds));
-    companyId = intersectIds(companyId, parseIdList(query.businessUnitIds));
+    companyId = await intersectIdsWithBuHierarchy(companyId, parseIdList(query.businessUnitIds));
   }
 
   const allowedIds = await getAllowedServicePOIds(userId, roleName, companyId, employeeId);
@@ -206,7 +206,7 @@ const listServicePOsForDropdown = async (query, companyId, userId, roleName, emp
   // list next to it is correctly narrowed — an inconsistent screen.
   if (Array.isArray(companyId)) {
     companyId = await intersectCompanyIdsWithEntity(companyId, parseIdList(query.entityIds));
-    companyId = intersectIds(companyId, parseIdList(query.businessUnitIds));
+    companyId = await intersectIdsWithBuHierarchy(companyId, parseIdList(query.businessUnitIds));
   }
 
   const allowedIds = await getAllowedServicePOIds(userId, roleName, companyId, employeeId);

@@ -3,6 +3,7 @@
 const { Op } = require('sequelize');
 const { Entity, Company } = require('../models');
 const entityRepository = require('../repositories/entityRepository');
+const companyRepository = require('../repositories/companyRepository');
 
 /**
  * Shared "which Companies may this company-less actor act within" resolver.
@@ -467,6 +468,14 @@ async function resolveReportCompanyScope(authContext, requestedCompanyId) {
     reachableCompanyIds = businessUnits.map((bu) => bu.id);
   }
 
+  // BU Hierarchy / Sub-BU support — an actor mapped/owning a Parent BU
+  // reaches its Sub-BUs too (Platform Admin's "every Company" and Admin/
+  // Entity Admin's owned-via-entity_id set already include Sub-BUs
+  // naturally, since a Sub-BU shares its parent's entity_id; this only
+  // changes the BU-scoped-actor branch above, e.g. a BU Admin mapped
+  // directly to "Technology" — with no Sub-BUs configured this is a no-op).
+  reachableCompanyIds = await expandBusinessUnitIdsWithDescendants(reachableCompanyIds);
+
   if (requestedCompanyId == null) {
     return reachableCompanyIds;
   }
@@ -478,7 +487,10 @@ async function resolveReportCompanyScope(authContext, requestedCompanyId) {
     throw err;
   }
 
-  return [requestedCompanyId];
+  // The requested single BU may itself be a Parent — return it AND its
+  // Sub-BUs (still a subset of reachableCompanyIds, already expanded above).
+  const expandedRequested = await expandBusinessUnitIdsWithDescendants([requestedCompanyId]);
+  return expandedRequested.filter((id) => reachableCompanyIds.includes(id));
 }
 
 /**
@@ -574,6 +586,115 @@ function intersectIds(reachIds, requestedIds) {
   if (!requestedIds || requestedIds.length === 0) return reachIds;
   const requested = new Set(requestedIds);
   return (reachIds || []).filter((id) => requested.has(id));
+}
+
+/**
+ * BU Hierarchy / Sub-BU support — expand a Business Unit id set to also
+ * include every immediate Sub-BU of any Parent BU present in it (depth-1
+ * only, matching the hierarchy's own 2-level cap — a Sub-BU never has
+ * children of its own, so this never needs to recurse). A leaf id (no
+ * Sub-BUs, or already a Sub-BU) expands to itself unchanged.
+ *
+ * The single chokepoint every BU-hierarchy-aware filter funnels through —
+ * see resolveReportCompanyScope() below (an actor's own reach) and
+ * intersectIdsWithBuHierarchy() (a client-supplied businessUnitIds filter).
+ * Callers pass the EXPANDED set straight into a `company_id IN (...)` SQL
+ * filter — no dataset is loaded into JS to do this.
+ *
+ * @param {number[]} ids
+ * @returns {Promise<number[]>}
+ */
+async function expandBusinessUnitIdsWithDescendants(ids) {
+  if (!ids || ids.length === 0) return ids || [];
+  const childIds = await companyRepository.findChildIds(ids);
+  if (childIds.length === 0) return ids;
+  return [...new Set([...ids, ...childIds])];
+}
+
+/**
+ * BU Hierarchy / Sub-BU support — expand a Business Unit id set to the FULL
+ * Parent + Sub-BU "family" of each id: a Sub-BU expands to itself + its
+ * Parent + every sibling Sub-BU; a Parent BU expands to itself + every one
+ * of its Sub-BUs (same direction as expandBusinessUnitIdsWithDescendants()).
+ * A childless, parent-less BU expands to itself only.
+ *
+ * Used wherever "a foothold anywhere in a family" should grant reach to the
+ * WHOLE family — e.g. companyService.getAllForEmployee()'s "Business Unit /
+ * Sub Business Unit" dropdown (a BU Admin mapped to only one Sub-BU, e.g.
+ * "DAS", must still SEE its sibling Sub-BUs, e.g. "IBM") and
+ * resolveCreateCompanyIdForActor() below (that same BU Admin must then also
+ * be able to actually CREATE a Client/Project/Service PO under "IBM" — the
+ * dropdown showing an option the submit then rejects would be worse than
+ * not showing it at all).
+ *
+ * @param {number[]} ids
+ * @returns {Promise<number[]>}
+ */
+async function expandBusinessUnitIdsToFamily(ids) {
+  if (!ids || ids.length === 0) return ids || [];
+  const rows = await Company.findAll({
+    where: { id: { [Op.in]: ids }, is_deleted: false },
+    attributes: ['id', 'parent_business_unit_id'],
+  });
+  const rootIds = new Set();
+  rows.forEach((row) => {
+    rootIds.add(row.parent_business_unit_id != null ? row.parent_business_unit_id : row.id);
+  });
+  if (rootIds.size === 0) return ids;
+  const familyMembers = await companyRepository.findFamilyMembers([...rootIds]);
+  return [...new Set([...ids, ...familyMembers.map((c) => c.id)])];
+}
+
+/**
+ * BU Hierarchy / Sub-BU support — whether two Business Unit ids are "the
+ * same tenant" for CROSS-REFERENCE purposes: creating a record under
+ * Business Unit A that must reference another record (Client, Project, ...)
+ * already owned by Business Unit B. True when:
+ *   - they're literally the same id, OR
+ *   - B is A's own Parent BU (a Sub-BU may reference its Parent's shared
+ *     masters — e.g. a Client created under the Parent before any Sub-BU
+ *     existed), OR
+ *   - A is B's own Parent BU (creating AS the Parent may reference a
+ *     Sub-BU's own record — the mirror direction, same "parent reach
+ *     includes children" rule every BU filter already follows).
+ * Depth-1 only, matching the hierarchy's 2-level cap — no recursion needed.
+ * Does NOT handle "record has no Business Unit at all" (company_id null) —
+ * that's each caller's own separate, pre-existing `=== null` check.
+ *
+ * @param {number} companyIdA
+ * @param {number} companyIdB
+ * @returns {Promise<boolean>}
+ */
+async function areSameOrRelatedBusinessUnits(companyIdA, companyIdB) {
+  if (companyIdA == null || companyIdB == null) return false;
+  if (companyIdA === companyIdB) return true;
+
+  const [a, b] = await Promise.all([
+    Company.findOne({ where: { id: companyIdA, is_deleted: false }, attributes: ['id', 'parent_business_unit_id'] }),
+    Company.findOne({ where: { id: companyIdB, is_deleted: false }, attributes: ['id', 'parent_business_unit_id'] }),
+  ]);
+  if (!a || !b) return false;
+
+  return a.parent_business_unit_id === b.id || b.parent_business_unit_id === a.id;
+}
+
+/**
+ * Same contract as intersectIds() above, but hierarchy-aware: a
+ * client-supplied `requestedIds` entry that names a Parent BU also pulls in
+ * that Parent's Sub-BUs before intersecting with `reachIds` — "Filter:
+ * buIds = [1] where 1 is a parent BU should include its children" (the
+ * Reports/List `businessUnitIds` multi-select filter's own hierarchy rule).
+ * `requestedIds` absent/empty still means "no filter" (returns `reachIds`
+ * unchanged), same as intersectIds().
+ *
+ * @param {number[]} reachIds - the caller's already-authorized id reach
+ * @param {number[]|undefined|null} requestedIds - client-supplied subset filter
+ * @returns {Promise<number[]>}
+ */
+async function intersectIdsWithBuHierarchy(reachIds, requestedIds) {
+  if (!requestedIds || requestedIds.length === 0) return reachIds;
+  const expandedRequestedIds = await expandBusinessUnitIdsWithDescendants(requestedIds);
+  return intersectIds(reachIds, expandedRequestedIds);
 }
 
 /**
@@ -778,8 +899,15 @@ async function resolveCreateCompanyIdForActor(req, bodyCompanyId, { required = t
     // BU-scoped actor.
     if (bodyCompanyId != null && bodyCompanyId !== req.companyId) {
       // The frontend explicitly chose a BU different from the active header BU.
-      // Validate it is within this actor's own mapped Business Units.
-      const mappedBuIds = (req.employeeBusinessUnits || []).map((bu) => bu.id);
+      // Validate it is within this actor's own mapped Business Units — BU
+      // Hierarchy / Sub-BU support: expanded to the WHOLE Parent + Sub-BU
+      // family of each mapped id (see expandBusinessUnitIdsToFamily()'s doc
+      // comment), so a BU Admin mapped to only one Sub-BU can still create
+      // this record under any of its siblings or their shared Parent —
+      // matching what companyService.getAllForEmployee()'s dropdown now
+      // offers them.
+      const rawMappedIds = (req.employeeBusinessUnits || []).map((bu) => bu.id);
+      const mappedBuIds = await expandBusinessUnitIdsToFamily(rawMappedIds);
       if (!mappedBuIds.includes(bodyCompanyId)) {
         const err = new Error(`Business Unit #${bodyCompanyId} is not one of your mapped Business Units.`);
         err.statusCode = 403;
@@ -814,6 +942,10 @@ module.exports = {
   resolveActorFullReach,
   intersectCompanyIdsWithEntity,
   intersectIds,
+  expandBusinessUnitIdsWithDescendants,
+  expandBusinessUnitIdsToFamily,
+  intersectIdsWithBuHierarchy,
+  areSameOrRelatedBusinessUnits,
   resolveImportBusinessUnitId,
   resolveOwningAdminIdForCompany,
   resolveAdminOwnershipForBusinessUnits,

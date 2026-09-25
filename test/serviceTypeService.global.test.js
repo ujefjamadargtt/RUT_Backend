@@ -89,3 +89,31 @@ test('getById()/update()/delete() all resolve against company_id=null, not the a
 
   restore();
 });
+
+// Regression: update()/delete() read `existing.company_id`, but the real
+// serviceTypeRepository.findById() selects a fixed attribute list WITHOUT
+// company_id — so it was undefined and Sequelize threw 'WHERE parameter
+// "company_id" has invalid "undefined" value'. The stub below mirrors that
+// real row shape (no company_id key at all).
+test('update(): works when findById returns a row without company_id (real attribute list), scoping to the global null', async () => {
+  const originalUpdate = serviceTypeRepository.update;
+  serviceTypeRepository.findById = async () => ({ id: 4, service_type_name: 'AMC', service_category_id: null });
+  serviceTypeRepository.findByName = async (name, companyId) => {
+    assert.equal(companyId, null);
+    return null;
+  };
+  let capturedCompanyId = 'not-called';
+  serviceTypeRepository.update = async (id, payload, companyId) => {
+    capturedCompanyId = companyId;
+    return { id, ...payload };
+  };
+
+  try {
+    const updated = await serviceTypeService.update(4, { service_type_name: 'AMC Renamed' }, 9, { companyId: 23 });
+    assert.equal(updated.service_type_name, 'AMC Renamed');
+    assert.equal(capturedCompanyId, null);
+  } finally {
+    serviceTypeRepository.update = originalUpdate;
+    restore();
+  }
+});

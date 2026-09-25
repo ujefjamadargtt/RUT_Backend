@@ -6,6 +6,7 @@ const { Op } = require('sequelize');
 const employeeRepository = require('../repositories/employeeRepository');
 const employeeRoleRepository = require('../repositories/employeeRoleRepository');
 const employeeBusinessUnitRepository = require('../repositories/employeeBusinessUnitRepository');
+const companyRepository = require('../repositories/companyRepository');
 const employeeServicePOMappingService = require('./employeeServicePOMappingService');
 const { resolveOptionalCreateCompanyId, resolveOwnedCompanyIds } = require('./companyAccessControlService');
 const logger = require('../utils/logger');
@@ -379,9 +380,14 @@ async function buildImportBuNameLookup(req) {
  *
  * @param {object} raw - parsed row (see parseEmployeeFile)
  * @param {Map<string, number>} buNameMap
+ * @param {Set<number>} parentIdsWithChildren - BU Hierarchy / Sub-BU support
+ *   — ids (from buNameMap's own values) that currently have Sub-BUs; "map BU
+ *   + Sub-BU, compulsory" applies here too — a row naming a Business Unit
+ *   that has Sub-BUs must also name at least one of its Sub-BUs (both kept).
+ * @param {Map<number, number[]>} [childIdsByParent] - Parent id -> its Sub-BU ids
  * @returns {{ ids: number[], errors: string[] }}
  */
-function resolveRowBusinessUnitIds(raw, buNameMap) {
+function resolveRowBusinessUnitIds(raw, buNameMap, parentIdsWithChildren, childIdsByParent) {
   const rawValue = String(raw.business_units_raw || '').trim();
   if (!rawValue) return { ids: [], errors: [] };
 
@@ -390,6 +396,7 @@ function resolveRowBusinessUnitIds(raw, buNameMap) {
   const errors = [];
   const seen = new Set();
 
+  const parentNameById = new Map();
   for (const name of names) {
     const id = buNameMap.get(name.toLowerCase());
     if (id === undefined) {
@@ -397,6 +404,18 @@ function resolveRowBusinessUnitIds(raw, buNameMap) {
     } else if (!seen.has(id)) {
       seen.add(id);
       ids.push(id);
+      if (parentIdsWithChildren.has(id)) parentNameById.set(id, name);
+    }
+  }
+
+  // A Parent BU is kept alongside its Sub-BU(s) (a Sub-BU is part of its
+  // Parent, like a department) — same rule as employeeService's
+  // resolveBusinessUnitIds(). Only a Parent named WITHOUT any of its own
+  // Sub-BUs on the same row is an error.
+  for (const [parentId, name] of parentNameById) {
+    const children = (childIdsByParent && childIdsByParent.get(parentId)) || [];
+    if (!children.some((childId) => seen.has(childId))) {
+      errors.push(`Business Unit "${name}" has Sub-BUs — also specify the Sub-BU name.`);
     }
   }
 
@@ -444,6 +463,20 @@ async function importEmployees(filePath, userId, req) {
   const existingCodes = new Set(existingForCompany.map((e) => e.employee_code.toUpperCase()));
   const existingEmails = new Set(await employeeRepository.findAllEmails());
   const buNameMap = await buildImportBuNameLookup(req);
+  // BU Hierarchy / Sub-BU support — which of the importer's own reachable
+  // BUs currently have Sub-BUs (one batched query, not per-row).
+  const parentIdsWithChildren = new Set(await companyRepository.findIdsWithChildren([...buNameMap.values()]));
+  const childIdsByParent = new Map();
+  if (parentIdsWithChildren.size > 0) {
+    const childRows = await Company.findAll({
+      where: { parent_business_unit_id: { [Op.in]: [...parentIdsWithChildren] }, is_deleted: false },
+      attributes: ['id', 'parent_business_unit_id'],
+    });
+    childRows.forEach((c) => {
+      if (!childIdsByParent.has(c.parent_business_unit_id)) childIdsByParent.set(c.parent_business_unit_id, []);
+      childIdsByParent.get(c.parent_business_unit_id).push(c.id);
+    });
+  }
 
   // 3. Validate all rows; track codes/emails seen within this file to catch duplicates
   const seenCodes = new Set();
@@ -453,7 +486,7 @@ async function importEmployees(filePath, userId, req) {
 
   for (const raw of rawRows) {
     const { errors, data } = validateRow(raw, existingCodes, seenCodes, existingEmails, seenEmails);
-    const { ids: businessUnitIds, errors: buErrors } = resolveRowBusinessUnitIds(raw, buNameMap);
+    const { ids: businessUnitIds, errors: buErrors } = resolveRowBusinessUnitIds(raw, buNameMap, parentIdsWithChildren, childIdsByParent);
     const allErrors = buErrors.length ? [...errors, ...buErrors] : errors;
     if (allErrors.length) {
       errorRows.push({ row: raw._rowNum, errors: allErrors });

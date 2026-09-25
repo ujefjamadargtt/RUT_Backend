@@ -17,22 +17,34 @@ const Joi = require('joi');
  * part of this payload.
  */
 const createCompanySchema = Joi.object({
+  // BU Hierarchy / Sub-BU support — when given, this Company is created as
+  // a Sub-BU of that parent and always inherits the PARENT's entity_id (see
+  // companyService.create()); entity_id is then optional here. Without it,
+  // entity_id is required as before (a top-level Parent BU).
+  parent_business_unit_id: Joi.number().integer().positive().optional().messages({
+    'number.base': 'Parent Business Unit ID must be a number.',
+    'number.positive': 'Parent Business Unit ID must be a positive integer.',
+  }),
+
   entity_id: Joi.number()
     .integer()
     .positive()
-    .required()
+    .when('parent_business_unit_id', { is: Joi.number().exist(), then: Joi.optional(), otherwise: Joi.required() })
     .messages({
       'number.base': 'Entity ID must be a number.',
       'number.positive': 'Entity ID must be a positive integer.',
       'any.required': 'Entity is required.',
     }),
 
+  // "No need of BU code" for a Sub-BU — optional when parent_business_unit_id
+  // is given (companyService.create() auto-generates one when omitted). A
+  // top-level Parent BU still requires its own explicit code, as before.
   company_code: Joi.string()
     .trim()
     .uppercase()
     .min(2)
     .max(20)
-    .required()
+    .when('parent_business_unit_id', { is: Joi.number().exist(), then: Joi.optional(), otherwise: Joi.required() })
     .messages({
       'string.min': 'Company code must be at least 2 characters.',
       'string.max': 'Company code cannot exceed 20 characters.',
@@ -61,7 +73,10 @@ const createCompanySchema = Joi.object({
 
   // Which Saturdays count as off for the Off-Day Approval Gate (see
   // src/utils/weekOffPolicy.js) — Sunday is always off for every BU. Defaults
-  // to the strictest/most common pattern for a brand-new BU.
+  // to the strictest/most common pattern for a brand-new (top-level) BU. For
+  // a Sub-BU (parent_business_unit_id given), companyService.create() always
+  // overrides this with the PARENT's own saturday_off_rule instead — "off
+  // day, it takes its parent" — so any value sent here is ignored in that case.
   saturday_off_rule: Joi.string().valid('ALL', 'ALT_1_3', 'ALT_2_4', 'NONE').optional().default('ALL').messages({
     'any.only': 'saturday_off_rule must be ALL, ALT_1_3, ALT_2_4, or NONE.',
   }),
@@ -78,6 +93,14 @@ const updateCompanySchema = Joi.object({
   }),
   saturday_off_rule: Joi.string().valid('ALL', 'ALT_1_3', 'ALT_2_4', 'NONE').optional().messages({
     'any.only': 'saturday_off_rule must be ALL, ALT_1_3, ALT_2_4, or NONE.',
+  }),
+  // BU Hierarchy / Sub-BU support — reassign/detach this Company's parent.
+  // `null` explicitly promotes a Sub-BU back to a top-level Parent BU; a
+  // positive id re-validates the same depth-2/active-parent rules as create
+  // (see companyService.update()/validateParentBusinessUnit()).
+  parent_business_unit_id: Joi.number().integer().positive().allow(null).optional().messages({
+    'number.base': 'Parent Business Unit ID must be a number.',
+    'number.positive': 'Parent Business Unit ID must be a positive integer.',
   }),
 })
   .min(1)

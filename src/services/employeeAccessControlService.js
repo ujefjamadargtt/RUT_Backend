@@ -179,8 +179,17 @@ const resolveEmployeeAccessWhere = async ({ userId, employeeId, companyId, hiera
     // X-Company-Id on a route that doesn't require it (Employee Master's GET
     // / — see resolveEmployeeListCompanyScope.js) — fall back to every
     // Business Unit they're mapped to rather than denying them everything.
-    const scopeIds = companyId != null ? companyId : employeeBusinessUnits;
+    let scopeIds = companyId != null ? companyId : employeeBusinessUnits;
     if (!scopeIds || (Array.isArray(scopeIds) && scopeIds.length === 0)) return { id: -1 };
+    // BU Hierarchy / Sub-BU support — a caller mapped only to a Parent BU
+    // (no individual Sub-BU mapping) still reaches its Sub-BUs' employees,
+    // same "mapped to parent -> reaches the whole subtree" rule as every
+    // other BU reach resolution (companyAccessControlService.resolveReportCompanyScope).
+    // No-op when companyId is a single scalar (a BU-scoped actor's own
+    // active BU is never widened) or when no hierarchy is configured.
+    if (Array.isArray(scopeIds)) {
+      scopeIds = await companyAccessControlService.expandBusinessUnitIdsWithDescendants(scopeIds);
+    }
     return employeeRepository.employeeScope(scopeIds);
   }
 

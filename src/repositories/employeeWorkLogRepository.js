@@ -488,6 +488,12 @@ const getHierarchyBreakdownForRange = async ({ employeeId, startDate, endDate })
  * employeeTimesheetService.replaceDailyEntries), so an entry a Manager
  * hasn't approved yet must be structurally impossible for Sync to pick up.
  *
+ * BU Hierarchy / Sub-BU support: Sync now runs strictly per-Business-Unit —
+ * a BU that currently has Sub-BUs is rejected up front by
+ * timesheetService.previewPmsImport() before this is ever called, so
+ * `companyId` here is always a single, genuinely childless BU (a Sub-BU, or
+ * a top-level BU with none). No hierarchy expansion needed.
+ *
  * @param {number} companyId
  * @param {number} month
  * @param {number} year
@@ -518,6 +524,7 @@ const findForSync = async (companyId, month, year) => {
  * unchanged rows just as much as newly pending ones (see findForSync's
  * doc). Called from inside confirmImport()'s transaction so the timesheets
  * insert and this status flip commit/rollback together.
+ *
  * @param {number} companyId
  * @param {Array<{ employeeId: number, poId: number, date: string }>} tuples
  * @param {number} timesheetImportId
@@ -1134,17 +1141,19 @@ const existsForServicePOOrHierarchy = async (servicePOId, hierarchyNodeIds, comp
  * a Parent, its own Children) — not by unrelated work logs logged directly
  * against the Service PO or against a sibling node elsewhere in the
  * hierarchy.
+ *
+ * Deliberately NOT company-scoped: the node ids already belong to a Service
+ * PO the caller was authorized for, and a work log on that node may carry
+ * any logging Employee's BU — a company filter could miss it and let a node
+ * with real work logs be deleted.
  * @param {number[]} hierarchyNodeIds - the node being deleted, plus its Children if it's a Parent
- * @param {number|number[]} companyId - a plain company id, or an array of owned company ids
- *   for a company-less Admin/Entity Admin caller (see companyAccessControlService)
  * @returns {Promise<boolean>}
  */
-const existsForHierarchyNodes = async (hierarchyNodeIds, companyId) => {
+const existsForHierarchyNodes = async (hierarchyNodeIds) => {
   if (!hierarchyNodeIds || hierarchyNodeIds.length === 0) return false;
 
-  const companyWhere = Array.isArray(companyId) ? { [Op.in]: companyId } : companyId;
   const row = await EmployeeWorkLog.findOne({
-    where: { hierarchy_node_id: { [Op.in]: hierarchyNodeIds }, company_id: companyWhere },
+    where: { hierarchy_node_id: { [Op.in]: hierarchyNodeIds } },
     attributes: ['id'],
   });
   return !!row;

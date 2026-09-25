@@ -66,12 +66,33 @@ const getAll = async (query = {}, entityIds) => {
  * already uses. Filtered/sorted to match getAll()'s search/status/name-order
  * contract so the frontend's existing dropdown rendering needs no changes.
  *
+ * BU Hierarchy / Sub-BU support: a BU Admin with a foothold ANYWHERE in a
+ * Parent + Sub-BU family — mapped to the Parent directly, or to just one of
+ * its Sub-BUs (e.g. only "DAS" under "DATA + AI") — sees the WHOLE family
+ * here (the Parent + every one of its Sub-BUs), not only the specific
+ * node(s) they're individually mapped to. Without this, a BU Admin mapped
+ * to a single Sub-BU could never even see its sibling Sub-BUs to pick from
+ * in a "Business Unit / Sub Business Unit" cascading dropdown (e.g. Add
+ * Client), even though they're clearly working within that same family.
+ *
  * @param {object} query - { search?, status? }
  * @param {number} employeeId
  * @returns {Promise<Company[]>}
  */
 const getAllForEmployee = async (query = {}, employeeId) => {
-  const businessUnits = await employeeBusinessUnitRepository.findBusinessUnitsByEmployeeId(employeeId);
+  const mappedBusinessUnits = await employeeBusinessUnitRepository.findBusinessUnitsByEmployeeId(employeeId);
+
+  const rootIds = new Set();
+  mappedBusinessUnits.forEach((bu) => {
+    rootIds.add(bu.parent_business_unit_id != null ? bu.parent_business_unit_id : bu.id);
+  });
+  const familyMembers = await companyRepository.findFamilyMembers([...rootIds]);
+
+  const businessUnitsById = new Map(mappedBusinessUnits.map((bu) => [bu.id, bu]));
+  familyMembers.forEach((bu) => {
+    if (!businessUnitsById.has(bu.id)) businessUnitsById.set(bu.id, bu);
+  });
+  const businessUnits = [...businessUnitsById.values()];
 
   let filtered = businessUnits;
   if (query.status && query.status !== 'all') {
@@ -94,6 +115,73 @@ const getById = async (id, entityIds) => {
 };
 
 /**
+ * BU Hierarchy / Sub-BU support — validate a `parent_business_unit_id`
+ * before it's written, on both create and update. Depth is capped at 2
+ * levels (Parent BU -> Sub-BU): the parent itself must not already be a
+ * Sub-BU, and (on update) the Company being assigned a parent must not
+ * already have Sub-BUs of its own — either combination would nest a 3rd
+ * level.
+ *
+ * @param {number} parentBusinessUnitId
+ * @param {number[]} entityIds - caller's own owned Entities (parent must be one of these)
+ * @param {number|null} [selfId] - the Company being created/updated (null on create)
+ * @returns {Promise<import('../models').Company>} the validated parent row
+ */
+const validateParentBusinessUnit = async (parentBusinessUnitId, entityIds, selfId = null) => {
+  if (selfId != null && parentBusinessUnitId === selfId) {
+    fail('A Business Unit cannot be its own parent.', 422);
+  }
+
+  const parent = await companyRepository.findByIdForEntities(parentBusinessUnitId, entityIds);
+  if (!parent) {
+    fail(`Parent Business Unit #${parentBusinessUnitId} not found.`, 404);
+  }
+
+  // "A deleted/inactive parent should not allow creation of new active
+  // children" — findByIdForEntities already excludes is_deleted rows, so
+  // only the active/inactive status check is needed here.
+  if (parent.status !== 'active') {
+    fail('Cannot assign a Sub-BU to an inactive parent Business Unit.', 422);
+  }
+
+  if (parent.parent_business_unit_id != null) {
+    fail('A Sub-BU cannot itself be a parent — only 2 levels of hierarchy (Business Unit -> Sub-BU) are supported.', 422);
+  }
+
+  if (selfId != null) {
+    const selfHasChildren = await companyRepository.hasChildren(selfId);
+    if (selfHasChildren) {
+      fail('This Business Unit already has its own Sub-BUs and cannot be made a Sub-BU of another Business Unit.', 422);
+    }
+  }
+
+  return parent;
+};
+
+/**
+ * Auto-generate a unique company_code for a Sub-BU — "no need of BU code" at
+ * Sub-BU creation time, same reasoning as entity_id being derived instead of
+ * asked for. Built from company_name (uppercase alphanumeric, truncated to
+ * the column's 20-char limit), with a numeric suffix appended if that base
+ * collides with an existing code.
+ *
+ * @param {string} companyName
+ * @returns {Promise<string>}
+ */
+const generateSubBuCode = async (companyName) => {
+  const base = String(companyName || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 20) || 'SUBBU';
+
+  let candidate = base;
+  let suffix = 1;
+  while (await companyRepository.findByCode(candidate)) {
+    const suffixStr = String(suffix);
+    candidate = `${base.slice(0, 20 - suffixStr.length)}${suffixStr}`;
+    suffix += 1;
+  }
+  return candidate;
+};
+
+/**
  * Create a company under one of the calling Entity Admin's own owned
  * Entities. Decoupled from admin-minting (Employee-as-Identity redesign) —
  * a company is created bare; assigning someone the "BU Admin" role for it
@@ -107,39 +195,68 @@ const getById = async (id, entityIds) => {
  * 20260890_seed_global_service_types_categories.sql), shared by every
  * Business Unit instead of being duplicated per-BU.
  *
- * @param {object} data - { entity_id, company_code, company_name, is_original_data_visible?, saturday_off_rule? }
+ * BU Hierarchy / Sub-BU support: when `parent_business_unit_id` is given,
+ * this Company is created as a Sub-BU and inherits from its parent instead
+ * of asking for these separately:
+ *   - entity_id — ALWAYS the parent's (never a client-supplied one, so a
+ *     Sub-BU can never end up under a different Entity than its parent);
+ *     optional in the request body.
+ *   - saturday_off_rule ("off day") — the parent's Week Off Policy, ignoring
+ *     any value in the request body ("off day, it takes its parent" — a
+ *     Sub-BU doesn't get its own policy at create time).
+ *   - company_code — auto-generated (generateSubBuCode()) when not supplied;
+ *     "no need of BU code" for a Sub-BU. Still optional-not-required.
+ * Without `parent_business_unit_id`, behavior is unchanged — a top-level
+ * Parent BU requires its own explicit `entity_id` and `company_code`, and
+ * `saturday_off_rule` defaults/behaves exactly as before.
+ *
+ * @param {object} data - { entity_id, company_code, company_name, is_original_data_visible?, saturday_off_rule?, parent_business_unit_id? }
  * @param {number} actorId - the Entity Admin creating this company
  * @param {string} ipAddress
  * @param {number[]} entityIds - the calling Entity Admin's own owned Entities (req.entityIds)
  * @returns {Promise<Company>}
  */
 const create = async (data, actorId, ipAddress = null, entityIds = []) => {
-  const { entity_id, company_code, company_name, is_original_data_visible, saturday_off_rule } = data;
+  const { entity_id, company_code, company_name, is_original_data_visible, saturday_off_rule, parent_business_unit_id } = data;
 
-  // "Entity Admin cannot access Entities belonging to another Entity
-  // Admin" — enforced here before anything else runs.
-  if (!entityIds.includes(entity_id)) {
-    fail(`Entity #${entity_id} is not one of your own entities.`, 403);
+  let effectiveEntityId = entity_id;
+  let effectiveSaturdayOffRule = saturday_off_rule;
+  let effectiveCompanyCode = company_code;
+
+  if (parent_business_unit_id != null) {
+    const parent = await validateParentBusinessUnit(parent_business_unit_id, entityIds, null);
+    effectiveEntityId = parent.entity_id;
+    effectiveSaturdayOffRule = parent.saturday_off_rule;
+    if (!effectiveCompanyCode) {
+      effectiveCompanyCode = await generateSubBuCode(company_name);
+    }
+  } else {
+    // "Entity Admin cannot access Entities belonging to another Entity
+    // Admin" — enforced here before anything else runs.
+    if (!entityIds.includes(entity_id)) {
+      fail(`Entity #${entity_id} is not one of your own entities.`, 403);
+    }
   }
 
-  const existingCompany = await companyRepository.findByCode(company_code);
+  const existingCompany = await companyRepository.findByCode(effectiveCompanyCode);
   if (existingCompany) {
-    fail(`Company code "${company_code}" already exists.`, 409);
+    fail(`Company code "${effectiveCompanyCode}" already exists.`, 409);
   }
 
   const company = await companyRepository.create({
-    entity_id,
-    company_code,
+    entity_id: effectiveEntityId,
+    company_code: effectiveCompanyCode,
     company_name,
     is_original_data_visible,
-    saturday_off_rule,
+    saturday_off_rule: effectiveSaturdayOffRule,
+    parent_business_unit_id: parent_business_unit_id ?? null,
     created_by: actorId,
     updated_by: actorId,
   });
 
   await createAuditLog(actorId, 'CREATE', 'companies', company.id, null, company.toJSON(), ipAddress);
 
-  logger.info('Company created', { companyId: company.id, createdBy: actorId });
+  logger.info('Company created', { companyId: company.id, createdBy: actorId, parentBusinessUnitId: parent_business_unit_id ?? null });
 
   return company;
 };
@@ -147,6 +264,14 @@ const create = async (data, actorId, ipAddress = null, entityIds = []) => {
 const update = async (id, data, actorId, ipAddress = null, entityIds = []) => {
   const existing = await getById(id, entityIds);
   const oldValues = existing.toJSON();
+
+  // BU Hierarchy — re-validate whenever parent_business_unit_id is being
+  // changed (including explicitly detaching it back to a top-level Parent
+  // BU via `null`, which needs no extra checks: a promoted BU starts with
+  // zero Sub-BUs of its own by construction).
+  if (Object.prototype.hasOwnProperty.call(data, 'parent_business_unit_id') && data.parent_business_unit_id != null) {
+    await validateParentBusinessUnit(data.parent_business_unit_id, entityIds, id);
+  }
 
   const updated = await companyRepository.update(id, data);
 
