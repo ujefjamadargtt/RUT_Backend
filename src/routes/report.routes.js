@@ -21,6 +21,7 @@ const {
   employeeWorkLogHoursSummaryDetailQuerySchema,
   employeeWorkLogHoursSummaryDetailParamsSchema,
 } = require('../validations/employeeWorkLogHoursSummaryValidation');
+const { projectTimesheetReportQuerySchema } = require('../validations/projectTimesheetReportValidation');
 
 /**
  * @swagger
@@ -36,6 +37,28 @@ router.use(heavyReportLimiter);
 // Employee Work Log Hours Summary is intentionally a new report data source:
 // it reads employee_work_logs, never the official timesheets table used by
 // the pre-existing Reports endpoints below.
+/**
+ * @swagger
+ * /reports/project-timesheet:
+ *   get:
+ *     summary: Project-wise timesheet report (entries with activity description, Project Manager, leave hours, approval status)
+ *     description: >
+ *       Employee-wise and day-wise work-log entries, filterable by Project / Service PO /
+ *       Client / Employee. Period is month+year or start_date+end_date (max 366 days).
+ *       format=json (paged, optional include_summary) | excel (Details, Project Summary,
+ *       Employee Summary sheets) | csv (details). Visibility follows the caller's own
+ *       Employee scope within their report reach.
+ *     tags: [Reports]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.get(
+  '/project-timesheet',
+  authenticateMultiBU,
+  validate(projectTimesheetReportQuerySchema, 'query'),
+  reportController.getProjectTimesheetReport
+);
+
 router.get(
   '/employee-work-log-hours-summary',
   authenticateMultiBU,

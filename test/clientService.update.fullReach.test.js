@@ -164,3 +164,78 @@ test('deleteClient(): a Client in the caller\'s OTHER managed BU (7, not the act
     restore();
   }
 });
+
+// Real bug report: an Admin creates a Client with no Business Unit
+// (company_id NULL — BU is optional for a company-less actor) and can open
+// it, but Save 404s "Client not found". update()/deleteClient() looked it up
+// with the plain full-reach ARRAY (`company_id IN (...)`), which never
+// matches NULL; getById() already used resolveActorRecordAccessScope()'s
+// `{ ownedCompanyIds, createdBy }` shape, which also matches
+// `company_id IS NULL AND created_by = me`. Both now use that same shape.
+const { Client } = require('../src/models');
+const { Op } = require('sequelize');
+
+const ADMIN_REQ = { companyId: undefined, hierarchyRank: 2, employeeId: 3, employeeBusinessUnits: [], headers: {} };
+
+function matchesScope(row, where) {
+  const orClauses = where[Op.or];
+  if (!orClauses) return true;
+  return orClauses.some((clause) => Object.entries(clause).every(([key, cond]) => (
+    cond !== null && typeof cond === 'object' && Op.in in cond ? cond[Op.in].includes(row[key]) : row[key] === cond
+  )));
+}
+
+test('update(): an Admin can update the BU-less Client (company_id NULL) they created — THE BUG FIX', async () => {
+  const originalFindOne = Client.findOne;
+  try {
+    const row = { id: 37, client_code: 'CLT-1', client_name: 'Pre-Sales Client', industry: 'IT', status: 'active', company_id: null, created_by: 3 };
+    Client.findOne = async ({ where }) => (where.id === 37 && matchesScope(row, where) ? row : null);
+    clientRepository.findByName = async () => null;
+    let updatedPayload;
+    clientRepository.update = async (id, payload) => { updatedPayload = payload; return { id, ...payload }; };
+
+    const updated = await clientService.update(37, { client_name: 'Pre-Sales Client 2' }, 3, ADMIN_REQ);
+
+    assert.equal(updatedPayload.client_name, 'Pre-Sales Client 2');
+    assert.equal(updatedPayload.company_id, null); // BU stays unassigned
+    assert.equal(updated.client_name, 'Pre-Sales Client 2');
+  } finally {
+    Client.findOne = originalFindOne;
+    restore();
+  }
+});
+
+test('update(): a DIFFERENT Admin still cannot reach another Admin\'s BU-less Client (404)', async () => {
+  const originalFindOne = Client.findOne;
+  try {
+    const row = { id: 37, client_code: 'CLT-1', client_name: 'Pre-Sales Client', status: 'active', company_id: null, created_by: 3 };
+    Client.findOne = async ({ where }) => (where.id === 37 && matchesScope(row, where) ? row : null);
+    clientRepository.update = async () => assert.fail('must not write');
+
+    await assert.rejects(
+      () => clientService.update(37, { client_name: 'Hijack' }, 4, { ...ADMIN_REQ, employeeId: 4 }),
+      (err) => err.statusCode === 404
+    );
+  } finally {
+    Client.findOne = originalFindOne;
+    restore();
+  }
+});
+
+test('deleteClient(): an Admin can delete the BU-less Client they created', async () => {
+  const originalFindOne = Client.findOne;
+  try {
+    const row = { id: 37, client_name: 'Pre-Sales Client', status: 'active', company_id: null, created_by: 3 };
+    Client.findOne = async ({ where }) => (where.id === 37 && matchesScope(row, where) ? row : null);
+    clientRepository.countActivePOsByClient = async () => 0;
+    let softDeleted = false;
+    clientRepository.softDelete = async () => { softDeleted = true; return true; };
+
+    await clientService.deleteClient(37, 3, ADMIN_REQ);
+
+    assert.equal(softDeleted, true);
+  } finally {
+    Client.findOne = originalFindOne;
+    restore();
+  }
+});

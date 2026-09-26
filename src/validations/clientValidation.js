@@ -123,6 +123,14 @@ const listClientsQuerySchema = Joi.object({
   industry: Joi.string().trim().max(100).optional().allow(''),
   sort_by: Joi.string().valid('client_name', 'client_code', 'industry', 'created_at').default('client_name'),
   sort_order: Joi.string().valid('ASC', 'DESC', 'asc', 'desc').default('ASC'),
+  // camelCase aliases the Client Master frontend actually sends
+  // (sortBy=created_at&sortOrder=desc). Previously absent here, so
+  // validateRequest's stripUnknown silently dropped them and every request
+  // fell back to client_name ASC. Deliberately NOT .valid()-restricted: an
+  // unsupported value falls back to the default ordering (clientRepository.
+  // findAll()'s column whitelist) instead of a 400 — never reaches SQL raw.
+  sortBy: Joi.string().trim().max(50).optional().allow(''),
+  sortOrder: Joi.string().trim().max(10).optional().allow(''),
   // Optional BU filter — Admin/Entity Admin: narrows to that BU only (BU-less
   // records are excluded). BU-scoped actors: validated against their own BUs
   // by resolveReportCompanyScope before this ever reaches the service.

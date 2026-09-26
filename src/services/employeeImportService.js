@@ -1,14 +1,13 @@
 'use strict';
 
 const xlsx = require('xlsx');
-const { sequelize, Role, Company } = require('../models');
-const { Op } = require('sequelize');
+const { sequelize, Role } = require('../models');
 const employeeRepository = require('../repositories/employeeRepository');
 const employeeRoleRepository = require('../repositories/employeeRoleRepository');
 const employeeBusinessUnitRepository = require('../repositories/employeeBusinessUnitRepository');
-const companyRepository = require('../repositories/companyRepository');
 const employeeServicePOMappingService = require('./employeeServicePOMappingService');
-const { resolveOptionalCreateCompanyId, resolveOwnedCompanyIds } = require('./companyAccessControlService');
+const { resolveOptionalCreateCompanyId } = require('./companyAccessControlService');
+const { SUB_BU_HEADERS, ENTITY_HEADERS, normaliseName, splitNames, loadSubBusinessUnits, buildActorBusinessUnitLookup } = require('./importSubBusinessUnitService');
 const logger = require('../utils/logger');
 
 // Bulk-imported logins all get this same default password rather than a
@@ -72,6 +71,13 @@ const HEADER_MAP = {
   'bu': 'business_units_raw',
   'bu name': 'business_units_raw',
   'bu_name': 'business_units_raw',
+  // BU Hierarchy / Sub-BU support — see importSubBusinessUnitService.js and
+  // resolveRowBusinessUnitIds() below. Mandatory when a named Business Unit
+  // has Sub-BUs (unless the Sub-BU is already named in "Business Units").
+  ...Object.fromEntries(SUB_BU_HEADERS.map((h) => [h, 'sub_bu_raw'])),
+  // Optional — tells apart two Business Units with the same name under
+  // different Entities.
+  ...Object.fromEntries(ENTITY_HEADERS.map((h) => [h, 'entity_name'])),
 };
 
 const CODE_RE = /^[A-Z0-9_/#-]{2,20}$/;
@@ -346,26 +352,20 @@ function validateRow(raw, existingCodes, seenCodes, existingEmails, seenEmails) 
  *   company-less create/import flow in this codebase uses — mirrors
  *   servicePOImportService.js's resolveRowBusinessUnits().
  *
+ * Business Unit names are only unique per Entity, so a name maps to EVERY
+ * matching Business Unit (never "last one wins") — resolveRowBusinessUnitIds()
+ * reports an ambiguous name unless the row's "Entity Name" narrows it.
+ *
  * @param {import('express').Request} req
- * @returns {Promise<Map<string, number>>} lowercased, trimmed company_name -> id
+ * @returns {Promise<Map<string, { id: number, company_name: string, entity_name: string|null }[]>>}
+ *   normalised company_name -> matching Business Units
  */
 async function buildImportBuNameLookup(req) {
-  let companies;
-
-  if (req.companyId != null) {
-    companies = (req.employeeBusinessUnits || []).map((bu) => ({ id: bu.id, company_name: bu.company_name }));
-  } else {
-    const ownedCompanyIds = (await resolveOwnedCompanyIds(req.hierarchyRank, req.employeeId)) || [];
-    companies = ownedCompanyIds.length
-      ? await Company.findAll({
-        where: { id: { [Op.in]: ownedCompanyIds }, is_deleted: false },
-        attributes: ['id', 'company_name'],
-        raw: true,
-      })
-      : [];
-  }
-
-  return new Map(companies.map((c) => [String(c.company_name).trim().toLowerCase(), c.id]));
+  // Shared with the Client / Project / Service PO imports: an Admin's owned
+  // Companies, or a BU-scoped actor's mapped BUs + their Sub-BUs (the same
+  // reach as the manual Role & BU Mapping screen), each with its Entity name.
+  const { companiesByName } = await buildActorBusinessUnitLookup(req);
+  return companiesByName;
 }
 
 /**
@@ -378,44 +378,91 @@ async function buildImportBuNameLookup(req) {
  * employeeBusinessUnitRepository.replaceForEmployee() — so a multi-name
  * cell simply maps to that existing capability, not a new format).
  *
+ * "Sub BU" column (BU Hierarchy / Sub-BU support — see
+ * importSubBusinessUnitService.js): comma-separated Sub-BU names, each
+ * resolved ONLY among the Sub-BUs of the Business Units named on this row
+ * (so a Sub-BU name shared by two different Parents never collides). A
+ * Business Unit that has Sub-BUs must get at least one of them — from this
+ * column or, as before, named directly in "Business Units"; a BU without
+ * Sub-BUs leaves the column blank. The Parent is kept alongside its Sub-BU(s).
+ *
  * @param {object} raw - parsed row (see parseEmployeeFile)
- * @param {Map<string, number>} buNameMap
- * @param {Set<number>} parentIdsWithChildren - BU Hierarchy / Sub-BU support
- *   — ids (from buNameMap's own values) that currently have Sub-BUs; "map BU
- *   + Sub-BU, compulsory" applies here too — a row naming a Business Unit
- *   that has Sub-BUs must also name at least one of its Sub-BUs (both kept).
- * @param {Map<number, number[]>} [childIdsByParent] - Parent id -> its Sub-BU ids
+ * @param {Map<string, object[]>} buNameMap - see buildImportBuNameLookup()
+ * @param {Map<number, { id: number, company_name: string }[]>} childrenByParent - Parent id -> its Sub-BUs
  * @returns {{ ids: number[], errors: string[] }}
  */
-function resolveRowBusinessUnitIds(raw, buNameMap, parentIdsWithChildren, childIdsByParent) {
-  const rawValue = String(raw.business_units_raw || '').trim();
-  if (!rawValue) return { ids: [], errors: [] };
+function resolveRowBusinessUnitIds(raw, buNameMap, childrenByParent) {
+  // "Parent -> Sub" inside "Business Units" (the format Employee List's own
+  // Export Excel / sample template writes for a Sub-BU) is the same as
+  // naming the Parent there and the Sub-BU in "Sub BU".
+  const names = [];
+  const subBuNames = splitNames(raw.sub_bu_raw);
+  for (const entry of splitNames(raw.business_units_raw)) {
+    const [parentName, subName] = entry.split('->').map((part) => part.trim());
+    if (parentName) names.push(parentName);
+    if (subName) subBuNames.push(subName);
+  }
+  if (names.length === 0) {
+    return subBuNames.length
+      ? { ids: [], errors: ['"Sub BU" is filled but "Business Units" is blank — name the Business Unit too.'] }
+      : { ids: [], errors: [] };
+  }
 
-  const names = rawValue.split(',').map((n) => n.trim()).filter(Boolean);
+  const entityName = String(raw.entity_name || '').trim();
   const ids = [];
   const errors = [];
   const seen = new Set();
+  const add = (id) => {
+    if (!seen.has(id)) { seen.add(id); ids.push(id); }
+  };
 
-  const parentNameById = new Map();
+  const namedParents = []; // { id, name } of named BUs that have Sub-BUs
   for (const name of names) {
-    const id = buNameMap.get(name.toLowerCase());
-    if (id === undefined) {
-      errors.push(`Business Unit "${name}" not found.`);
-    } else if (!seen.has(id)) {
-      seen.add(id);
-      ids.push(id);
-      if (parentIdsWithChildren.has(id)) parentNameById.set(id, name);
+    let matches = buNameMap.get(normaliseName(name)) || [];
+    if (entityName) matches = matches.filter((c) => normaliseName(c.entity_name) === normaliseName(entityName));
+    if (matches.length === 0) {
+      errors.push(`Business Unit "${name}" not found${entityName ? ` under Entity "${entityName}"` : ''}.`);
+      continue;
+    }
+    if (matches.length > 1) {
+      const entities = matches.map((c) => c.entity_name || 'no Entity').join(', ');
+      errors.push(`Business Unit "${name}" exists under more than one Entity (${entities}) — fill the "Entity Name" column to pick one.`);
+      continue;
+    }
+    add(matches[0].id);
+    if ((childrenByParent.get(matches[0].id) || []).length > 0) namedParents.push({ id: matches[0].id, name: matches[0].company_name });
+  }
+
+  // Sub BU column — resolved among the named Parents' own Sub-BUs only.
+  const candidates = namedParents.flatMap((p) => (childrenByParent.get(p.id) || []).map((c) => ({ ...c, parentName: p.name })));
+  const hadBuNameError = errors.length > 0;
+  for (const subName of subBuNames) {
+    if (namedParents.length === 0) {
+      // A Business Unit name that didn't resolve already has its own error —
+      // don't also claim "no Sub-BUs" about a BU that was never identified.
+      if (!hadBuNameError) {
+        errors.push(`Sub BU "${subName}": none of the Business Units on this row have Sub-BUs — leave "Sub BU" blank.`);
+      }
+      continue;
+    }
+    const subMatches = candidates.filter((c) => normaliseName(c.company_name) === normaliseName(subName));
+    if (subMatches.length === 0) {
+      errors.push(`Sub BU "${subName}" not found under ${namedParents.map((p) => `"${p.name}"`).join(', ')}.`);
+    } else if (subMatches.length > 1) {
+      errors.push(`Sub BU "${subName}" matches more than one Sub-BU (${subMatches.map((c) => `${c.company_name} under ${c.parentName}`).join('; ')}) — rename one in Business Unit Master.`);
+    } else {
+      add(subMatches[0].id);
     }
   }
 
   // A Parent BU is kept alongside its Sub-BU(s) (a Sub-BU is part of its
   // Parent, like a department) — same rule as employeeService's
-  // resolveBusinessUnitIds(). Only a Parent named WITHOUT any of its own
-  // Sub-BUs on the same row is an error.
-  for (const [parentId, name] of parentNameById) {
-    const children = (childIdsByParent && childIdsByParent.get(parentId)) || [];
-    if (!children.some((childId) => seen.has(childId))) {
-      errors.push(`Business Unit "${name}" has Sub-BUs — also specify the Sub-BU name.`);
+  // resolveBusinessUnitIds(). A Parent left WITHOUT any of its own Sub-BUs
+  // on the row is an error.
+  for (const parent of namedParents) {
+    const children = childrenByParent.get(parent.id) || [];
+    if (!children.some((c) => seen.has(c.id))) {
+      errors.push(`Business Unit "${parent.name}" has Sub-BUs — "Sub BU" is required (one of: ${children.map((c) => c.company_name).join(', ')}).`);
     }
   }
 
@@ -463,20 +510,11 @@ async function importEmployees(filePath, userId, req) {
   const existingCodes = new Set(existingForCompany.map((e) => e.employee_code.toUpperCase()));
   const existingEmails = new Set(await employeeRepository.findAllEmails());
   const buNameMap = await buildImportBuNameLookup(req);
-  // BU Hierarchy / Sub-BU support — which of the importer's own reachable
-  // BUs currently have Sub-BUs (one batched query, not per-row).
-  const parentIdsWithChildren = new Set(await companyRepository.findIdsWithChildren([...buNameMap.values()]));
-  const childIdsByParent = new Map();
-  if (parentIdsWithChildren.size > 0) {
-    const childRows = await Company.findAll({
-      where: { parent_business_unit_id: { [Op.in]: [...parentIdsWithChildren] }, is_deleted: false },
-      attributes: ['id', 'parent_business_unit_id'],
-    });
-    childRows.forEach((c) => {
-      if (!childIdsByParent.has(c.parent_business_unit_id)) childIdsByParent.set(c.parent_business_unit_id, []);
-      childIdsByParent.get(c.parent_business_unit_id).push(c.id);
-    });
-  }
+  // BU Hierarchy / Sub-BU support — every Sub-BU of the importer's own
+  // reachable BUs (one batched query, not per-row). A BU-scoped actor may
+  // assign any Sub-BU of a BU they are mapped to — same reach as the manual
+  // Role & BU Mapping screen (employeeService.resolveBUAssignmentScope()).
+  const childrenByParent = await loadSubBusinessUnits([...buNameMap.values()].flat().map((c) => c.id));
 
   // 3. Validate all rows; track codes/emails seen within this file to catch duplicates
   const seenCodes = new Set();
@@ -486,7 +524,7 @@ async function importEmployees(filePath, userId, req) {
 
   for (const raw of rawRows) {
     const { errors, data } = validateRow(raw, existingCodes, seenCodes, existingEmails, seenEmails);
-    const { ids: businessUnitIds, errors: buErrors } = resolveRowBusinessUnitIds(raw, buNameMap, parentIdsWithChildren, childIdsByParent);
+    const { ids: businessUnitIds, errors: buErrors } = resolveRowBusinessUnitIds(raw, buNameMap, childrenByParent);
     const allErrors = buErrors.length ? [...errors, ...buErrors] : errors;
     if (allErrors.length) {
       errorRows.push({ row: raw._rowNum, errors: allErrors });

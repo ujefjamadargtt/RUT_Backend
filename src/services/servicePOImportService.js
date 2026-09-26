@@ -5,9 +5,20 @@ const { Op } = require('sequelize');
 const { sequelize, Client, ServiceType, ServiceCategory, ServicePO, Project, Employee, User, Role, Company } = require('../models');
 const servicePORepository = require('../repositories/servicePORepository');
 const servicePOHierarchyRepository = require('../repositories/servicePOHierarchyRepository');
-const { generatePOCode } = require('../helpers/codeGenerator');
+const employeeServicePOMappingRepository = require('../repositories/employeeServicePOMappingRepository');
+const { hasServicePOMappingAuthority } = require('./employeeServicePOMappingService');
 const { createServicePOSchema } = require('../validations/servicePOValidation');
 const { resolveOwnedCompanyIds } = require('./companyAccessControlService');
+const {
+  SUB_BU_HEADERS,
+  ENTITY_HEADERS,
+  loadSubBusinessUnits,
+  resolveRowSubBusinessUnit,
+  buildOwnedBusinessUnitLookup,
+  buildActorBusinessUnitLookup,
+  resolveOwnedBusinessUnitByName,
+  blankBuNameError,
+} = require('./importSubBusinessUnitService');
 const logger = require('../utils/logger');
 
 // Sentinel stored in ctx.employeeByName when two employees in the same
@@ -25,10 +36,20 @@ const AMBIGUOUS_EMPLOYEE = Symbol('AMBIGUOUS_EMPLOYEE');
 const DELIVERY_HEAD_ALLOWED_ROLES = ['Team Lead', 'Project Manager', 'Project Admin', 'BU Admin'];
 
 // Flexible column-header → field mapping (matched after normalising to lowercase + collapsed spaces)
-// NOTE: Service PO Code is intentionally NOT mapped here — it is always auto-generated
-// during import (format PO-YYYYMMDD-XXXX, via generatePOCode()), even if the sheet has a
-// PO Code column. Any such column is ignored.
 const HEADER_MAP = {
+  // Service PO Number — REQUIRED for a new Service PO (same as the single
+  // create form, which always takes it from the user); never auto-generated.
+  'po number': 'service_po_code',
+  'po no': 'service_po_code',
+  'po no.': 'service_po_code',
+  'service po number': 'service_po_code',
+  'service po no': 'service_po_code',
+  'service po no.': 'service_po_code',
+  'po code': 'service_po_code',
+  'service po code': 'service_po_code',
+  'po_number': 'service_po_code',
+  'service_po_code': 'service_po_code',
+
   'service po name': 'service_po_name',
   'po name': 'service_po_name',
   'name': 'service_po_name',
@@ -91,16 +112,23 @@ const HEADER_MAP = {
   'hierarchy_child': 'hierarchy_child',
   'child': 'hierarchy_child',
 
-  // Only meaningful for a company-less actor (Admin/Entity Admin) — see
-  // resolveRowBusinessUnits(). A BU-scoped actor's own active Business Unit
-  // (req.companyId, already resolved/authorized by resolveCompany.js from
-  // the X-Company-Id header before this service ever runs) always wins;
-  // this column is simply ignored for that actor, even if an old
-  // Admin-style template is reused by mistake.
+  // Row Business Unit — see resolveRowBusinessUnits(). Required for a
+  // company-less actor (Admin/Entity Admin); optional for a BU-scoped actor
+  // (blank = their BU only if they are mapped to exactly one), and only ever resolved among the actor's OWN
+  // Business Units, so the sheet can never reach a BU they aren't mapped to.
   'bu name': 'bu_name',
   'bu_name': 'bu_name',
   'business unit': 'bu_name',
   'business_unit': 'bu_name',
+
+  // BU Hierarchy / Sub-BU support — see importSubBusinessUnitService.js.
+  // Mandatory when the row's Business Unit has Sub-BUs, otherwise blank.
+  // Applies to every actor (a BU Admin's own active BU may have Sub-BUs too).
+  ...Object.fromEntries(SUB_BU_HEADERS.map((h) => [h, 'sub_bu'])),
+
+  // Optional — only used to tell apart two Business Units with the same
+  // "BU Name" under different Entities (company-less actor only).
+  ...Object.fromEntries(ENTITY_HEADERS.map((h) => [h, 'entity_name'])),
 };
 
 // client_id / service_type_id / project_id / delivery_head_employee_id are all resolved by
@@ -110,13 +138,10 @@ const HEADER_MAP = {
 // format/range/enum/required rules on the remaining fields, reusing the exact same rules the
 // single-record create API enforces.
 //
-// service_po_code is ALSO forked to optional here: per HEADER_MAP's own doc comment above,
-// it is intentionally never read from the sheet and is always freshly auto-generated after
-// validation passes (see importServicePOs()'s code-generation step) — candidate therefore
-// never carries this key when rowSchema runs. Without this fork, createServicePOSchema's own
-// `.required()` on service_po_code fails EVERY row with "Service PO number is required."
-// unconditionally (pre-existing bug, discovered and fixed here — unrelated to Business Unit
-// handling, but it silently made the entire Service PO import feature 100% non-functional).
+// service_po_code is ALSO forked to optional here: the "PO Number" column is required only
+// for a NEW Service PO (a row for an existing PO may leave it blank), which rowSchema can't
+// know — processGroup() enforces that per group, and validateRowsForCompany() enforces
+// per-Business-Unit uniqueness. Format is still validated here whenever a value is given.
 const rowSchema = createServicePOSchema.fork(
   ['client_id', 'service_type_id', 'project_id', 'delivery_head_employee_id', 'service_po_code'],
   (s) => s.optional()
@@ -196,6 +221,13 @@ function isBlank(v) {
   return v === null || v === undefined || v === '';
 }
 
+// Same rule as createServicePOSchema's service_po_code (uppercased first).
+const PO_CODE_PATTERN = /^[A-Z0-9_/-]{2,30}$/;
+
+function normalisePOCode(value) {
+  return isBlank(value) ? null : String(value).trim().toUpperCase() || null;
+}
+
 /**
  * Parse the first sheet of the uploaded Excel/CSV file.
  * Returns the parsed rows (keyed by canonical field names) plus whether a
@@ -246,7 +278,10 @@ function parseServicePOFile(filePath) {
 
     mappedHeaders.forEach((field, colIdx) => {
       if (!field) return;
-      const val = cells[colIdx];
+      // A cell holding only spaces counts as blank (common in hand-edited
+      // sheets) — otherwise e.g. a " " Service PO Name silently dropped the row.
+      const raw = cells[colIdx];
+      const val = typeof raw === 'string' ? raw.trim() : raw;
       if (!isBlank(val)) hasData = true;
       row[field] = isBlank(val) ? '' : val;
     });
@@ -255,7 +290,39 @@ function parseServicePOFile(filePath) {
     rows.push(row);
   }
 
-  return { rows, hasBuNameColumn };
+  return { rows: fillDownHierarchyRows(rows), hasBuNameColumn };
+}
+
+/**
+ * Continuation rows — a row that only adds a Module/Task (Hierarchy Parent /
+ * Child) and leaves PO Number AND Service PO Name blank belongs to the
+ * nearest Service PO row above it, the way people naturally lay out a
+ * hierarchy in Excel. It inherits that row's PO Number, Service PO Name and
+ * BU Name / Entity Name / Sub BU (so a BU-scoped actor's blank BU Name can't
+ * fall back to a different, active BU). Repeating the values explicitly
+ * still works exactly as before.
+ *
+ * @param {object[]} rows - parsed rows, in file order
+ * @returns {object[]}
+ */
+function fillDownHierarchyRows(rows) {
+  const INHERITED = ['service_po_code', 'service_po_name', 'bu_name', 'entity_name', 'sub_bu'];
+  let anchor = null;
+  for (const row of rows) {
+    const hasOwnPO = !isBlank(row.service_po_name) || !isBlank(row.service_po_code);
+    if (hasOwnPO) {
+      anchor = row;
+      continue;
+    }
+    const isHierarchyOnly = (!isBlank(row.hierarchy_parent) || !isBlank(row.hierarchy_child))
+      && !hasAnyValue(row, RELATIONSHIP_FIELDS);
+    if (anchor && isHierarchyOnly) {
+      INHERITED.forEach((field) => {
+        if (isBlank(row[field]) && !isBlank(anchor[field])) row[field] = anchor[field];
+      });
+    }
+  }
+  return rows;
 }
 
 /**
@@ -433,10 +500,21 @@ function resolveRowFields(raw, ctx) {
     candidate.service_po_name = String(raw.service_po_name).trim();
   }
 
-  // ── po_value (required for import, even though optional on the single-create API) ──
-  if (isBlank(raw.po_value)) {
-    errors.push('PO value is required.');
-  } else {
+  // ── service_po_code (PO Number) — format here; "required for a NEW PO",
+  // "must match an existing PO's number" and uniqueness are checked per
+  // group / per Business Unit (processGroup(), validateRowsForCompany()).
+  const poCode = normalisePOCode(raw.service_po_code);
+  if (poCode) {
+    if (!PO_CODE_PATTERN.test(poCode)) {
+      errors.push(`PO Number "${raw.service_po_code}" must be 2-30 characters: A-Z, 0-9, hyphen (-), underscore (_) or slash (/).`);
+      invalidFields.add('service_po_code');
+    } else {
+      candidate.service_po_code = poCode;
+    }
+  }
+
+  // ── po_value — optional, same as the single-create API; only validated when given ──
+  if (!isBlank(raw.po_value)) {
     const poValue = parseNumber(raw.po_value);
     if (poValue === null) {
       errors.push(`PO value "${raw.po_value}" is not a valid number.`);
@@ -716,6 +794,28 @@ function processGroup(key, rows, ctx) {
     }
   }
 
+  // ── PO Number (service_po_code) ──────────────────────────────────────────────
+  // Every row of one Service PO must agree on it; a NEW PO needs one; a row
+  // for an EXISTING PO may repeat that PO's own number (or leave it blank).
+  const anchorRowNum = group.definingRowNum || rows[0]._rowNum;
+  const anchorRowData = group.definingRowData || buildRowData(rows[0]);
+  const codes = [...new Set(rows.map((raw) => normalisePOCode(raw.service_po_code)).filter(Boolean))];
+  if (codes.length > 1) {
+    return { ok: false, errorRows: [{ row_number: anchorRowNum, row_data: anchorRowData, errors: [`Rows for Service PO "${rows[0].service_po_name}" give different PO Numbers (${codes.join(', ')}) — use one PO Number per Service PO.`] }] };
+  }
+  const code = codes[0] || null;
+  if (code && !PO_CODE_PATTERN.test(code)) {
+    return { ok: false, errorRows: [{ row_number: anchorRowNum, row_data: anchorRowData, errors: [`PO Number "${code}" must be 2-30 characters: A-Z, 0-9, hyphen (-), underscore (_) or slash (/).`] }] };
+  }
+  if (group.isNew) {
+    if (!code) {
+      return { ok: false, errorRows: [{ row_number: anchorRowNum, row_data: anchorRowData, errors: ['PO Number is required.'] }] };
+    }
+    group.code = code;
+  } else if (code && code !== String(group.existingPO.service_po_code || '').toUpperCase()) {
+    return { ok: false, errorRows: [{ row_number: anchorRowNum, row_data: anchorRowData, errors: [`Service PO "${rows[0].service_po_name}" already exists with PO Number "${group.existingPO.service_po_code}" — PO Number "${code}" does not match.`] }] };
+  }
+
   // ── Circular / invalid-depth check: a name cannot be both a Parent and a Child ──
   const childKeys = new Set(group.pairs.map((p) => p.childKey));
   for (const parentKey of group.parentNames.keys()) {
@@ -790,8 +890,56 @@ function reportRemainingRowsAsSkipped(rows, failedRaw, ctx, alsoExclude = []) {
  * @throws {Error} 422 if a company-less actor's sheet has no "BU Name" column at all
  */
 async function resolveRowBusinessUnits(rawRows, authContext, hasBuNameColumn) {
+  const rowsByCompanyId = new Map();
+  const errorRows = [];
+  const addRow = (companyId, raw) => {
+    if (!rowsByCompanyId.has(companyId)) rowsByCompanyId.set(companyId, []);
+    rowsByCompanyId.get(companyId).push(raw);
+  };
+
   if (authContext.companyId != null) {
-    return { rowsByCompanyId: new Map([[authContext.companyId, rawRows]]), errorRows: [] };
+    // BU-scoped actor: the row's "BU Name" (one of their own mapped BUs /
+    // Sub-BUs) or, when blank, their active Business Unit — plus, when that
+    // BU has Sub-BUs, the row's mandatory "Sub BU" (one of ITS OWN Sub-BUs).
+    const [loaded] = await Company.findAll({
+      where: { id: { [Op.in]: [authContext.companyId] }, is_deleted: false },
+      attributes: ['id', 'company_name'],
+      raw: true,
+    });
+    const activeBusinessUnit = loaded && loaded.id != null
+      ? loaded
+      : { id: authContext.companyId, company_name: `#${authContext.companyId}` };
+    // A multi-BU actor may also name ANOTHER of their own mapped BUs (or one
+    // of its Sub-BUs) per row in "BU Name" (+ "Entity Name" for same-named
+    // BUs) — never a BU outside their own mappings.
+    const { companiesByName, childrenByParent } = await buildActorBusinessUnitLookup(authContext);
+    if (!childrenByParent.has(activeBusinessUnit.id)) {
+      for (const [parentId, children] of await loadSubBusinessUnits([activeBusinessUnit.id])) childrenByParent.set(parentId, children);
+    }
+    // Blank "BU Name" = their BU only when they have exactly one mapping;
+    // with several it's a row error — never the Global BU selector.
+    const blankBuError = blankBuNameError(authContext);
+    for (const raw of rawRows) {
+      let businessUnit = activeBusinessUnit;
+      if (String(raw.bu_name || '').trim()) {
+        const resolvedBu = resolveOwnedBusinessUnitByName(raw.bu_name, raw.entity_name, companiesByName);
+        if (resolvedBu.error) {
+          errorRows.push({ row_number: raw._rowNum, row_data: buildRowData(raw), errors: [resolvedBu.error] });
+          continue;
+        }
+        businessUnit = resolvedBu.businessUnit;
+      } else if (blankBuError) {
+        errorRows.push({ row_number: raw._rowNum, row_data: buildRowData(raw), errors: [blankBuError] });
+        continue;
+      }
+      const { companyId, error } = resolveRowSubBusinessUnit(businessUnit, raw.sub_bu, childrenByParent);
+      if (error) {
+        errorRows.push({ row_number: raw._rowNum, row_data: buildRowData(raw), errors: [error] });
+        continue;
+      }
+      addRow(companyId, raw);
+    }
+    return { rowsByCompanyId, errorRows };
   }
 
   if (!hasBuNameColumn) {
@@ -804,17 +952,8 @@ async function resolveRowBusinessUnits(rawRows, authContext, hasBuNameColumn) {
   }
 
   const ownedCompanyIds = (await resolveOwnedCompanyIds(authContext.hierarchyRank, authContext.employeeId)) || [];
-  const ownedCompanies = ownedCompanyIds.length
-    ? await Company.findAll({
-      where: { id: { [Op.in]: ownedCompanyIds }, is_deleted: false },
-      attributes: ['id', 'company_name'],
-      raw: true,
-    })
-    : [];
-  const companyByName = new Map(ownedCompanies.map((c) => [c.company_name.trim().toLowerCase(), c]));
-
-  const rowsByCompanyId = new Map();
-  const errorRows = [];
+  // BU names are only unique per Entity — see buildOwnedBusinessUnitLookup().
+  const { companiesByName, childrenByParent } = await buildOwnedBusinessUnitLookup(ownedCompanyIds);
 
   for (const raw of rawRows) {
     const buNameRaw = String(raw.bu_name || '').trim();
@@ -822,13 +961,17 @@ async function resolveRowBusinessUnits(rawRows, authContext, hasBuNameColumn) {
       errorRows.push({ row_number: raw._rowNum, row_data: buildRowData(raw), errors: ['BU Name is required.'] });
       continue;
     }
-    const company = companyByName.get(buNameRaw.toLowerCase());
-    if (!company) {
-      errorRows.push({ row_number: raw._rowNum, row_data: buildRowData(raw), errors: [`BU "${buNameRaw}" not found.`] });
+    const { businessUnit, error: buError } = resolveOwnedBusinessUnitByName(buNameRaw, raw.entity_name, companiesByName);
+    if (buError) {
+      errorRows.push({ row_number: raw._rowNum, row_data: buildRowData(raw), errors: [buError] });
       continue;
     }
-    if (!rowsByCompanyId.has(company.id)) rowsByCompanyId.set(company.id, []);
-    rowsByCompanyId.get(company.id).push(raw);
+    const { companyId, error } = resolveRowSubBusinessUnit(businessUnit, raw.sub_bu, childrenByParent);
+    if (error) {
+      errorRows.push({ row_number: raw._rowNum, row_data: buildRowData(raw), errors: [error] });
+      continue;
+    }
+    addRow(companyId, raw);
   }
 
   return { rowsByCompanyId, errorRows };
@@ -846,10 +989,20 @@ async function resolveRowBusinessUnits(rawRows, authContext, hasBuNameColumn) {
  * @returns {Promise<{ ctx: object, existingCodes: Set<string> }>}
  */
 async function buildCompanyImportContext(companyId) {
-  const [existingPOs, clients, projects, serviceTypes, employees] = await Promise.all([
+  // BU Hierarchy / Sub-BU support — a Service PO under a Sub-BU may use a
+  // Client/Project that lives at its Parent BU or at that Sub-BU (and a
+  // Parent-BU PO one at its Sub-BUs): the same one-hop rule the single
+  // create API applies (areSameOrRelatedBusinessUnits). Own-BU rows are
+  // loaded last so they win a name/code collision with a related BU's.
+  const [self] = await Company.findAll({ where: { id: { [Op.in]: [companyId] } }, attributes: ['id', 'parent_business_unit_id'], raw: true });
+  const childIds = (await Company.findAll({ where: { parent_business_unit_id: { [Op.in]: [companyId] }, is_deleted: false }, attributes: ['id'], raw: true })).map((c) => c.id);
+  const relatedCompanyIds = [...new Set([...(self && self.parent_business_unit_id != null ? [self.parent_business_unit_id] : []), ...childIds, companyId])];
+  const ownLast = (rows) => [...rows.filter((r) => r.company_id !== companyId), ...rows.filter((r) => r.company_id === companyId)];
+
+  const [existingPOs, relatedClients, relatedProjects, serviceTypes, employees] = await Promise.all([
     ServicePO.findAll({ where: { company_id: companyId }, attributes: ['id', 'service_po_code', 'service_po_name', 'client_id', 'project_id'], raw: true }),
-    Client.findAll({ where: { company_id: companyId }, attributes: ['id', 'client_code', 'client_name', 'status'], raw: true }),
-    Project.findAll({ where: { company_id: companyId, is_deleted: false }, attributes: ['id', 'project_code', 'project_name', 'client_id', 'status', 'is_deleted'], raw: true }),
+    Client.findAll({ where: { company_id: relatedCompanyIds }, attributes: ['id', 'client_code', 'client_name', 'status', 'company_id'], raw: true }),
+    Project.findAll({ where: { company_id: relatedCompanyIds, is_deleted: false }, attributes: ['id', 'project_code', 'project_name', 'client_id', 'status', 'is_deleted', 'company_id'], raw: true }),
     // Service Type is a single GLOBAL master now (company_id IS NULL — see
     // serviceTypeService.js's GLOBAL_COMPANY_ID and database/migrations/
     // 20260890_seed_global_service_types_categories.sql), shared by every
@@ -874,6 +1027,8 @@ async function buildCompanyImportContext(companyId) {
     }),
   ]);
 
+  const clients = ownLast(relatedClients);
+  const projects = ownLast(relatedProjects);
   const existingCodes = new Set(existingPOs.map((p) => p.service_po_code.toUpperCase()));
   const clientByCode = new Map(clients.map((c) => [c.client_code.toLowerCase(), c]));
   const clientByName = new Map(clients.map((c) => [c.client_name.toLowerCase(), c]));
@@ -944,6 +1099,7 @@ async function buildCompanyImportContext(companyId) {
     existingPOByKey,
     existingPOByNameOnly,
     existingHierarchyByPOId: new Map(), // filled in below, after we know which existing POs are actually referenced
+    existingCodes, // this Business Unit's PO Numbers (uppercased) — PO Number uniqueness
   };
 
   return { ctx, existingCodes };
@@ -976,13 +1132,28 @@ async function validateRowsForCompany(rows, ctx) {
   // needs to know which existing POs are referenced first) — this pass
   // resolves defining rows, detects conflicts, and parses hierarchy shape.
   const pendingGroups = [];
+  const groupByCode = new Map(); // PO Number -> first NEW group using it (this Business Unit)
   for (const [key, groupRows] of groups) {
     const result = processGroup(key, groupRows, ctx);
     if (!result.ok) {
       errorRows.push(...result.errorRows);
-    } else {
-      pendingGroups.push(result.group);
+      continue;
     }
+    const group = result.group;
+    // PO Number is unique per Business Unit — against existing Service POs
+    // and against other new Service POs in this same file.
+    if (group.isNew) {
+      if (ctx.existingCodes.has(group.code)) {
+        errorRows.push({ row_number: group.definingRowNum, row_data: group.definingRowData, errors: [`PO Number "${group.code}" already exists in this Business Unit.`] });
+        continue;
+      }
+      if (groupByCode.has(group.code)) {
+        errorRows.push({ row_number: group.definingRowNum, row_data: group.definingRowData, errors: [`PO Number "${group.code}" is used for two different Service POs in this file ("${groupByCode.get(group.code).candidate.service_po_name}" and "${group.candidate.service_po_name}").`] });
+        continue;
+      }
+      groupByCode.set(group.code, group);
+    }
+    pendingGroups.push(group);
   }
 
   // Batch-fetch existing hierarchy for every matched existing PO in one
@@ -1049,48 +1220,17 @@ async function validateRowsForCompany(rows, ctx) {
  * @param {number} userId
  * @returns {Promise<{ importedCount: number, existingReusedCount: number, hierarchyCreatedCount: number, errorRows: object[] }>}
  */
-async function insertGroupsForCompany(pendingGroups, companyId, existingCodes, ctx, userId) {
+async function insertGroupsForCompany(pendingGroups, companyId, existingCodes, ctx, userId, autoMapImporter = false) {
   const errorRows = [];
 
-  // Auto-generate a unique PO code for each NEW Service PO in this Business
-  // Unit (never taken from the sheet) before inserting — uniqueness is
-  // per-company, so this Set is intentionally fresh per Business Unit.
-  const seenCodes = new Set();
-  for (const group of pendingGroups) {
-    if (!group.isNew) continue;
-    let code = generatePOCode();
-    let attempts = 0;
-    while (existingCodes.has(code) || seenCodes.has(code)) {
-      if (attempts >= 5) {
-        code = null;
-        break;
-      }
-      code = generatePOCode();
-      attempts++;
-    }
-
-    if (!code) {
-      group.codeGenerationFailed = true;
-      continue;
-    }
-    group.code = code;
-    seenCodes.add(code);
-  }
-
+  // Each NEW Service PO uses the PO Number from its sheet rows (group.code —
+  // required, format- and uniqueness-checked in processGroup() /
+  // validateRowsForCompany()); never auto-generated.
   let importedCount = 0;
   let existingReusedCount = 0;
   let hierarchyCreatedCount = 0;
 
   for (const group of pendingGroups) {
-    if (group.codeGenerationFailed) {
-      errorRows.push({
-        row_number: group.definingRowNum,
-        row_data: group.definingRowData,
-        errors: [`Failed to generate a unique Service PO code for "${group.candidate.service_po_name}".`],
-      });
-      continue;
-    }
-
     try {
       let hierarchyCreatedThisGroup = 0;
 
@@ -1104,6 +1244,22 @@ async function insertGroupsForCompany(pendingGroups, companyId, existingCodes, c
             { transaction }
           );
           servicePOId = created.id;
+
+          // Same as a panel create (servicePOService.create()): a BU Admin /
+          // Project Manager importing a Service PO is auto-mapped to it, in
+          // the same transaction — a Project Manager's own Service PO list is
+          // driven entirely by their employee_servicepo_mapping rows, so
+          // without this an imported PO never appeared for its importer.
+          if (autoMapImporter) {
+            await employeeServicePOMappingRepository.bulkCreate([{
+              company_id: companyId,
+              employee_id: userId,
+              service_po_id: servicePOId,
+              status: 'active',
+              created_by: userId,
+              updated_by: userId,
+            }], { transaction });
+          }
         }
 
         const existingNodesForPO = group.existingPO ? (ctx.existingHierarchyByPOId.get(servicePOId) || []) : [];
@@ -1219,7 +1375,10 @@ async function insertGroupsForCompany(pendingGroups, companyId, existingCodes, c
  * @returns {Promise<{ total, imported, existing_po_reused, hierarchy_created, skipped, error_rows }>}
  */
 async function importServicePOs(filePath, userId, req) {
-  const authContext = { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId };
+  const authContext = { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId, employeeBusinessUnits: req.employeeBusinessUnits || [] };
+  // BU Admin / Project Manager importers get mapped to every Service PO they
+  // create here — identical rule to a panel create (servicePOService.create()).
+  const autoMapImporter = hasServicePOMappingAuthority(req.userRoles || []);
 
   // 1. Parse Excel / CSV
   const { rows: rawRows, hasBuNameColumn } = parseServicePOFile(filePath);
@@ -1275,7 +1434,7 @@ async function importServicePOs(filePath, userId, req) {
   const finalErrorRows = [];
 
   for (const { companyId, ctx, existingCodes, pendingGroups } of companyBatches) {
-    const result = await insertGroupsForCompany(pendingGroups, companyId, existingCodes, ctx, userId);
+    const result = await insertGroupsForCompany(pendingGroups, companyId, existingCodes, ctx, userId, autoMapImporter);
     importedCount += result.importedCount;
     existingReusedCount += result.existingReusedCount;
     hierarchyCreatedCount += result.hierarchyCreatedCount;

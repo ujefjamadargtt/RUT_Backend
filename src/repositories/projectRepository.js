@@ -1,7 +1,7 @@
 'use strict';
 
 const { Op, fn, col } = require('sequelize');
-const { Project, ServicePO, Client } = require('../models');
+const { Project, ServicePO, Client, Company, Employee } = require('../models');
 const logger = require('../utils/logger');
 
 /**
@@ -61,6 +61,19 @@ const CLIENT_INCLUDE = {
   required: false,
 };
 
+// The Project's own Business Unit (set at create from the creating actor's
+// BU — see projectService.create()), same shape Client already returns.
+const COMPANY_INCLUDE = {
+  model: Company,
+  as: 'company',
+  attributes: ['id', 'company_code', 'company_name', 'parent_business_unit_id'],
+  required: false,
+};
+
+// "Created By" column — unfiltered on status/is_deleted so a creator who has
+// since left still resolves.
+const CREATOR_INCLUDE = { model: Employee, as: 'creator', attributes: ['id', 'employee_code', 'full_name'], required: false };
+
 /**
  * Retrieve a paginated, filtered, sorted list of projects.
  *
@@ -106,11 +119,11 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
 
   return Project.findAndCountAll({
     where,
-    include: [CLIENT_INCLUDE],
+    include: [CLIENT_INCLUDE, COMPANY_INCLUDE, CREATOR_INCLUDE],
     limit,
     offset,
     order: [[safeSortBy, safeSortOrder]],
-    attributes: ['id', 'client_id', 'project_code', 'project_name', 'project_description', 'status', 'created_at', 'updated_at', 'created_by'],
+    attributes: ['id', 'client_id', 'project_code', 'project_name', 'project_description', 'status', 'company_id', 'created_at', 'updated_at', 'created_by'],
   });
 };
 
@@ -125,7 +138,7 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
 const findById = async (id, companyId, createdBy = null) => {
   return Project.findOne({
     where: { id, ...companyScope(companyId, createdBy), is_deleted: false },
-    include: [CLIENT_INCLUDE],
+    include: [CLIENT_INCLUDE, COMPANY_INCLUDE, CREATOR_INCLUDE],
     attributes: ['id', 'client_id', 'project_code', 'project_name', 'project_description', 'status', 'company_id', 'created_at', 'updated_at', 'created_by', 'updated_by'],
   });
 };

@@ -2,6 +2,7 @@
 
 const projectRepository = require('../repositories/projectRepository');
 const clientRepository = require('../repositories/clientRepository');
+const employeeBusinessUnitRepository = require('../repositories/employeeBusinessUnitRepository');
 const companyAccessControlService = require('./companyAccessControlService');
 const { resolveActorCompanyScope, resolveCreateCompanyIdForActor, resolveActorFullReach, intersectCompanyIdsWithEntity, intersectIdsWithBuHierarchy, expandBusinessUnitIdsToFamily } = companyAccessControlService;
 const { generateProjectCode } = require('../helpers/codeGenerator');
@@ -76,13 +77,61 @@ const getAll = async (query = {}, authContext) => {
     rows.map((row) => row.id),
     companyId
   );
-  const data = rows.map((row) => ({
-    ...row.get({ plain: true }),
-    total_service_pos: poCountByProjectId.get(row.id) || 0,
-  }));
+  const creatorBusinessUnits = await loadCreatorBusinessUnits(rows);
+  const data = rows.map((row) => {
+    const plain = row.get({ plain: true });
+    return {
+      ...plain,
+      creator: withCreatorBusinessUnit(plain, creatorBusinessUnits),
+      total_service_pos: poCountByProjectId.get(row.id) || 0,
+    };
+  });
 
   return { data, meta };
 };
+
+/**
+ * Every active Business Unit of each distinct creator on this page — one
+ * batched query, not one per row.
+ *
+ * @param {Project[]} rows
+ * @returns {Promise<Map<number, Array<{id: number, name: string, parent_business_unit_id: number|null, parent_business_unit_name: string|null}>>>}
+ */
+async function loadCreatorBusinessUnits(rows) {
+  const creatorIds = [...new Set(rows.map((row) => row.created_by).filter((id) => id != null))];
+  const grants = await employeeBusinessUnitRepository.findBusinessUnitsByEmployeeIds(creatorIds);
+  const byEmployee = new Map();
+  grants.forEach(({ employee_id: employeeId, ...bu }) => {
+    if (!byEmployee.has(employeeId)) byEmployee.set(employeeId, []);
+    byEmployee.get(employeeId).push(bu);
+  });
+  return byEmployee;
+}
+
+/**
+ * The Project's creator plus THEIR Business Unit ("a Project created by a
+ * UV Tech BU Admin shows UV Tech"). A creator can hold several BUs (or none —
+ * an Admin), so `business_units` lists all of them, and
+ * `company_id`/`company_name` is the single best one: the BU this Project was
+ * actually created under if the creator belongs to it, else their first BU,
+ * else null. The Project's own `company` (returned alongside) is the
+ * authoritative per-record value.
+ *
+ * @param {object} project - plain row with created_by, company_id, creator
+ * @param {Map<number, object[]>} creatorBusinessUnits
+ * @returns {object|null}
+ */
+function withCreatorBusinessUnit(project, creatorBusinessUnits) {
+  if (!project.creator) return null;
+  const businessUnits = creatorBusinessUnits.get(project.created_by) || [];
+  const primary = businessUnits.find((bu) => bu.id === project.company_id) || businessUnits[0] || null;
+  return {
+    ...project.creator,
+    company_id: primary ? primary.id : null,
+    company_name: primary ? primary.name : null,
+    business_units: businessUnits,
+  };
+}
 
 /**
  * Retrieve a single project by ID.

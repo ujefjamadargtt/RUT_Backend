@@ -10,6 +10,8 @@ const {
   ServiceCategory,
   Employee,
   Timesheet,
+  Company,
+  Entity,
   sequelize,
 } = require('../models');
 
@@ -272,6 +274,13 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
         attributes: ['id', 'employee_code', 'full_name'],
         required: false,
       },
+      // "Created By" column — unfiltered so a creator who left still resolves.
+      {
+        model: Employee,
+        as: 'creator',
+        attributes: ['id', 'employee_code', 'full_name'],
+        required: false,
+      },
       serviceTypeInclude,
     ],
     limit,
@@ -318,15 +327,27 @@ const findById = async (id, companyId, createdBy = null, centralisedOwnerIds = n
       [Op.and]: [scope],
     },
     include: [
+      // client.company_id / project.company_id — lets the Edit form tell a
+      // BU-less ("My Clients") Client/Project apart from one in the PO's own
+      // BU, so it can pick the right Client list instead of the PO-BU-scoped one.
       {
         model: Client,
         as: 'client',
-        attributes: ['id', 'client_code', 'client_name', 'industry'],
+        attributes: ['id', 'client_code', 'client_name', 'industry', 'company_id'],
       },
       {
         model: Project,
         as: 'project',
-        attributes: ['id', 'project_code', 'project_name'],
+        attributes: ['id', 'project_code', 'project_name', 'company_id'],
+      },
+      // The PO's own Business Unit + Entity, so the Edit form can pre-fill
+      // Entity Name / BU Name straight from the PO instead of a lookup.
+      {
+        model: Company,
+        as: 'company',
+        attributes: ['id', 'company_name', 'entity_id', 'parent_business_unit_id'],
+        required: false,
+        include: [{ model: Entity, as: 'entity', attributes: ['id', 'entity_name'], required: false }],
       },
       {
         model: ServiceType,
@@ -336,6 +357,13 @@ const findById = async (id, companyId, createdBy = null, centralisedOwnerIds = n
       {
         model: Employee,
         as: 'deliveryHead',
+        attributes: ['id', 'employee_code', 'full_name'],
+        required: false,
+      },
+      // "Created By" column — unfiltered so a creator who left still resolves.
+      {
+        model: Employee,
+        as: 'creator',
         attributes: ['id', 'employee_code', 'full_name'],
         required: false,
       },

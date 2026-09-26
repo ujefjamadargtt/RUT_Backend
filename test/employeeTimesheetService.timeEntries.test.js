@@ -35,6 +35,12 @@ const ORIGINAL = {
   resubmitById: employeeWorkLogRepository.resubmitById,
 };
 
+// resubmitById() returns a Sequelize model instance (findById) — the service
+// must convert it with .get({ plain: true }), never spread it.
+function asModel(plain) {
+  return { ...plain, get: () => ({ ...plain }) };
+}
+
 function restore() {
   employeeServicePOMappingRepository.findByEmployeeAndPO = ORIGINAL.findByEmployeeAndPO;
   timesheetService.resolveManualEntryReferences = ORIGINAL.resolveManualEntryReferences;
@@ -473,7 +479,7 @@ test('resubmitEntry: a rejected TIME_BASED entry resubmits with hours still the 
   let capturedResubmitId;
   employeeWorkLogRepository.resubmitById = async (id) => {
     capturedResubmitId = id;
-    return { id, status: 'pending', hours: 0.83, timeEntries: [{ start_time: '09:30', end_time: '10:20' }] };
+    return asModel({ id, status: 'pending', hours: 0.83, timeEntries: [{ start_time: '09:30', end_time: '10:20' }] });
   };
 
   const result = await employeeTimesheetService.resubmitEntry(101, 10, 61);
@@ -544,7 +550,7 @@ test('resubmitEntry: editing Start/End Time on a rejected TIME_BASED entry BEFOR
   });
 
   employeeWorkLogRepository.getDailyHours = async () => 0;
-  employeeWorkLogRepository.resubmitById = async (id) => ({
+  employeeWorkLogRepository.resubmitById = async (id) => asModel({
     id, status: 'pending', hours: 1.5, timeEntries: [{ start_time: '09:30', end_time: '11:00' }],
   });
 
@@ -598,7 +604,7 @@ test('resubmitEntry: a plain HOURS_WISE rejected entry resubmits unchanged (no t
   let capturedResubmitId;
   employeeWorkLogRepository.resubmitById = async (id) => {
     capturedResubmitId = id;
-    return { id, status: 'pending', hours: 5, timeEntries: [] };
+    return asModel({ id, status: 'pending', hours: 5, timeEntries: [] });
   };
 
   const result = await employeeTimesheetService.resubmitEntry(101, 10, 64);
@@ -608,5 +614,44 @@ test('resubmitEntry: a plain HOURS_WISE rejected entry resubmits unchanged (no t
   assert.equal(result.hours, 5);
   assert.deepEqual(result.timeEntries, []);
 
+  restore();
+});
+
+test('resubmitEntry: response is JSON-serializable even though the repository returns a model instance with circular internals (regression)', async () => {
+  stubCommonDeps();
+  employeeWorkLogRepository.findByIdForEmployee = async () => ({
+    id: 65, service_po_id: 401, sub_project_id: null, hierarchy_node_id: null,
+    work_date: '2026-08-10', hours: 2, status: 'rejected', description: 'x', timeEntries: [],
+  });
+  employeeWorkLogRepository.getDailyHours = async () => 0;
+  employeeWorkLogRepository.resubmitById = async (id) => {
+    // Like a real Sequelize instance: own props include internals with a
+    // parent <-> child cycle; only get({ plain: true }) is safe to send.
+    const instance = { dataValues: { id, status: 'pending' }, _options: { include: [] } };
+    instance._options.include.push({ parent: instance });
+    instance.get = () => ({ id, status: 'pending', hours: 2 });
+    return instance;
+  };
+
+  const result = await employeeTimesheetService.resubmitEntry(101, 10, 65);
+
+  assert.doesNotThrow(() => JSON.stringify({ success: true, data: result }));
+  assert.deepEqual(result, { id: 65, status: 'pending', hours: 2, entry_type: 'HOURLY' });
+  restore();
+});
+
+test('resubmitEntry: 409 with a clean message when the entry stopped being rejected mid-request', async () => {
+  stubCommonDeps();
+  employeeWorkLogRepository.findByIdForEmployee = async () => ({
+    id: 66, service_po_id: 401, sub_project_id: null, hierarchy_node_id: null,
+    work_date: '2026-08-10', hours: 2, status: 'rejected', description: 'x', timeEntries: [],
+  });
+  employeeWorkLogRepository.getDailyHours = async () => 0;
+  employeeWorkLogRepository.resubmitById = async () => null; // guarded UPDATE matched nothing
+
+  await assert.rejects(
+    () => employeeTimesheetService.resubmitEntry(101, 10, 66),
+    (err) => err.statusCode === 409 && typeof err.message === 'string' && !/circular/i.test(err.message)
+  );
   restore();
 });

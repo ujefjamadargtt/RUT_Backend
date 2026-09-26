@@ -2,13 +2,23 @@
 
 const xlsx = require('xlsx');
 const { Op } = require('sequelize');
-const { Project, Client } = require('../models');
+const { Project, Client, Company } = require('../models');
 const { generateProjectCode } = require('../helpers/codeGenerator');
 const {
   resolveCreateCompanyIdForActor,
   resolveOwnedCompanyIds,
   areSameOrRelatedBusinessUnits,
 } = require('./companyAccessControlService');
+const {
+  SUB_BU_HEADERS,
+  ENTITY_HEADERS,
+  BU_NAME_HEADERS,
+  loadSubBusinessUnits,
+  resolveRowSubBusinessUnit,
+  buildActorBusinessUnitLookup,
+  resolveOwnedBusinessUnitByName,
+  blankBuNameError,
+} = require('./importSubBusinessUnitService');
 const logger = require('../utils/logger');
 
 /**
@@ -43,11 +53,16 @@ const HEADER_MAP = {
   'project description': 'project_description',
   'project_description': 'project_description',
   'status':              'status',
+  // BU Hierarchy / Sub-BU support — see importSubBusinessUnitService.js.
+  ...Object.fromEntries(SUB_BU_HEADERS.map((h) => [h, 'sub_bu'])),
+  // Per-row Business Unit (+ Entity to tell same-named BUs apart) — see importProjects().
+  ...Object.fromEntries(BU_NAME_HEADERS.map((h) => [h, 'bu_name'])),
+  ...Object.fromEntries(ENTITY_HEADERS.map((h) => [h, 'entity_name'])),
 };
 
 function normaliseHeader(cell) {
   if (!cell) return null;
-  return HEADER_MAP[String(cell).trim().toLowerCase()] || null;
+  return HEADER_MAP[String(cell).trim().toLowerCase().replace(/\s+/g, ' ')] || null;
 }
 
 /**
@@ -111,15 +126,18 @@ function validateRow(data) {
 /**
  * Parse an Excel/CSV file and bulk-import projects.
  *
- * Business Unit rule (identical to the single POST /projects endpoint):
- *  - A BU-scoped actor (BU Admin and below) always has every row created
- *    under THEIR OWN Business Unit — any company_id in the request body is
- *    ignored (resolveOptionalCreateCompanyId()).
- *  - A company-less actor (Admin/Entity Admin) may optionally pass a single
- *    `company_id` in the multipart form body to import the whole file into
- *    one of their own Business Units; if omitted, every row is created with
- *    no Business Unit assigned (company_id NULL), deferred exactly like a
- *    single Project create by the same actor.
+ * Business Unit per row (BU Hierarchy / Sub-BU support — see
+ * importSubBusinessUnitService.js):
+ *  - Every actor may name the row's Business Unit in "BU Name" (+ optional
+ *    "Entity Name"), resolved ONLY among their own Business Units (an
+ *    Admin's owned Companies, a BU-scoped actor's mapped BUs + Sub-BUs).
+ *  - Blank "BU Name": a BU-scoped actor mapped to ONE Business Unit gets
+ *    that BU, one mapped to SEVERAL gets a row error (never the Global BU
+ *    selector — importSubBusinessUnitService.blankBuNameError()); a company-less actor's
+ *    optional body `company_id`, else the row's Client's own Business Unit,
+ *    else BU-less (company_id NULL), same as a single create.
+ *  - Either way: when that Business Unit has Sub-BUs, "Sub BU" is mandatory
+ *    and the Project is created under that Sub-BU; otherwise it stays blank.
  *
  * Client rule (identical to projectService.create()): each row's Client
  * (resolved by Client Code or Client Name) must be active, and must belong
@@ -136,10 +154,9 @@ async function importProjects(filePath, userId, req) {
   const companyId = await resolveCreateCompanyIdForActor(req, bodyCompanyId, { required: false });
   const authContext = { companyId: req.companyId, hierarchyRank: req.hierarchyRank, employeeId: req.employeeId };
 
-  // Only needed for a company-less actor deferring BU assignment (companyId
-  // null) — each row's Client may belong to any of this actor's own owned
-  // Companies, resolved once up front rather than per row.
-  const ownedCompanyIds = companyId == null
+  // Company-less actor only — their own Companies, for the per-row "BU Name"
+  // lookup and for a row's Client when no Business Unit is known yet.
+  const ownedCompanyIds = req.companyId == null
     ? ((await resolveOwnedCompanyIds(authContext.hierarchyRank, authContext.employeeId)) || [])
     : [];
 
@@ -194,21 +211,43 @@ async function importProjects(filePath, userId, req) {
     );
   }
 
-  // ── Pre-fetch existing projects for duplicate detection (scoped to this
-  // company — uniqueness is per-company, not global; company_id: null is a
-  // valid Sequelize equality filter for "no Business Unit") ────────────────
-  const existingProjects = await Project.findAll({
-    where: { company_id: companyId, is_deleted: false },
-    attributes: ['project_name', 'project_code'],
-    raw: true,
-  });
+  // ── Business Unit / Sub-BU resolution inputs (see importProjects()'s doc
+  // comment and importSubBusinessUnitService.js) ───────────────────────────
+  const isCompanyLess = req.companyId == null;
+  const loadedDefault = companyId != null
+    ? await Company.findOne({ where: { id: companyId, is_deleted: false }, attributes: ['id', 'company_name'], raw: true })
+    : null;
+  const defaultBusinessUnit = companyId != null
+    ? (loadedDefault && loadedDefault.id != null ? loadedDefault : { id: companyId, company_name: `#${companyId}` })
+    : null;
+  // The Business Units this actor's rows may name in "BU Name" (their own
+  // Companies, or a BU-scoped actor's mapped BUs + Sub-BUs).
+  const buLookup = await buildActorBusinessUnitLookup(req);
+  const blankBuError = blankBuNameError(req);
+  const ownedById = new Map([...buLookup.companiesByName.values()].flat().map((c) => [c.id, c]));
+  const childrenByParent = buLookup.childrenByParent;
+  if (defaultBusinessUnit && !childrenByParent.has(defaultBusinessUnit.id)) {
+    for (const [parentId, children] of await loadSubBusinessUnits([defaultBusinessUnit.id])) childrenByParent.set(parentId, children);
+  }
+  const clientInOwnScope = (client) => client.company_id == null || ownedCompanyIds.includes(client.company_id);
 
-  const existingNames = new Set(existingProjects.map((p) => p.project_name.trim().toLowerCase()));
-  const existingCodes = new Set(existingProjects.map((p) => p.project_code.trim().toLowerCase()));
-
-  // Within-file duplicate trackers
-  const fileNames = new Set();
-  const fileCodes = new Set();
+  // ── Existing projects for duplicate detection, loaded per target Business
+  // Unit on first use (uniqueness is per-company, not global; company_id:
+  // null is a valid equality filter for "no Business Unit"). Each entry holds
+  // existing rows plus rows imported so far in this file.
+  const seenByCompany = new Map();
+  const fileByCompany = new Map();
+  const seenFor = async (targetId) => {
+    if (!seenByCompany.has(targetId)) {
+      const existing = await Project.findAll({ where: { company_id: targetId, is_deleted: false }, attributes: ['project_name', 'project_code'], raw: true });
+      seenByCompany.set(targetId, {
+        names: new Set(existing.map((p) => p.project_name.trim().toLowerCase())),
+        codes: new Set(existing.map((p) => p.project_code.trim().toLowerCase())),
+      });
+      fileByCompany.set(targetId, { names: new Set(), codes: new Set() });
+    }
+    return { existing: seenByCompany.get(targetId), file: fileByCompany.get(targetId) };
+  };
 
   // Client lookups repeat across rows (many Projects share one Client) —
   // cache by the lookup key so we hit the DB once per distinct Client.
@@ -242,9 +281,33 @@ async function importProjects(filePath, userId, req) {
       client_name:          getCell(row, 'client_name'),
       project_description:  getCell(row, 'project_description'),
       status:               getCell(row, 'status'),
+      sub_bu:               getCell(row, 'sub_bu'),
+      bu_name:              getCell(row, 'bu_name'),
+      entity_name:          getCell(row, 'entity_name'),
     };
 
     const { errors, projectName, projectCode, clientCode, clientName, description, status } = validateRow(rawData);
+
+    // Row Business Unit, when known up front: the row's "BU Name" (+ "Entity
+    // Name") if filled — one of this actor's own BUs — else a BU-scoped
+    // actor's active BU / a company-less actor's body company_id.
+    // `undefined` = not known yet — taken from the Client's own BU below.
+    let rowBusinessUnit;
+    if (!isCompanyLess || defaultBusinessUnit) rowBusinessUnit = defaultBusinessUnit;
+    if (String(rawData.bu_name || '').trim()) {
+      const { businessUnit, error } = resolveOwnedBusinessUnitByName(rawData.bu_name, rawData.entity_name, buLookup.companiesByName);
+      if (error) errors.push(error);
+      rowBusinessUnit = businessUnit;
+    } else if (blankBuError) {
+      // Multi-BU BU Admin / PM: never default to the Global BU selector.
+      errors.push(blankBuError);
+    }
+    let rowCompanyId;
+    if (!errors.length && rowBusinessUnit !== undefined) {
+      const resolved = resolveRowSubBusinessUnit(rowBusinessUnit, rawData.sub_bu, childrenByParent);
+      if (resolved.error) errors.push(resolved.error);
+      rowCompanyId = resolved.companyId;
+    }
 
     if (errors.length > 0) {
       error_rows.push({ row_number: rowNumber, row_data: rawData, errors });
@@ -252,17 +315,20 @@ async function importProjects(filePath, userId, req) {
     }
 
     // ── Resolve the Client (by code first, else by name) ────────────────────
+    // Client codes/names are only unique per Business Unit, so fetch every
+    // match and keep the one this row may actually use (never just the
+    // first row on the platform — that could be another tenant's Client).
     const clientKey = `${clientCode || ''}|${(clientName || '').toLowerCase()}`;
-    let client = clientCache.get(clientKey);
-    if (client === undefined) {
+    let candidates = clientCache.get(clientKey);
+    if (candidates === undefined) {
       const where = clientCode
         ? { client_code: clientCode }
         : { client_name: { [Op.iLike]: clientName } };
-      client = (await Client.findOne({ where })) || null;
-      clientCache.set(clientKey, client);
+      candidates = await Client.findAll({ where, order: [['id', 'ASC']] });
+      clientCache.set(clientKey, candidates);
     }
 
-    if (!client) {
+    if (candidates.length === 0) {
       error_rows.push({
         row_number: rowNumber,
         row_data:   rawData,
@@ -271,15 +337,34 @@ async function importProjects(filePath, userId, req) {
       continue;
     }
 
-    // Same membership rule as projectService.create(): a BU-scoped actor's
-    // Client must belong to that exact company, OR — BU Hierarchy / Sub-BU
-    // support — a Business Unit one hop apart in the hierarchy from it (see
-    // companyAccessControlService.areSameOrRelatedBusinessUnits()); a
-    // company-less actor's Client may belong to any of their own owned
-    // Companies, or have no Business Unit at all.
-    const clientInScope = companyId != null
-      ? client.company_id === companyId || await areSameOrRelatedBusinessUnits(client.company_id, companyId)
-      : (client.company_id === null || ownedCompanyIds.includes(client.company_id));
+    // Same membership rule as projectService.create(): against a known
+    // target Business Unit, the Client must belong to it OR — BU Hierarchy /
+    // Sub-BU support — a Business Unit one hop apart (its Parent or a Sub-BU,
+    // areSameOrRelatedBusinessUnits()); a company-less actor with no target
+    // BU yet may use a Client from any of their own owned Companies, or one
+    // with no Business Unit at all.
+    const inScope = async (c) => (rowCompanyId != null
+      ? c.company_id === rowCompanyId || await areSameOrRelatedBusinessUnits(c.company_id, rowCompanyId)
+      : clientInOwnScope(c));
+    let client = null;
+    for (const candidate of candidates) {
+      if (await inScope(candidate)) { client = candidate; break; }
+    }
+    const clientInScope = client != null;
+    if (!client) client = candidates[0];
+
+    // Company-less actor, no "BU Name" / body BU: the Project follows its
+    // Client's own Business Unit (then the Sub-BU rule), or stays BU-less
+    // when the Client has none.
+    if (clientInScope && rowBusinessUnit === undefined) {
+      rowBusinessUnit = client.company_id != null ? (ownedById.get(client.company_id) || null) : null;
+      const resolved = resolveRowSubBusinessUnit(rowBusinessUnit, rawData.sub_bu, childrenByParent);
+      if (resolved.error) {
+        error_rows.push({ row_number: rowNumber, row_data: rawData, errors: [resolved.error] });
+        continue;
+      }
+      rowCompanyId = resolved.companyId;
+    }
 
     if (!clientInScope) {
       error_rows.push({
@@ -298,6 +383,8 @@ async function importProjects(filePath, userId, req) {
       });
       continue;
     }
+
+    const { existing: { names: existingNames, codes: existingCodes }, file: { names: fileNames, codes: fileCodes } } = await seenFor(rowCompanyId);
 
     // ── Duplicate checks ────────────────────────────────────────────────────
     if (fileNames.has(projectName.toLowerCase())) {
@@ -366,7 +453,7 @@ async function importProjects(filePath, userId, req) {
         project_description:  description,
         client_id:            client.id,
         status,
-        company_id:           companyId,
+        company_id:           rowCompanyId,
         created_by:           userId,
         updated_by:           userId,
       });

@@ -1,9 +1,19 @@
 'use strict';
 
 const xlsx = require('xlsx');
-const { Client } = require('../models');
+const { Client, Company } = require('../models');
 const { generateClientCode } = require('../helpers/codeGenerator');
 const { resolveCreateCompanyIdForActor } = require('./companyAccessControlService');
+const {
+  SUB_BU_HEADERS,
+  ENTITY_HEADERS,
+  BU_NAME_HEADERS,
+  loadSubBusinessUnits,
+  resolveRowSubBusinessUnit,
+  buildActorBusinessUnitLookup,
+  resolveOwnedBusinessUnitByName,
+  blankBuNameError,
+} = require('./importSubBusinessUnitService');
 const logger = require('../utils/logger');
 
 // ── Header map (case-insensitive, trimmed) ────────────────────────────────────
@@ -24,11 +34,16 @@ const HEADER_MAP = {
   'industry name': 'industry',
   'industry_name': 'industry',
   'status':        'status',
+  // BU Hierarchy / Sub-BU support — see importSubBusinessUnitService.js.
+  ...Object.fromEntries(SUB_BU_HEADERS.map((h) => [h, 'sub_bu'])),
+  // Per-row Business Unit (+ Entity to tell same-named BUs apart) — see importClients().
+  ...Object.fromEntries(BU_NAME_HEADERS.map((h) => [h, 'bu_name'])),
+  ...Object.fromEntries(ENTITY_HEADERS.map((h) => [h, 'entity_name'])),
 };
 
 function normaliseHeader(cell) {
   if (!cell) return null;
-  return HEADER_MAP[String(cell).trim().toLowerCase()] || null;
+  return HEADER_MAP[String(cell).trim().toLowerCase().replace(/\s+/g, ' ')] || null;
 }
 
 /**
@@ -102,16 +117,33 @@ function validateRow(data) {
  *
  * @param {string} filePath
  * @param {number} userId
- * @param {import('express').Request} req - for resolveCreateCompanyId: a
- *   BU-scoped actor's own req.companyId always wins; a company-less
- *   Admin/Entity Admin must supply `company_id` in the multipart form body,
- *   validated against their own owned Companies — replaces the previous
- *   raw `req.companyId` passthrough, which crashed for those actors.
+ * Business Unit per row (BU Hierarchy / Sub-BU support — see
+ * importSubBusinessUnitService.js):
+ *  - Every actor may name the row's Business Unit in "BU Name" (+ optional
+ *    "Entity Name" to tell same-named BUs apart), resolved ONLY among their
+ *    own Business Units (importSubBusinessUnitService.
+ *    buildActorBusinessUnitLookup(): an Admin's owned Companies, a BU-scoped
+ *    actor's mapped BUs + their Sub-BUs) — so a multi-BU BU Admin can target
+ *    several of their BUs in one sheet.
+ *  - A blank "BU Name": a BU-scoped actor mapped to ONE Business Unit gets
+ *    that BU; one mapped to SEVERAL gets a row error (the Global BU selector
+ *    is never a silent default — see importSubBusinessUnitService.
+ *    blankBuNameError()); a company-less actor gets the optional body
+ *    `company_id`, else BU-less (Client BU is optional, same as a single
+ *    create by this actor).
+ *  - Either way: when that Business Unit has Sub-BUs, "Sub BU" is mandatory
+ *    and the Client is created under that Sub-BU; otherwise it stays blank.
+ *
+ * @param {string} filePath
+ * @param {number} userId
+ * @param {import('express').Request} req
  * @returns {Promise<{ total, imported, skipped, error_rows }>}
  */
 async function importClients(filePath, userId, req) {
   const bodyCompanyId = req.body && req.body.company_id ? parseInt(req.body.company_id, 10) : null;
-  const companyId = await resolveCreateCompanyIdForActor(req, bodyCompanyId, { required: true, resourceLabel: 'a Client import' });
+  // Company-less: optional file-level default BU (validated as their own);
+  // BU-scoped: their own BU, exactly as before.
+  const companyId = await resolveCreateCompanyIdForActor(req, bodyCompanyId, { required: false, resourceLabel: 'a Client import' });
   logger.info('Client import started', { userId, companyId, filePath });
 
   // ── Parse workbook ──────────────────────────────────────────────────────────
@@ -160,20 +192,38 @@ async function importClients(filePath, userId, req) {
     );
   }
 
-  // ── Pre-fetch existing clients for duplicate detection (scoped to this
-  // company — uniqueness is per-company, not global) ─────────────────────────
-  const existingClients = await Client.findAll({
-    where: { company_id: companyId },
-    attributes: ['client_name', 'client_code'],
-    raw: true,
-  });
+  // ── Business Unit / Sub-BU resolution inputs ─────────────────────────────
+  const loadedDefault = companyId != null
+    ? await Company.findOne({ where: { id: companyId, is_deleted: false }, attributes: ['id', 'company_name'], raw: true })
+    : null;
+  const defaultBusinessUnit = companyId != null
+    ? (loadedDefault && loadedDefault.id != null ? loadedDefault : { id: companyId, company_name: `#${companyId}` })
+    : null;
+  // The Business Units this actor's rows may name in "BU Name" (their own
+  // Companies, or a BU-scoped actor's mapped BUs + Sub-BUs).
+  const buLookup = await buildActorBusinessUnitLookup(req);
+  const blankBuError = blankBuNameError(req);
+  const childrenByParent = buLookup.childrenByParent;
+  if (defaultBusinessUnit && !childrenByParent.has(defaultBusinessUnit.id)) {
+    for (const [parentId, children] of await loadSubBusinessUnits([defaultBusinessUnit.id])) childrenByParent.set(parentId, children);
+  }
 
-  const existingNames = new Set(existingClients.map((c) => c.client_name.trim().toLowerCase()));
-  const existingCodes = new Set(existingClients.map((c) => c.client_code.trim().toLowerCase()));
-
-  // Within-file duplicate trackers
-  const fileNames = new Set();
-  const fileCodes = new Set();
+  // ── Existing clients for duplicate detection, loaded per target Business
+  // Unit on first use (uniqueness is per-company, not global). Each entry
+  // holds existing rows plus rows imported so far in this file.
+  const seenByCompany = new Map();
+  const fileByCompany = new Map();
+  const seenFor = async (targetId) => {
+    if (!seenByCompany.has(targetId)) {
+      const existing = await Client.findAll({ where: { company_id: targetId }, attributes: ['client_name', 'client_code'], raw: true });
+      seenByCompany.set(targetId, {
+        names: new Set(existing.map((c) => c.client_name.trim().toLowerCase())),
+        codes: new Set(existing.map((c) => c.client_code.trim().toLowerCase())),
+      });
+      fileByCompany.set(targetId, { names: new Set(), codes: new Set() });
+    }
+    return { existing: seenByCompany.get(targetId), file: fileByCompany.get(targetId) };
+  };
 
   // ── Process data rows ───────────────────────────────────────────────────────
   const dataRows  = rawRows.slice(headerIndex + 1);
@@ -202,14 +252,38 @@ async function importClients(filePath, userId, req) {
       client_code: getCell(row, 'client_code'),
       industry:    getCell(row, 'industry'),
       status:      getCell(row, 'status'),
+      sub_bu:      getCell(row, 'sub_bu'),
+      bu_name:     getCell(row, 'bu_name'),
+      entity_name: getCell(row, 'entity_name'),
     };
 
     const { errors, clientName, clientCode, industry, status } = validateRow(rawData);
+
+    // Row Business Unit: the row's "BU Name" (+ "Entity Name") when filled —
+    // one of this actor's own BUs — else the file-level default (body
+    // company_id, or a BU-scoped actor's active BU).
+    let rowBusinessUnit = defaultBusinessUnit;
+    if (String(rawData.bu_name || '').trim()) {
+      const { businessUnit, error } = resolveOwnedBusinessUnitByName(rawData.bu_name, rawData.entity_name, buLookup.companiesByName);
+      if (error) errors.push(error);
+      rowBusinessUnit = businessUnit;
+    } else if (blankBuError) {
+      // Multi-BU BU Admin / PM: never default to the Global BU selector.
+      errors.push(blankBuError);
+    }
+    let rowCompanyId = null;
+    if (!errors.length) {
+      const resolved = resolveRowSubBusinessUnit(rowBusinessUnit, rawData.sub_bu, childrenByParent);
+      if (resolved.error) errors.push(resolved.error);
+      rowCompanyId = resolved.companyId;
+    }
 
     if (errors.length > 0) {
       error_rows.push({ row_number: rowNumber, row_data: rawData, errors });
       continue;
     }
+
+    const { existing: { names: existingNames, codes: existingCodes }, file: { names: fileNames, codes: fileCodes } } = await seenFor(rowCompanyId);
 
     // ── Duplicate checks ────────────────────────────────────────────────────
     if (fileNames.has(clientName.toLowerCase())) {
@@ -277,7 +351,7 @@ async function importClients(filePath, userId, req) {
         client_code: finalCode,
         industry:    industry || null,
         status,
-        company_id:  companyId,
+        company_id:  rowCompanyId,
         created_by:  userId,
         updated_by:  userId,
       });

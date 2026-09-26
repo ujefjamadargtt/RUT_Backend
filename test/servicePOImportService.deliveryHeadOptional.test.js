@@ -69,8 +69,18 @@ function stubReferenceData() {
   return createdPayloads;
 }
 
+// "PO Number" is required for a new Service PO — derived here from each
+// row's Service PO Name (rows of the same PO share one number), unless the
+// test supplies its own column.
+function withPoNumber(headers, dataRows) {
+  if (headers.includes('PO Number')) return [headers, ...dataRows];
+  const nameIdx = headers.indexOf('Service PO Name');
+  const code = (row) => ('T-' + String(row[nameIdx] || 'X').toUpperCase().replace(/[^A-Z0-9]/g, '-')).slice(0, 30);
+  return [['PO Number', ...headers], ...dataRows.map((row) => [code(row), ...row])];
+}
+
 function writeWorkbook(headers, dataRows) {
-  const aoa = [headers, ...dataRows];
+  const aoa = withPoNumber(headers, dataRows);
   const ws = xlsx.utils.aoa_to_sheet(aoa);
   const wb = xlsx.utils.book_new();
   xlsx.utils.book_append_sheet(wb, ws, 'Service POs');

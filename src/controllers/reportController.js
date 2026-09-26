@@ -4,6 +4,8 @@ const reportService = require('../services/reportService');
 const { sendPaginated, sendSuccess, sendError } = require('../utils/response');
 const logger = require('../utils/logger');
 const employeeWorkLogHoursSummaryService = require('../services/employeeWorkLogHoursSummaryService');
+const projectTimesheetReportService = require('../services/projectTimesheetReportService');
+const { toMultiSheetExcelBuffer, toCsvExportBuffer } = require('../utils/reportExporter');
 
 /**
  * Report Controller
@@ -582,7 +584,59 @@ async function getServicePOHoursBudget(req, res, next) {
   }
 }
 
+/**
+ * GET /api/v1/reports/project-timesheet
+ * Project-wise / employee-wise, day-wise work-log entries with activity
+ * description, Project Manager, leave hours and approval status.
+ * format=json (paged) | excel (Details + Project Summary + Employee Summary) | csv (details)
+ */
+async function getProjectTimesheetReport(req, res, next) {
+  const authContext = {
+    userId: req.userId,
+    employeeId: req.employeeId,
+    hierarchyRank: req.hierarchyRank,
+    roleNames: req.userRoles,
+  };
+  try {
+    const format = req.query.format || 'json';
+    if (format === 'json') {
+      const result = await projectTimesheetReportService.getReport(req.query, authContext, req.companyIds);
+      return sendPaginated(
+        res,
+        { period: result.period, totals: result.totals, records: result.records, summary: result.summary },
+        result.meta,
+        'Project-wise timesheet report fetched successfully.'
+      );
+    }
+
+    const { period, sheets } = await projectTimesheetReportService.getExport(req.query, authContext, req.companyIds);
+    const label = period.type === 'month'
+      ? `${period.year}-${String(period.month).padStart(2, '0')}`
+      : `${period.start_date}_to_${period.end_date}`;
+    let buffer;
+    let contentType;
+    let extension;
+    if (format === 'excel') {
+      buffer = await toMultiSheetExcelBuffer(sheets);
+      contentType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+      extension = 'xlsx';
+    } else {
+      buffer = toCsvExportBuffer(sheets[0].rows, sheets[0].columns);
+      contentType = 'text/csv';
+      extension = 'csv';
+    }
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="project-timesheet-${label}.${extension}"`);
+    return res.send(Buffer.from(buffer));
+  } catch (err) {
+    if (err.statusCode) return sendError(res, err.message, err.statusCode);
+    logger.error('getProjectTimesheetReport error', { error: err.message, stack: err.stack });
+    return next(err);
+  }
+}
+
 module.exports = {
+  getProjectTimesheetReport,
   getEmployeeWorkLogHoursSummary,
   getEmployeeWorkLogHoursSummaryDetails,
   getEmployeeHourlyRate,

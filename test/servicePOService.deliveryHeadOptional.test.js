@@ -104,7 +104,7 @@ test('create(): still validates delivery_head_employee_id when one IS supplied',
   restore();
 });
 
-test('create(): a company-less actor (Admin) with a BU-less Client/Project, several owned BUs and no Global BU selected MUST supply company_id — Business Unit stays mandatory for Service PO', async () => {
+test('create(): a company-less actor (Admin) with a BU-less Client/Project and no company_id -> PO saved BU-less (company_id NULL), never the active/header BU', async () => {
   const { Company } = require('../src/models');
   const entityRepository = require('../src/repositories/entityRepository');
   const originalCompanyFindAll = Company.findAll;
@@ -114,14 +114,18 @@ test('create(): a company-less actor (Admin) with a BU-less Client/Project, seve
   entityRepository.findIdsOwnedByAdmin = async () => [1];
   Company.findAll = async () => [{ id: 10 }, { id: 11 }];
 
-  await assert.rejects(
-    () => servicePOService.create(basePayload(), 1, { companyId: undefined, hierarchyRank: 2, employeeId: 1, headers: {}, ip: '127.0.0.1' }),
-    (err) => {
-      assert.equal(err.statusCode, 400);
-      assert.match(err.message, /Business Unit/i);
-      return true;
-    }
+  servicePORepository.findByCode = async () => null;
+  servicePORepository.findByName = async () => null;
+  aiInsightService.runJob = async () => {};
+  let capturedPayload;
+  servicePORepository.create = async (payload) => { capturedPayload = payload; return { id: 4, ...payload }; };
+
+  await servicePOService.create(
+    basePayload({ service_po_code: 'PO-DH-4' }),
+    1,
+    { companyId: undefined, hierarchyRank: 2, employeeId: 1, headers: { 'x-company-id': '11' }, ip: '127.0.0.1' }
   );
+  assert.equal(capturedPayload.company_id, null);
 
   Company.findAll = originalCompanyFindAll;
   entityRepository.findIdsOwnedByAdmin = originalFindIdsOwnedByAdmin;

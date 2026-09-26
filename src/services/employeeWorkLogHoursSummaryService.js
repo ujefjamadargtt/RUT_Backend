@@ -132,4 +132,4 @@ async function getDetails(employeeId, query, authContext, companyIds) {
   };
 }
 
-module.exports = { getSummary, getDetails, resolvePeriod, resolveAuthorizedEmployeeIds };
+module.exports = { getSummary, getDetails, resolvePeriod, resolveAuthorizedEmployeeIds, applyEntityBuFilters };

@@ -11,7 +11,7 @@ const servicePOHierarchyRepository = require('../repositories/servicePOHierarchy
 const timesheetRepository = require('../repositories/timesheetRepository');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
 const employeeServicePOMappingService = require('./employeeServicePOMappingService');
-const { resolveActorCompanyScope, resolveCreateCompanyIdForActor, resolveActorCompanyScopeForSelectedBU, resolveActorFullReach, resolveCentralisedOwnerCreatorIds, resolveCentralisedServicePOTenant, resolveSingleCompanyIdForCompanyLessActor, intersectCompanyIdsWithEntity, intersectIdsWithBuHierarchy, areSameOrRelatedBusinessUnits } = require('./companyAccessControlService');
+const { resolveActorCompanyScope, resolveCreateCompanyIdForActor, resolveActorCompanyScopeForSelectedBU, resolveActorFullReach, resolveCentralisedOwnerCreatorIds, resolveCentralisedServicePOTenant, intersectCompanyIdsWithEntity, intersectIdsWithBuHierarchy, areSameOrRelatedBusinessUnits } = require('./companyAccessControlService');
 const { Employee, Company, sequelize } = require('../models');
 const { Op } = require('sequelize');
 const { createAuditLog, getIpAddress } = require('../middlewares/auditLog');
@@ -277,7 +277,15 @@ const getAll = async (query = {}, authContext, headerCompanyId = null) => {
   const { rows, count } = await servicePORepository.findAll(filters, { limit, offset }, sort);
   const meta = getPaginationMeta(count, page, limit);
 
-  return { data: rows, meta };
+  // "Project Manager" column — one batched lookup for exactly this page's
+  // (already scoped/filtered/paginated) POs; always an array, [] when none.
+  const pmByServicePO = await employeeServicePOMappingService.getProjectManagersByServicePOIds(rows.map((row) => row.id));
+  const data = rows.map((row) => ({
+    ...(typeof row.get === 'function' ? row.get({ plain: true }) : row),
+    project_managers: pmByServicePO.get(row.id) || [],
+  }));
+
+  return { data, meta };
 };
 
 /**
@@ -349,10 +357,9 @@ const getAccessibleById = async (id, req) => {
  * Business Unit resolution for a company-less actor (Admin/Entity Admin):
  *   1. `company_id` in the request body (explicit picker on the frontend).
  *   2. Normal PO only: the selected Client's BU, else the selected Project's BU.
- *   3. Normal PO only: the `X-Company-Id` header (Global BU selector), or the
- *      actor's only owned BU when they own exactly one.
- *   4. None → 400 for a normal PO; NULL (allowed) for a centralised PO
- *      (is_centralised: true), which is intentionally BU-less.
+ *   3. None → NULL (BU-less): a "My Clients (No Business Unit)" PO, or a
+ *      centralised PO (is_centralised: true). Never defaulted to the
+ *      creator's active BU / X-Company-Id header.
  * A BU-scoped actor's own `req.companyId` always wins — body and header
  * are ignored for them entirely.
  *
@@ -376,15 +383,16 @@ const create = async (data, userId, req) => {
   // one of the actor's own mapped Business Units below — this only changes
   // WHERE the BU signal comes from.
   //
-  // A company-less actor (Admin/Entity Admin) creating a NON-Centralised PO
-  // with no body company_id gets the same derivation (the selected Client's
-  // BU, else the selected Project's BU), then — for a Client/Project with no
-  // BU of its own (Client Master BU is optional) — the Global BU selector
-  // (X-Company-Id), or their only owned BU when they own exactly one
-  // (resolveSingleCompanyIdForCompanyLessActor's 0/1/>1 contract). Whatever
-  // is derived is still validated as one of THEIR OWN Business Units by
-  // resolveCreateCompanyId() below (403 otherwise), so this never lets an
-  // Admin create a PO in another tenant's BU. A Centralised PO keeps its
+  // A company-less actor (Admin/Entity Admin/Platform Admin) creating a
+  // NON-Centralised PO with no body company_id gets the same derivation (the
+  // selected Client's BU, else the selected Project's BU). When BOTH are
+  // BU-less — the frontend's "My Clients (No Business Unit)" flow, which
+  // deliberately omits company_id — the PO is saved BU-less (company_id
+  // NULL). It is NEVER defaulted to the creator's active BU / X-Company-Id
+  // header: that silently put the PO in a BU the user never picked, and the
+  // Edit drawer then showed that BU instead of "My Clients". A derived BU is
+  // still validated as one of THEIR OWN Business Units by
+  // resolveCreateCompanyId() (403 otherwise). A Centralised PO keeps its
   // optional-BU behaviour (stays NULL unless company_id is sent).
   const isCompanyLessNormalPO = req.companyId == null && fields.is_centralised !== true;
   const preFetchedClient = ((req.companyId != null || isCompanyLessNormalPO) && bodyCompanyId == null)
@@ -398,34 +406,20 @@ const create = async (data, userId, req) => {
     const preFetchedProject = await projectRepository.findByIdUnscoped(fields.project_id);
     if (preFetchedProject && preFetchedProject.company_id != null) {
       effectiveBodyCompanyId = preFetchedProject.company_id;
-    } else {
-      const rawHeader = req.headers ? req.headers['x-company-id'] : null;
-      const headerCompanyId = rawHeader ? parseInt(rawHeader, 10) : null;
-      const selected = await resolveSingleCompanyIdForCompanyLessActor(req.hierarchyRank, req.employeeId, headerCompanyId);
-      if (selected.error) {
-        const err = new Error(
-          selected.error.code === 'COMPANY_HEADER_REQUIRED'
-            ? 'The selected Client and Project have no Business Unit — please select a Business Unit (company_id) for this Service PO.'
-            : selected.error.message
-        );
-        err.statusCode = selected.error.statusCode;
-        throw err;
-      }
-      effectiveBodyCompanyId = selected.companyId;
     }
   }
 
-  // Normal Service PO: BU is mandatory (required=true).
-  // Centralised Service PO: BU is optional — stays NULL if not supplied.
-  // For a multi-BU BU Admin, an explicit body company_id (or, now, the
-  // selected Client's own BU) wins over the X-Company-Id header; validation
-  // is handled inside resolveCreateCompanyIdForActor.
+  // BU is optional for a company-less actor (BU-less "My Clients" PO, or a
+  // Centralised PO) — resolveCreateCompanyIdForActor(required: false) keeps
+  // it NULL when nothing was supplied/derived, and validates ownership when
+  // it was. A BU-scoped actor always gets their own BU (unchanged).
+  // For a multi-BU BU Admin, an explicit body company_id (or the selected
+  // Client's own BU) wins over the X-Company-Id header; validation is
+  // handled inside resolveCreateCompanyIdForActor.
   const companyId = await resolveCreateCompanyIdForActor(
     req,
     effectiveBodyCompanyId,
-    fields.is_centralised === true
-      ? { required: false }
-      : { required: true, resourceLabel: 'a Service PO' }
+    { required: false }
   );
   data = fields;
 

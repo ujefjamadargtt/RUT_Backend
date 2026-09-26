@@ -1,7 +1,11 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { Client, ServicePO, Company, Entity } = require('../models');
+const { Client, ServicePO, Company, Entity, Employee } = require('../models');
+
+// "Created By" column — the creating Employee's name. Unfiltered on status/
+// is_deleted on purpose: a creator who has since left must still show.
+const CREATOR_INCLUDE = { model: Employee, as: 'creator', attributes: ['id', 'employee_code', 'full_name'], required: false };
 const logger = require('../utils/logger');
 
 // A factory, not a shared constant — Sequelize mutates include objects in
@@ -108,9 +112,12 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
     where,
     limit,
     offset,
-    order: [[safeSortBy, safeSortOrder]],
+    // `id` tie-breaker (same direction) keeps rows with an identical sort
+    // value in a stable order across requests/pages — ORDER BY runs in SQL
+    // before LIMIT/OFFSET, so pagination stays globally ordered.
+    order: [[safeSortBy, safeSortOrder], ['id', safeSortOrder]],
     attributes: ['id', 'client_code', 'client_name', 'industry', 'status', 'company_id', 'created_at', 'updated_at', 'created_by'],
-    include: [companyWithEntityInclude()],
+    include: [companyWithEntityInclude(), CREATOR_INCLUDE],
   });
 };
 
@@ -124,7 +131,7 @@ const findById = async (id, companyId) => {
   return Client.findOne({
     where: { id, ...companyScope(companyId) },
     attributes: ['id', 'client_code', 'client_name', 'industry', 'status', 'company_id', 'created_at', 'updated_at', 'created_by', 'updated_by'],
-    include: [companyWithEntityInclude()],
+    include: [companyWithEntityInclude(), CREATOR_INCLUDE],
   });
 };
 

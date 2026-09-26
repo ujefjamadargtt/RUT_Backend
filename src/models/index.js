@@ -267,6 +267,13 @@ ServicePO.belongsTo(Project, { foreignKey: 'project_id', as: 'project' });
 // distinct from the employees/resources many-to-many further down. Always
 // an Employee Master id (see database/migrations/20260849_add_service_pos_delivery_head.sql).
 ServicePO.belongsTo(Employee, { foreignKey: 'delivery_head_employee_id', as: 'deliveryHead' });
+
+// "Created By" display — created_by holds an Employee id (Employee-as-Identity).
+// constraints: false — no FK is declared on these columns in the DB, and a
+// creator who later leaves must still resolve (employees are soft-deleted).
+Client.belongsTo(Employee, { foreignKey: 'created_by', as: 'creator', constraints: false });
+Project.belongsTo(Employee, { foreignKey: 'created_by', as: 'creator', constraints: false });
+ServicePO.belongsTo(Employee, { foreignKey: 'created_by', as: 'creator', constraints: false });
 Employee.hasMany(ServicePO, { foreignKey: 'delivery_head_employee_id', as: 'deliveryHeadServicePOs' });
 
 // ServiceCategory <-> ServiceType

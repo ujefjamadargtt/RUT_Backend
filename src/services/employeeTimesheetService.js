@@ -970,10 +970,11 @@ const addTimeEntries = async (employeeId, companyId, data) => {
  * hierarchy node that was valid when this entry was first submitted may no
  * longer be, so resubmitting must fail loudly rather than silently
  * re-queue an entry that can no longer be approved. The employee edits the
- * row first (via updateEntry, which already re-validates everything and
- * reverts status to 'pending' itself — see its own doc comment) when a
- * validation actually needs fixing; calling resubmit directly on an
- * unedited-but-still-valid rejected row is the common case this exists for.
+ * row first when something needs fixing (via updateEntry, which re-validates
+ * everything but deliberately LEAVES a rejected entry 'rejected'), then calls
+ * this: "Edit -> Save Changes -> still REJECTED -> Resubmit -> PENDING".
+ * Calling resubmit directly on an unedited-but-still-valid rejected row is
+ * equally fine.
  *
  * @param {number} employeeId
  * @param {number} companyId
@@ -1002,13 +1003,24 @@ const resubmitEntry = async (employeeId, companyId, id) => {
   await assertDailyCap(employeeId, existing.work_date, existing.hours, companyId, id);
 
   const updated = await employeeWorkLogRepository.resubmitById(id, companyId);
+  if (!updated) {
+    // Status changed between the check above and the guarded UPDATE
+    // (resubmitById only matches status = 'rejected').
+    throw conflictError('This work log entry is no longer rejected, so it cannot be resubmitted.');
+  }
 
   logger.info('Employee resubmitted a rejected work log entry', { workLogId: id, employeeId, companyId });
 
   // Resubmit never touches time_entries/hours — the row's mode is exactly
   // what it already was (existingMode, computed above), carried through
   // explicitly rather than left for the caller to re-infer.
-  return { ...updated, entry_type: existingMode };
+  //
+  // Plain object, never a spread model instance: `{ ...instance }` copies
+  // Sequelize internals (_options.include with parent/child back-references)
+  // and drops toJSON(), so res.json() threw "Converting circular structure
+  // to JSON" — AFTER the row had already been saved as 'pending'. The
+  // client saw an error for a resubmit that had actually succeeded.
+  return { ...updated.get({ plain: true }), entry_type: existingMode };
 };
 
 /**

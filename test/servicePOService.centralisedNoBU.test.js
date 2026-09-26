@@ -142,34 +142,36 @@ test('create(): a NON-centralised PO never calls autoMapExistingEmployeesToCentr
   restore();
 });
 
-test('create(): a NON-centralised PO from a company-less actor still requires company_id (regression guard)', async () => {
+test('create(): a NON-centralised "My Clients" PO from a company-less actor (BU-less Client/Project, no company_id) is saved BU-less and never auto-maps', async () => {
   // Nothing to derive a BU from: BU-less Client/Project, an Admin owning
-  // SEVERAL BUs, and no Global BU selected (X-Company-Id).
+  // SEVERAL BUs. The PO must stay BU-less — never a guessed/active BU.
   const restoreOwnership = stubUnderivableBU();
-  await assert.rejects(
-    () => servicePOService.create(basePayload({ is_centralised: false }), 1, companyLessReq()),
-    (err) => {
-      assert.equal(err.statusCode, 400);
-      assert.match(err.message, /Business Unit/i);
-      return true;
-    }
-  );
+  servicePORepository.findByCode = async () => null;
+  servicePORepository.findByName = async () => null;
+  aiInsightService.runJob = async () => {};
+  sequelize.transaction = async (fn) => fn({ __fakeTransaction: true });
+  employeeServicePOMappingService.autoMapExistingEmployeesToCentralisedServicePO = async () => assert.fail('a normal PO never auto-maps');
+  let capturedPayload;
+  servicePORepository.create = async (payload) => { capturedPayload = payload; return { id: 2, ...payload }; };
+
+  await servicePOService.create(basePayload({ is_centralised: false }), 1, companyLessReq());
+  assert.equal(capturedPayload.company_id, null);
 
   restoreOwnership();
   restore();
 });
 
-test('create(): is_centralised omitted (Joi default false) still requires company_id, same as explicit false', async () => {
-  // Nothing to derive a BU from: BU-less Client/Project, an Admin owning
-  // SEVERAL BUs, and no Global BU selected (X-Company-Id).
+test('create(): is_centralised omitted (Joi default false) behaves the same as explicit false — BU-less "My Clients" PO saved with company_id NULL', async () => {
   const restoreOwnership = stubUnderivableBU();
-  await assert.rejects(
-    () => servicePOService.create(basePayload(), 1, companyLessReq()),
-    (err) => {
-      assert.equal(err.statusCode, 400);
-      return true;
-    }
-  );
+  servicePORepository.findByCode = async () => null;
+  servicePORepository.findByName = async () => null;
+  aiInsightService.runJob = async () => {};
+  sequelize.transaction = async (fn) => fn({ __fakeTransaction: true });
+  let capturedPayload;
+  servicePORepository.create = async (payload) => { capturedPayload = payload; return { id: 3, ...payload }; };
+
+  await servicePOService.create(basePayload({ service_po_code: 'PO-CENT-NOBU-3' }), 1, companyLessReq());
+  assert.equal(capturedPayload.company_id, null);
 
   restoreOwnership();
   restore();

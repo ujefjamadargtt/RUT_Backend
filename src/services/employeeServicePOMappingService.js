@@ -614,6 +614,45 @@ const getProjectManagersForServicePOs = async (servicePoIds) => {
 };
 
 /**
+ * The Project Manager(s) of EACH given Service PO, grouped per PO — the
+ * Service PO Master's "Project Manager" column (servicePOService.getAll()).
+ *
+ * Same PM rule as the Consolidated Monthly Report's `projectManagers`
+ * (managementReportRepository's pm_names CTE): an ACTIVE mapping row with
+ * is_project_manager = true whose Employee isn't soft-deleted, sorted by
+ * name. Built on the same batched repository query as
+ * getProjectManagersForServicePOs() above — ONE query for all given POs, no
+ * per-PO lookup. Unlike that function it keeps the per-PO breakdown and
+ * doesn't drop Centralised POs or inactive-status Employees: it reports who
+ * IS flagged PM, rather than who should receive a reminder.
+ *
+ * Read-only. Callers pass only Service POs the caller is already allowed to
+ * see (e.g. the current page of getAll()).
+ *
+ * @param {number[]} servicePoIds
+ * @returns {Promise<Map<number, Array<{ id: number, employee_code: string, full_name: string }>>>}
+ *   every requested id is present, with [] when it has no PM
+ */
+const getProjectManagersByServicePOIds = async (servicePoIds) => {
+  const byServicePO = new Map((servicePoIds || []).map((id) => [id, []]));
+  if (byServicePO.size === 0) return byServicePO;
+
+  const mappings = await employeeServicePOMappingRepository.findByServicePOs(
+    [...byServicePO.keys()], 'active', { onlyProjectManager: true }
+  );
+  for (const mapping of mappings) {
+    const employee = mapping.employee;
+    const list = byServicePO.get(mapping.service_po_id);
+    if (!employee || employee.is_deleted || !list || list.some((pm) => pm.id === employee.id)) continue;
+    list.push({ id: employee.id, employee_code: employee.employee_code, full_name: employee.full_name });
+  }
+  for (const list of byServicePO.values()) {
+    list.sort((a, b) => (a.full_name || '').localeCompare(b.full_name || ''));
+  }
+  return byServicePO;
+};
+
+/**
  * Resolve the target Employee for the mapping screen — same resolution
  * assign() already does (including the genuinely-unassigned-Employee
  * fallback, so a brand-new Employee with no Business Unit yet isn't stuck
@@ -1283,6 +1322,7 @@ module.exports = {
   getProjectManagerServicePOIds,
   getEmployeeRealProjectServicePOIds,
   getProjectManagersForServicePOs,
+  getProjectManagersByServicePOIds,
   resolveApprovalRoutingServicePOIds,
   hasUnrestrictedServicePOVisibility,
   getServicePOOptionsForEmployee,

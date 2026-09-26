@@ -392,7 +392,7 @@ const findByServicePOs = async (servicePoIds, status, options = {}) => {
       {
         model: Employee,
         as: 'employee',
-        attributes: ['id', 'employee_code', 'full_name', 'email', 'status'],
+        attributes: ['id', 'employee_code', 'full_name', 'email', 'status', 'is_deleted'],
       },
     ],
   });

@@ -85,9 +85,14 @@ const getAll = async (query = {}, authContext) => {
     companyId,
   };
 
+  // camelCase sortBy/sortOrder (what the Client Master frontend sends) win
+  // over snake_case sort_by/sort_order — the latter always carry a Joi
+  // default (client_name/ASC), so they can't be the one to check first.
+  // Unsupported values fall back to the default inside clientRepository.
+  // findAll()'s whitelist, never into SQL.
   const sort = {
-    sortBy: query.sort_by || 'client_name',
-    sortOrder: query.sort_order || 'ASC',
+    sortBy: query.sortBy || query.sort_by || 'client_name',
+    sortOrder: query.sortOrder || query.sort_order || 'ASC',
   };
 
   const { rows, count } = await clientRepository.findAll(filters, { limit, offset }, sort);
@@ -95,6 +100,33 @@ const getAll = async (query = {}, authContext) => {
 
   return { data: rows, meta };
 };
+
+/**
+ * The scope update()/deleteClient() look an existing Client up by: the
+ * caller's FULL reach (every BU they manage, ignoring the currently-active
+ * X-Company-Id — see update()'s doc comment), wrapped by
+ * resolveActorRecordAccessScope() so a company-less actor (Admin/Entity
+ * Admin) also reaches a Client THEY created with no Business Unit yet
+ * (company_id NULL) — the same rule getById() already applies. The plain
+ * full-reach array alone becomes `company_id IN (...)`, which never matches
+ * NULL, so such a Client could be created and opened but never saved or
+ * deleted ("Client not found."). A BU-scoped actor is unaffected (plain array).
+ *
+ * @param {object} req
+ * @returns {Promise<number[]|{ ownedCompanyIds: number[], createdBy: number|null }>}
+ */
+async function resolveClientWriteScope(req) {
+  const fullReach = await resolveActorFullReach({
+    hierarchyRank: req.hierarchyRank,
+    employeeId: req.employeeId,
+    employeeBusinessUnits: req.employeeBusinessUnits,
+  });
+  return resolveActorRecordAccessScope({
+    companyId: fullReach,
+    hierarchyRank: req.hierarchyRank,
+    employeeId: req.employeeId,
+  });
+}
 
 /**
  * Retrieve a single client by ID.
@@ -240,11 +272,7 @@ const create = async (data, userId, req) => {
  * @returns {Promise<Client>}
  */
 const update = async (id, data, userId, req) => {
-  const companyId = await resolveActorFullReach({
-    hierarchyRank: req.hierarchyRank,
-    employeeId: req.employeeId,
-    employeeBusinessUnits: req.employeeBusinessUnits,
-  });
+  const companyId = await resolveClientWriteScope(req);
 
   const existing = await clientRepository.findById(id, companyId);
   if (!existing) {
@@ -342,11 +370,7 @@ const update = async (id, data, userId, req) => {
  * @returns {Promise<void>}
  */
 const deleteClient = async (id, userId, req) => {
-  const companyId = await resolveActorFullReach({
-    hierarchyRank: req.hierarchyRank,
-    employeeId: req.employeeId,
-    employeeBusinessUnits: req.employeeBusinessUnits,
-  });
+  const companyId = await resolveClientWriteScope(req);
 
   const existing = await clientRepository.findById(id, companyId);
   if (!existing) {

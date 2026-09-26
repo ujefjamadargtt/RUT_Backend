@@ -4,13 +4,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 // Regression: an Admin (company-less, rank 2) creating a normal Service PO
-// for their own Client/Project with no company_id in the body got
-// "company_id (Business Unit) is required to create a Service PO." —
-// servicePOService.create()'s documented X-Company-Id fallback was never
-// implemented, and the Client/Project BU was only derived for BU-scoped
-// actors. Now: body company_id -> Client BU -> Project BU -> Global BU
-// selector (X-Company-Id) / only owned BU, always validated as one of the
-// Admin's OWN Business Units.
+// with no company_id in the body. Resolution: body company_id -> the
+// selected Client's BU -> the selected Project's BU -> NULL (BU-less, the
+// frontend's "My Clients (No Business Unit)" flow). It must NEVER default to
+// the creator's active BU / X-Company-Id header — that silently put the PO
+// in a BU the user never picked. Any derived/sent BU is still validated as
+// one of the Admin's OWN Business Units.
 
 const { Company } = require('../src/models');
 const entityRepository = require('../src/repositories/entityRepository');
@@ -80,21 +79,21 @@ function payload(overrides = {}) {
   };
 }
 
-test('Admin, BU-less Client/Project, Global BU selected (X-Company-Id: 11) -> PO created in BU 11', async () => {
+test('Admin, BU-less Client/Project ("My Clients"), Global BU selected (X-Company-Id: 11) -> PO saved BU-less, header ignored', async () => {
   const captured = stubAdmin();
   try {
     await servicePOService.create(payload(), 3, adminReq({ 'x-company-id': '11' }));
-    assert.equal(captured().company_id, 11);
+    assert.equal(captured().company_id, null);
   } finally {
     restore();
   }
 });
 
-test('Admin owning exactly ONE BU, BU-less Client/Project, no header -> that BU is used automatically', async () => {
+test('Admin owning exactly ONE BU, BU-less Client/Project, no header -> still BU-less (no auto-pick)', async () => {
   const captured = stubAdmin({ ownedBUs: [10] });
   try {
     await servicePOService.create(payload(), 3, adminReq());
-    assert.equal(captured().company_id, 10);
+    assert.equal(captured().company_id, null);
   } finally {
     restore();
   }
@@ -130,11 +129,11 @@ test('Admin, explicit body company_id still wins', async () => {
   }
 });
 
-test('Admin, Global BU header naming ANOTHER tenant\'s BU -> 403, never created', async () => {
+test('Admin, explicit body company_id naming ANOTHER tenant\'s BU -> 403, never created', async () => {
   const captured = stubAdmin();
   try {
     await assert.rejects(
-      () => servicePOService.create(payload(), 3, adminReq({ 'x-company-id': '99' })),
+      () => servicePOService.create(payload({ company_id: 99 }), 3, adminReq()),
       (err) => err.statusCode === 403
     );
     assert.equal(captured(), undefined);
