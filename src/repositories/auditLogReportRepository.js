@@ -14,18 +14,26 @@ const { QueryTypes } = require('sequelize');
  * so "everything my BU's people did" and "everything done on my BU's data" are separate filters.
  */
 
-// Employee -> the BUs they belong to, rolled up to the top-level BU, plus the Sub-BUs they sit in.
+// Employee -> the BUs / Sub-BUs they are ACTUALLY mapped to (active employee_business_units rows on
+// live companies). Names come from the mapped rows themselves: a parent BU is listed only when it is
+// itself mapped, never because one of its Sub-BUs is. A BU unmapped on the Role & BU Mapping screen
+// (any employee_business_unit_role_exclusions row) is treated as unmapped, same as that screen. Reach ids (member_ids) stay separate: they are
+// the visibility check, which rolls a Sub-BU mapping up to cover the parent.
 const CTE_SQL = `
   WITH actor_bu AS (
     SELECT m.employee_id,
            ARRAY_AGG(DISTINCT c.id) AS member_ids,
+           ARRAY_AGG(DISTINCT c.id) FILTER (WHERE c.parent_business_unit_id IS NULL) AS bu_ids,
            ARRAY_AGG(DISTINCT c.id) FILTER (WHERE c.parent_business_unit_id IS NOT NULL) AS sub_bu_ids,
-           STRING_AGG(DISTINCT root.company_name, ', ') AS bu_names,
+           STRING_AGG(DISTINCT c.company_name, ', ') FILTER (WHERE c.parent_business_unit_id IS NULL) AS bu_names,
            STRING_AGG(DISTINCT c.company_name, ', ') FILTER (WHERE c.parent_business_unit_id IS NOT NULL) AS sub_bu_names
       FROM employee_business_units m
-      JOIN companies c    ON c.id = m.business_unit_id AND c.is_deleted = false
-      JOIN companies root ON root.id = COALESCE(c.parent_business_unit_id, c.id)
+      JOIN companies c ON c.id = m.business_unit_id AND c.is_deleted = false
      WHERE m.status = 'active'
+       AND NOT EXISTS (
+         SELECT 1 FROM employee_business_unit_role_exclusions x
+          WHERE x.employee_id = m.employee_id AND x.business_unit_id = m.business_unit_id
+       )
      GROUP BY m.employee_id
   )`;
 
@@ -77,7 +85,7 @@ const SORT_SQL = { newest: 'a.created_at DESC, a.id DESC', oldest: 'a.created_at
  * @param {string} f.startDate
  * @param {string} f.endDate
  * @param {number[]|null} [f.actorIds]
- * @param {number[]|null} [f.actorBuIds]       - expanded to include Sub-BUs
+ * @param {number[]|null} [f.actorBuIds]       - top-level BUs the actor is mapped to (no Sub-BU expansion)
  * @param {number[]|null} [f.actorSubBuIds]
  * @param {number[]|null} [f.recordBuIds]      - expanded to include Sub-BUs
  * @param {string[]|null} [f.actions]
@@ -106,7 +114,7 @@ function buildWhere(f) {
     if (values && values.length) { conditions.push(cond); replacements[key] = values; }
   };
   inList('a.user_id IN (:actorIds)', 'actorIds', f.actorIds);
-  inList('ab.member_ids && ARRAY[:actorBuIds]::int[]', 'actorBuIds', f.actorBuIds);
+  inList('ab.bu_ids && ARRAY[:actorBuIds]::int[]', 'actorBuIds', f.actorBuIds);
   inList('ab.sub_bu_ids && ARRAY[:actorSubBuIds]::int[]', 'actorSubBuIds', f.actorSubBuIds);
   inList('a.company_id IN (:recordBuIds)', 'recordBuIds', f.recordBuIds);
   inList('a.action IN (:actions)', 'actions', f.actions);
@@ -286,7 +294,7 @@ async function findDevices(filters, { limit = null, offset = 0 } = {}) {
     conditions.push(`(${parts.join(' OR ')})`);
   }
   if (filters.actorIds && filters.actorIds.length) { conditions.push('d.employee_id IN (:actorIds)'); replacements.actorIds = filters.actorIds; }
-  if (filters.actorBuIds && filters.actorBuIds.length) { conditions.push('ab.member_ids && ARRAY[:actorBuIds]::int[]'); replacements.actorBuIds = filters.actorBuIds; }
+  if (filters.actorBuIds && filters.actorBuIds.length) { conditions.push('ab.bu_ids && ARRAY[:actorBuIds]::int[]'); replacements.actorBuIds = filters.actorBuIds; }
   if (filters.actorSubBuIds && filters.actorSubBuIds.length) { conditions.push('ab.sub_bu_ids && ARRAY[:actorSubBuIds]::int[]'); replacements.actorSubBuIds = filters.actorSubBuIds; }
   if (filters.deviceId) { conditions.push('(d.device_id ILIKE :deviceId OR d.device_name ILIKE :deviceId)'); replacements.deviceId = `%${filters.deviceId}%`; }
   if (filters.search) {

@@ -100,7 +100,7 @@ test('visibility: a BU-scoped viewer sees their BU\'s DATA or their BU\'s PEOPLE
 test('actor BU and record BU are independent filters', () => {
   const base = { scope: { kind: 'all' }, startDate: '2026-10-01', endDate: '2026-10-08' };
   const actor = repository.buildWhere({ ...base, actorBuIds: [68] });
-  assert.match(actor.whereSql, /ab\.member_ids && ARRAY\[:actorBuIds\]::int\[\]/);
+  assert.match(actor.whereSql, /ab\.bu_ids && ARRAY\[:actorBuIds\]::int\[\]/);
   assert.doesNotMatch(actor.whereSql, /:recordBuIds/);
   const record = repository.buildWhere({ ...base, recordBuIds: [69] });
   assert.match(record.whereSql, /a\.company_id IN \(:recordBuIds\)/);
