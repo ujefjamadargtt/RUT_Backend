@@ -26,6 +26,7 @@ const {
   updateServicePOSchema,
   allocateResourcesSchema,
   listServicePOsQuerySchema,
+  listServicePOCreatorsQuerySchema,
 } = require('../validations/servicePOValidation');
 const { handleServicePOUpload } = require('../middlewares/upload');
 
@@ -121,6 +122,41 @@ router.get(
   '/active/list',
   authenticateReadMultiBU,
   servicePOController.getActivePOs
+);
+
+// ─── Creators of visible Service POs ("Created By" filter options) ───────────
+// Registered before '/:id' so "creators" is never parsed as an id.
+/**
+ * @swagger
+ * /service-pos/creators:
+ *   get:
+ *     summary: Distinct creators of the Service POs the caller can see (Created By filter options)
+ *     description: >
+ *       Same scoping as GET /service-pos (company scope, X-Company-Id / Admin cross-BU handling,
+ *       Centralised tenant) but NOT narrowed by status, so creators of closed / completed POs are included.
+ *       Sorted by full_name ASC; a creator who has left still resolves.
+ *     tags: [ServicePOs]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: entityIds
+ *         schema: { type: string, example: "1,2" }
+ *       - in: query
+ *         name: businessUnitIds
+ *         schema: { type: string, example: "10,11,12" }
+ *       - in: query
+ *         name: company_ids
+ *         schema: { type: string, example: "10,11" }
+ *     responses:
+ *       200:
+ *         description: "{ data: [ { id, employee_code, full_name } ] }"
+ */
+router.get(
+  '/creators',
+  authenticateReadMultiBU,
+  validate(listServicePOCreatorsQuerySchema, 'query'),
+  servicePOController.getServicePOCreators
 );
 
 // ─── List all Service POs ─────────────────────────────────────────────────────

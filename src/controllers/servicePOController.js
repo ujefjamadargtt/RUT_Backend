@@ -62,6 +62,20 @@ const getAllServicePOs = async (req, res) => {
 };
 
 /**
+ * GET /api/v1/service-pos/creators
+ * Distinct creators of the Service POs the caller can see — "Created By" filter options.
+ */
+const getServicePOCreators = async (req, res) => {
+  try {
+    const creators = await servicePOService.getCreators(req.query, buildAuthContext(req));
+    return sendSuccess(res, creators, 'Service PO creators fetched successfully.');
+  } catch (error) {
+    logger.error('getServicePOCreators error', { error: error.message });
+    return sendError(res, error.message, error.statusCode || 500);
+  }
+};
+
+/**
  * GET /api/v1/service-pos/active/list
  */
 const getActivePOs = async (req, res) => {
@@ -294,6 +308,7 @@ const importServicePOs = async (req, res) => {
 module.exports = {
   getAllServicePOs,
   getActivePOs,
+  getServicePOCreators,
   getServicePOById,
   createServicePO,
   updateServicePO,

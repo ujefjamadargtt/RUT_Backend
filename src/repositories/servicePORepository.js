@@ -163,7 +163,7 @@ function withCentralisedTenant(scope, centralisedTenant) {
  * @returns {Promise<{ rows: ServicePO[], count: number }>}
  */
 const findAll = async (filters = {}, pagination = {}, sort = {}) => {
-  const { search, status, client_id, project_id, service_category_id, service_type_id, service_po_id, is_billable, start_date_from, start_date_to, companyId, createdBy, centralisedOwnerIds, mappedServicePOIds, centralisedTenant } = filters;
+  const { search, status, client_id, project_id, service_category_id, service_type_id, service_po_id, is_billable, start_date_from, start_date_to, companyId, createdBy, centralisedOwnerIds, mappedServicePOIds, centralisedTenant, created_by } = filters;
   const { limit = 10, offset = 0 } = pagination;
   const { sortBy = 'created_at', sortOrder = 'DESC' } = sort;
 
@@ -210,6 +210,11 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
 
   if (service_po_id) {
     where.id = service_po_id;
+  }
+
+  // snake_case = the "Created By" list filter; camelCase createdBy above is the visibility scope.
+  if (created_by) {
+    where.created_by = created_by;
   }
 
   if (typeof is_billable === 'boolean') {
@@ -285,6 +290,8 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
 
   return ServicePO.findAndCountAll({
     where,
+    // The list never returns the PO value (financial field) — detail/create/update responses are unchanged.
+    attributes: { exclude: ['po_value'] },
     include: [
       {
         model: Client,
@@ -629,6 +636,39 @@ const getActivePOs = async (companyId, createdBy = null, centralisedOwnerIds = n
 };
 
 /**
+ * Distinct creators (Employee id / code / name, by name ASC) of the non-deleted Service POs inside the
+ * caller's visibility scope — the options of the list's "Created By" filter. `scope` is
+ * servicePOService.resolveListVisibilityScope()'s result, so it is exactly the list's own scoping
+ * (companyScope + Centralised tenant), but deliberately NOT narrowed by status, so closed / completed
+ * POs' creators are included. NULL created_by is skipped; the Employee is looked up WITHOUT an
+ * is_deleted / status filter so a creator who has left still resolves.
+ *
+ * @param {{ companyId: *, createdBy?: number|null, centralisedOwnerIds?: *, mappedServicePOIds?: *, centralisedTenant?: * }} scope
+ * @returns {Promise<{ id: number, employee_code: string, full_name: string }[]>}
+ */
+const findCreators = async (scope = {}) => {
+  const { companyId, createdBy, centralisedOwnerIds, mappedServicePOIds, centralisedTenant } = scope;
+  const creatorRows = await ServicePO.findAll({
+    where: {
+      is_deleted: false,
+      created_by: { [Op.ne]: null },
+      [Op.and]: [withCentralisedTenant(companyScope(companyId, createdBy, centralisedOwnerIds, mappedServicePOIds), centralisedTenant)],
+    },
+    attributes: [[fn('DISTINCT', col('created_by')), 'created_by']],
+    raw: true,
+  });
+  const creatorIds = creatorRows.map((row) => row.created_by);
+  if (creatorIds.length === 0) return [];
+
+  return Employee.findAll({
+    where: { id: { [Op.in]: creatorIds } },
+    attributes: ['id', 'employee_code', 'full_name'],
+    order: [['full_name', 'ASC'], ['id', 'ASC']],
+    raw: true,
+  });
+};
+
+/**
  * Return { id, company_id, created_by } for every active, non-deleted
  * Centralised Service PO of ONE Admin tenant — "active" here is the same
  * status set getActivePOs() already uses. A Centralised PO is for every
@@ -748,6 +788,7 @@ const getEligibleForMapping = async ({ companyId, createdBy = null, unrestricted
 
 module.exports = {
   findAll,
+  findCreators,
   findById,
   findByCode,
   findByName,

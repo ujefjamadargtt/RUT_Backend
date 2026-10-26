@@ -216,34 +216,9 @@ async function resolveIndividuallyMappedServicePOIds(employeeId, roleNames = nul
  * @returns {Promise<{ data: ServicePO[], meta: object }>}
  */
 const getAll = async (query = {}, authContext, headerCompanyId = null) => {
-  let companyId = await resolveActorCompanyScopeForSelectedBU(authContext, headerCompanyId);
-  // Optional entityIds/businessUnitIds multi-select narrowing on top of the
-  // already-resolved scope — only meaningful when that scope is an array (a
-  // single already-selected companyId has nothing left to narrow). Applied
-  // BEFORE centralisedOwnerIds is derived below, so a narrowed BU selection
-  // also correctly narrows which tenant's Centralised POs are visible. For a
-  // Project Manager/Delivery Head this has no visible effect — their
-  // mappedServicePOIds override replaces companyId/centralisedOwnerIds
-  // entirely regardless (see this function's own doc comment).
-  // A specific Business Unit filter (businessUnitIds / company_ids) means a STRICT
-  // company_id IN (selected) match: BU-less rows (Centralised POs, "No Business Unit" POs, the
-  // actor's own unassigned POs) belong to no Business Unit, so they must not appear under one.
-  // They stay visible in the unfiltered "All Business Units" view.
-  const hasBuFilter = (parseIdList(query.businessUnitIds) || []).length > 0
-    || (parseIdList(query.company_ids) || []).length > 0;
-  if (Array.isArray(companyId)) {
-    // entityIds/businessUnitIds (camelCase, matching the Report endpoints'
-    // convention) and company_ids (snake_case, matching this endpoint's own
-    // client_id/service_category_id/sort_by convention — the
-    // Admin/Platform-Admin-only BU filter on the Service PO list) are
-    // accepted as equivalent narrowing filters; all compose via
-    // intersection when more than one is given.
-    companyId = await intersectCompanyIdsWithEntity(companyId, parseIdList(query.entityIds));
-    companyId = await intersectIdsWithBuHierarchy(companyId, parseIdList(query.businessUnitIds));
-    companyId = await intersectIdsWithBuHierarchy(companyId, parseIdList(query.company_ids));
-  }
+  // Visibility scope (company / BU filter / Centralised / mapped POs) — shared with getCreators().
+  const scope = await resolveListVisibilityScope(query, authContext, headerCompanyId);
   const { page, limit, offset } = getPaginationParams(query);
-  const mappedServicePOIds = await resolveIndividuallyMappedServicePOIds(authContext.employeeId, authContext.roleNames);
 
   const filters = {
     search: query.search || null,
@@ -252,28 +227,12 @@ const getAll = async (query = {}, authContext, headerCompanyId = null) => {
     service_category_id: query.service_category_id ? parseInt(query.service_category_id, 10) : null,
     service_type_id: query.service_type_id ? parseInt(query.service_type_id, 10) : null,
     service_po_id: query.service_po_id ? parseInt(query.service_po_id, 10) : null,
+    created_by: query.created_by ? parseInt(query.created_by, 10) : null,
     is_billable: query.is_billable !== undefined ? query.is_billable : undefined,
     start_date_from: query.start_date_from || null,
     start_date_to: query.start_date_to || null,
-    companyId,
-    // A company-less Admin/Entity Admin must still see their OWN Service
-    // PO(s) created with no Business Unit assigned yet (company_id NULL) —
-    // see servicePORepository.companyScope()'s doc comment. No-op for a
-    // BU-scoped actor (companyId a plain number there, never an array).
-    createdBy: hasBuFilter ? null : authContext.employeeId,
-    // Widens the list to this actor's own tenant's Centralised POs
-    // (company_id NULL) — see resolveCentralisedOwnerIds()'s doc comment.
-    // All three BU-less widenings are skipped under a specific BU filter (see hasBuFilter).
-    centralisedOwnerIds: hasBuFilter ? null : await resolveCentralisedOwnerIds(companyId),
-    // Centralised POs of this actor's OWN Admin tenant only — never every
-    // Centralised PO on the platform (see companyAccessControlService.
-    // resolveCentralisedServicePOTenant()).
-    centralisedTenant: hasBuFilter ? null : await resolveCentralisedServicePOTenant(companyId, authContext.employeeId),
-    // For a Project Manager/Delivery Head, REPLACES companyId/
-    // centralisedOwnerIds above entirely with this actor's own individually-
-    // mapped POs (see resolveIndividuallyMappedServicePOIds()'s doc
-    // comment) — `null` (every other role) leaves them in full effect.
-    mappedServicePOIds,
+    // companyId / createdBy / centralisedOwnerIds / centralisedTenant / mappedServicePOIds — see resolveListVisibilityScope().
+    ...scope,
   };
 
   const sort = {
@@ -302,6 +261,84 @@ const getAll = async (query = {}, authContext, headerCompanyId = null) => {
   });
 
   return { data, meta };
+};
+
+
+/**
+ * The visibility scope of the Service PO list, shared by getAll() and getCreators() so both always see the
+ * exact same set of POs (company scope, X-Company-Id / Admin cross-BU handling, entityIds / businessUnitIds /
+ * company_ids narrowing, Centralised tenant, Project Manager mapped-PO override).
+ *
+ * @param {object} query - req.query (only entityIds, businessUnitIds, company_ids are read)
+ * @param {object} authContext - { companyId, hierarchyRank, employeeId, roleNames }
+ * @param {number|null} [headerCompanyId]
+ * @returns {Promise<{ companyId: *, createdBy: number|null, centralisedOwnerIds: *, centralisedTenant: *, mappedServicePOIds: * }>}
+ */
+const resolveListVisibilityScope = async (query = {}, authContext, headerCompanyId = null) => {
+  let companyId = await resolveActorCompanyScopeForSelectedBU(authContext, headerCompanyId);
+  // Optional entityIds/businessUnitIds multi-select narrowing on top of the
+  // already-resolved scope — only meaningful when that scope is an array (a
+  // single already-selected companyId has nothing left to narrow). Applied
+  // BEFORE centralisedOwnerIds is derived below, so a narrowed BU selection
+  // also correctly narrows which tenant's Centralised POs are visible. For a
+  // Project Manager/Delivery Head this has no visible effect — their
+  // mappedServicePOIds override replaces companyId/centralisedOwnerIds
+  // entirely regardless (see this function's own doc comment).
+  // A specific Business Unit filter (businessUnitIds / company_ids) means a STRICT
+  // company_id IN (selected) match: BU-less rows (Centralised POs, "No Business Unit" POs, the
+  // actor's own unassigned POs) belong to no Business Unit, so they must not appear under one.
+  // They stay visible in the unfiltered "All Business Units" view.
+  const hasBuFilter = (parseIdList(query.businessUnitIds) || []).length > 0
+    || (parseIdList(query.company_ids) || []).length > 0;
+  if (Array.isArray(companyId)) {
+    // entityIds/businessUnitIds (camelCase, matching the Report endpoints'
+    // convention) and company_ids (snake_case, matching this endpoint's own
+    // client_id/service_category_id/sort_by convention — the
+    // Admin/Platform-Admin-only BU filter on the Service PO list) are
+    // accepted as equivalent narrowing filters; all compose via
+    // intersection when more than one is given.
+    companyId = await intersectCompanyIdsWithEntity(companyId, parseIdList(query.entityIds));
+    companyId = await intersectIdsWithBuHierarchy(companyId, parseIdList(query.businessUnitIds));
+    companyId = await intersectIdsWithBuHierarchy(companyId, parseIdList(query.company_ids));
+  }
+  const mappedServicePOIds = await resolveIndividuallyMappedServicePOIds(authContext.employeeId, authContext.roleNames);
+
+  return {
+    companyId,
+    // A company-less Admin/Entity Admin must still see their OWN Service
+    // PO(s) created with no Business Unit assigned yet (company_id NULL) —
+    // see servicePORepository.companyScope()'s doc comment. No-op for a
+    // BU-scoped actor (companyId a plain number there, never an array).
+    createdBy: hasBuFilter ? null : authContext.employeeId,
+    // Widens the list to this actor's own tenant's Centralised POs
+    // (company_id NULL) — see resolveCentralisedOwnerIds()'s doc comment.
+    // All three BU-less widenings are skipped under a specific BU filter (see hasBuFilter).
+    centralisedOwnerIds: hasBuFilter ? null : await resolveCentralisedOwnerIds(companyId),
+    // Centralised POs of this actor's OWN Admin tenant only — never every
+    // Centralised PO on the platform (see companyAccessControlService.
+    // resolveCentralisedServicePOTenant()).
+    centralisedTenant: hasBuFilter ? null : await resolveCentralisedServicePOTenant(companyId, authContext.employeeId),
+    // For a Project Manager/Delivery Head, REPLACES companyId/
+    // centralisedOwnerIds above entirely with this actor's own individually-
+    // mapped POs (see resolveIndividuallyMappedServicePOIds()'s doc
+    // comment) — `null` (every other role) leaves them in full effect.
+    mappedServicePOIds,
+  };
+};
+
+/**
+ * Distinct creators of the Service POs the caller can see — the "Created By" filter options of the list.
+ * Same scope as GET /service-pos (see resolveListVisibilityScope()), but NOT narrowed by status, client,
+ * search etc., so creators of closed / completed POs are included. Creators who have left still resolve.
+ *
+ * @param {object} query - req.query (entityIds, businessUnitIds, company_ids)
+ * @param {object} authContext
+ * @param {number|null} [headerCompanyId]
+ * @returns {Promise<{ id: number, employee_code: string, full_name: string }[]>}
+ */
+const getCreators = async (query = {}, authContext, headerCompanyId = null) => {
+  const scope = await resolveListVisibilityScope(query, authContext, headerCompanyId);
+  return servicePORepository.findCreators(scope);
 };
 
 /**
@@ -1076,6 +1113,7 @@ const deleteServicePO = async (id, userId, req) => {
 };
 
 module.exports = {
+  getCreators,
   resolveIndividuallyMappedServicePOIds,
   getAll,
   getById,

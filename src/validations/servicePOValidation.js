@@ -334,6 +334,7 @@ const listServicePOsQuerySchema = Joi.object({
   service_category_id: Joi.number().integer().positive().optional(),
   service_type_id: Joi.number().integer().positive().optional(),
   service_po_id: Joi.number().integer().positive().optional(),
+  created_by: Joi.number().integer().positive().optional(),
   is_billable: Joi.boolean().optional(),
   search: Joi.string().trim().max(100).optional().allow(''),
   start_date_from: Joi.date().iso().optional(),
@@ -353,10 +354,20 @@ const listServicePOsQuerySchema = Joi.object({
   company_ids: Joi.string().trim().optional(),
 });
 
+/**
+ * GET /service-pos/creators — the same optional scope params as the list (no status / paging).
+ */
+const listServicePOCreatorsQuerySchema = Joi.object({
+  entityIds: Joi.string().trim().optional(),
+  businessUnitIds: Joi.string().trim().optional(),
+  company_ids: Joi.string().trim().optional(),
+});
+
 module.exports = {
   createServicePOSchema,
   updateServicePOSchema,
   allocateResourcesSchema,
   removeResourcesSchema,
   listServicePOsQuerySchema,
+  listServicePOCreatorsQuerySchema,
 };
