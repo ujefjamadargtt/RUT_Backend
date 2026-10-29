@@ -6,7 +6,7 @@ const employeeRepository = require('../repositories/employeeRepository');
 const employeeRoleRepository = require('../repositories/employeeRoleRepository');
 const employeeBusinessUnitRepository = require('../repositories/employeeBusinessUnitRepository');
 const employeeServicePOMappingService = require('./employeeServicePOMappingService');
-const { resolveOptionalCreateCompanyId } = require('./companyAccessControlService');
+const { resolveOptionalCreateCompanyId, resolveTenantAdminId } = require('./companyAccessControlService');
 const { SUB_BU_HEADERS, ENTITY_HEADERS, normaliseName, splitNames, loadSubBusinessUnits, buildActorBusinessUnitLookup } = require('./importSubBusinessUnitService');
 const logger = require('../utils/logger');
 
@@ -506,7 +506,12 @@ async function importEmployees(filePath, userId, req) {
   // "Business Units" name -> id lookup (see buildImportBuNameLookup's doc
   // comment — scoped to the IMPORTING actor's own authorized BUs, never the
   // Global BU selector) to avoid N+1 queries.
-  const existingForCompany = await employeeRepository.findAllForImport(companyId);
+  // Employee code uniqueness is per Admin tenant — see employees.admin_id.
+  const tenantAdminId = await resolveTenantAdminId(
+    { hierarchyRank: req.hierarchyRank, employeeId: req.employeeId },
+    [companyId, ...(req.employeeBusinessUnits || []).map((b) => (b && typeof b === 'object' ? b.business_unit_id || b.id : b))]
+  );
+  const existingForCompany = await employeeRepository.findAllForImport(tenantAdminId);
   const existingCodes = new Set(existingForCompany.map((e) => e.employee_code.toUpperCase()));
   const existingEmails = new Set(await employeeRepository.findAllEmails());
   const buNameMap = await buildImportBuNameLookup(req);
@@ -567,6 +572,7 @@ async function importEmployees(filePath, userId, req) {
           email,
           password: DEFAULT_IMPORT_PASSWORD,
           company_id: companyId,
+          admin_id: tenantAdminId,
           created_by: userId,
           updated_by: userId,
         }, { transaction });

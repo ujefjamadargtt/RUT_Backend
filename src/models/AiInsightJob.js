@@ -60,10 +60,50 @@ module.exports = (sequelize) => {
           },
         },
       },
+      // Schedule — see utils/scheduleExpression.js. All null for frequency = 'event'
+      // (triggered by application events, not a schedule).
+      schedule_type: {
+        type: DataTypes.STRING(2),
+        allowNull: true,
+        validate: {
+          isIn: {
+            args: [['MI', 'DL', 'WL', 'ML', 'QL']],
+            msg: 'Schedule type must be one of: MI, DL, WL, ML, QL.',
+          },
+        },
+        // DL daily | WL weekly | ML monthly | QL quarterly | MI every N minutes
+      },
+      scheduled_time: {
+        type: DataTypes.TIME,
+        allowNull: true,
+        // 24-hour time of day (DL / WL / ML / QL), app timezone
+      },
+      week_day: {
+        type: DataTypes.STRING(3),
+        allowNull: true,
+        validate: {
+          isIn: {
+            args: [['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN']],
+            msg: 'Week day must be one of: MON, TUE, WED, THU, FRI, SAT, SUN.',
+          },
+        },
+        // WL only
+      },
+      month_day: {
+        type: DataTypes.SMALLINT,
+        allowNull: true,
+        validate: { min: 1, max: 28 },
+        // ML / QL only (QL = that day of Jan/Apr/Jul/Oct)
+      },
+      interval_minutes: {
+        type: DataTypes.SMALLINT,
+        allowNull: true,
+        // MI only — must divide 60 evenly (1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30)
+      },
+      // Legacy fallback: a hand-written cron, honoured only when schedule_type is null.
       cron_expression: {
         type: DataTypes.STRING(50),
         allowNull: true,
-        // null for frequency = 'event' (triggered by application events, not cron)
       },
       audience_roles: {
         type: DataTypes.JSONB,

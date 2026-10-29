@@ -2,12 +2,13 @@
 
 const cron = require('node-cron');
 const logger = require('../utils/logger');
+const { resolveJobCronExpression } = require('../utils/scheduleExpression');
 
 /**
  * Generic Scheduler Service
  *
  * One engine for every cron-driven job in the app, regardless of domain.
- * Callers register a list of { job_key, cron_expression } configs plus a
+ * Callers register a list of job configs (schedule columns) plus a
  * single handler function; this module owns all node-cron wiring so no
  * other file ever calls cron.schedule() directly — that is what keeps
  * scheduling logic from being duplicated per job. Each job keeps its own
@@ -23,21 +24,38 @@ const registeredTasks = new Map();
 /**
  * Register and start one cron-scheduled job. Re-registering the same
  * job_key stops the previous task first, so this is safe to call again
- * (e.g. after an admin edits a job's cron_expression).
+ * (e.g. after an admin edits a job's schedule).
  *
- * @param {{ job_key: string, cron_expression: string }} job
+ * The schedule comes from the job's schedule columns (schedule_type DL/WL/ML/QL/MI
+ * + scheduled_time / week_day / month_day / interval_minutes), falling back to a
+ * raw cron_expression — see utils/scheduleExpression.js.
+ *
+ * @param {{ job_key: string, schedule_type?: string, scheduled_time?: string, week_day?: string,
+ *   month_day?: number, interval_minutes?: number, cron_expression?: string }} job
  * @param {(job: object) => Promise<void>} handler
  */
 function registerJob(job, handler) {
-  if (!job.cron_expression) {
-    logger.warn('Scheduler: job has no cron_expression — skipping (event-driven job?)', { jobKey: job.job_key });
+  let cronExpression;
+  try {
+    cronExpression = resolveJobCronExpression(job);
+  } catch (err) {
+    logger.error('Scheduler: invalid schedule — job not registered', {
+      jobKey: job.job_key,
+      scheduleType: job.schedule_type,
+      error: err.message,
+    });
     return;
   }
 
-  if (!cron.validate(job.cron_expression)) {
+  if (!cronExpression) {
+    logger.warn('Scheduler: job has no schedule — skipping (event-driven job?)', { jobKey: job.job_key });
+    return;
+  }
+
+  if (!cron.validate(cronExpression)) {
     logger.error('Scheduler: invalid cron expression — job not registered', {
       jobKey: job.job_key,
-      cronExpression: job.cron_expression,
+      cronExpression,
     });
     return;
   }
@@ -47,7 +65,7 @@ function registerJob(job, handler) {
   }
 
   const task = cron.schedule(
-    job.cron_expression,
+    cronExpression,
     async () => {
       logger.info('Scheduler: job triggered', { jobKey: job.job_key });
       try {
@@ -65,7 +83,8 @@ function registerJob(job, handler) {
   registeredTasks.set(job.job_key, task);
   logger.info('Scheduler: job registered', {
     jobKey: job.job_key,
-    cronExpression: job.cron_expression,
+    scheduleType: job.schedule_type || null,
+    cronExpression,
     timezone: TIMEZONE,
   });
 }

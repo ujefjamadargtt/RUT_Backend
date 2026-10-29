@@ -29,6 +29,9 @@ const sequelize = new Sequelize(
   }
 );
 
+// An empty scope list in a raw `IN (:ids)` must match nothing, not 500.
+require('../utils/emptyListGuard').installEmptyListGuard(sequelize);
+
 // ---------------------------------------------------------------------------
 // Model imports
 // ---------------------------------------------------------------------------

@@ -10,6 +10,8 @@ const employeeRepository = require('../src/repositories/employeeRepository');
 const companyRepository = require('../src/repositories/companyRepository');
 const { Role, Company, sequelize } = require('../src/models');
 const employeeService = require('../src/services/employeeService');
+// Tenant (owning Admin) resolution is a DB lookup — pinned here; code uniqueness is checked per Admin tenant.
+require('../src/services/companyAccessControlService').resolveTenantAdminId = async () => 7;
 
 /**
  * BU Hierarchy / Sub-BU support — "map BU + Sub-BU, compulsory": a Business
@@ -19,7 +21,7 @@ const employeeService = require('../src/services/employeeService');
  */
 
 const ORIGINAL = {
-  findByCode: employeeRepository.findByCode,
+  findByCodeInTenant: employeeRepository.findByCodeInTenant,
   findByEmail: employeeRepository.findByEmail,
   findByIdWithEmail: employeeRepository.findByIdWithEmail,
   update: employeeRepository.update,
@@ -31,7 +33,7 @@ const ORIGINAL = {
 };
 
 function restore() {
-  employeeRepository.findByCode = ORIGINAL.findByCode;
+  employeeRepository.findByCodeInTenant = ORIGINAL.findByCodeInTenant;
   employeeRepository.findByEmail = ORIGINAL.findByEmail;
   employeeRepository.findByIdWithEmail = ORIGINAL.findByIdWithEmail;
   employeeRepository.update = ORIGINAL.update;
@@ -51,7 +53,7 @@ function stopBeforeTransaction() {
 }
 
 function stubCommonCreatePrereqs() {
-  employeeRepository.findByCode = async () => null;
+  employeeRepository.findByCodeInTenant = async () => null;
   employeeRepository.findByEmail = async () => null;
   Role.findOne = async () => ({ id: 8, role_name: 'Employee', status: 'active', hierarchy_rank: 8 });
 }

@@ -67,6 +67,12 @@ module.exports = (sequelize) => {
           key: 'id',
         },
       },
+      // Owning Admin (tenant) — the scope of employee_code uniqueness.
+      // NULL = platform level (e.g. the Admin accounts themselves).
+      admin_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
       employee_code: {
         type: DataTypes.STRING(20),
         allowNull: false,
@@ -220,7 +226,9 @@ module.exports = (sequelize) => {
       createdAt: 'created_at',
       updatedAt: 'updated_at',
       indexes: [
-        { unique: true, fields: ['company_id', 'employee_code'], name: 'uq_employees_company_code' },
+        // UNIQUE (COALESCE(admin_id,0), employee_code) — expression index, created by
+        // 20261031_employee_code_unique_per_admin.sql (not expressible here).
+        { fields: ['admin_id'], name: 'idx_employees_admin_id' },
       ],
       // Password and the linked Microsoft object id are excluded by default,
       // so no Employee Master/list/profile response ever exposes them; only
@@ -238,13 +246,24 @@ module.exports = (sequelize) => {
         },
       },
       hooks: {
-        beforeCreate: async (employee) => {
-          if (!employee.employee_code) {
-            // Generate a unique code: EMP + last 6 digits of epoch + 3-digit random
-            const timestamp = Date.now().toString().slice(-6);
-            const random = Math.floor(Math.random() * 900 + 100);
-            employee.employee_code = `EMP${timestamp}${random}`;
+        // beforeValidate (not beforeCreate): employee_code is NOT NULL, so a
+        // generated code must exist before validation runs.
+        beforeValidate: async (employee) => {
+          if (employee.isNewRecord && !employee.employee_code) {
+            // Generate a code unique inside this Admin tenant: EMP + last 6 digits of epoch + 3-digit random
+            for (let attempt = 0; attempt < 5; attempt += 1) {
+              const timestamp = Date.now().toString().slice(-6);
+              const random = Math.floor(Math.random() * 900 + 100);
+              employee.employee_code = `EMP${timestamp}${random}`;
+              const taken = await Employee.findOne({
+                where: { employee_code: employee.employee_code, admin_id: employee.admin_id == null ? null : employee.admin_id },
+                attributes: ['id'],
+              });
+              if (!taken) break;
+            }
           }
+        },
+        beforeCreate: async (employee) => {
           if (employee.password) {
             employee.password = await bcrypt.hash(employee.password, BCRYPT_ROUNDS);
           }

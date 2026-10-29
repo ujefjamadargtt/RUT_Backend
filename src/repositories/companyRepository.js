@@ -242,6 +242,50 @@ const findIdsWithChildren = async (ids, { activeOnly = false } = {}) => {
 };
 
 /**
+ * AI Insight "leaf" rule — the Companies an insight is generated FOR:
+ *   - a Business Unit with no active Sub-BU  -> itself (BU-wise);
+ *   - a Business Unit with >= 1 active Sub-BU -> NOT itself; each active Sub-BU
+ *     is its own unit instead (Sub-BU-wise), and any data sitting directly on
+ *     the Parent is deliberately ignored.
+ * Only ACTIVE, non-deleted Companies qualify, and a Sub-BU under an inactive
+ * or deleted Parent is skipped (same rule the Utilisation report applies).
+ *
+ * @param {number[]} [ids] - restrict the answer to this candidate set; omit
+ *   for every Company on the platform. An empty array matches nothing.
+ * @returns {Promise<number[]>} the subset of candidates that are insight units
+ */
+const findInsightLeafCompanyIds = async (ids) => {
+  if (Array.isArray(ids) && ids.length === 0) return [];
+
+  const where = { is_deleted: false, status: 'active' };
+  if (Array.isArray(ids)) where.id = { [Op.in]: ids };
+
+  const candidates = await Company.findAll({ where, attributes: ['id', 'parent_business_unit_id'] });
+  if (candidates.length === 0) return [];
+
+  const candidateIds = candidates.map((c) => c.id);
+  const parentIds = [...new Set(candidates.map((c) => c.parent_business_unit_id).filter((id) => id != null))];
+
+  const [idsWithActiveChildren, activeParents] = await Promise.all([
+    findIdsWithChildren(candidateIds, { activeOnly: true }),
+    parentIds.length === 0
+      ? []
+      : Company.findAll({
+        where: { id: { [Op.in]: parentIds }, is_deleted: false, status: 'active' },
+        attributes: ['id'],
+      }),
+  ]);
+
+  const parentsWithChildren = new Set(idsWithActiveChildren);
+  const activeParentIds = new Set(activeParents.map((p) => p.id));
+
+  return candidates
+    .filter((c) => !parentsWithChildren.has(c.id))
+    .filter((c) => c.parent_business_unit_id == null || activeParentIds.has(c.parent_business_unit_id))
+    .map((c) => c.id);
+};
+
+/**
  * Every non-deleted Company that is one of the given "root" ids (a
  * top-level Parent BU), OR a direct child of one of them — the full
  * Parent + Sub-BU "family" for each root, one query, depth-1 only. Backs
@@ -335,6 +379,7 @@ module.exports = {
   findAllForEntities,
   findByIdsWithEntity,
   findChildIds,
+  findInsightLeafCompanyIds,
   hasChildren,
   findIdsWithChildren,
   findFamilyMembers,

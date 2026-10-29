@@ -15,6 +15,8 @@ const managerEmployeeMappingRepository = require('../src/repositories/managerEmp
 const employeeAccessControlService = require('../src/services/employeeAccessControlService');
 const { Role, sequelize } = require('../src/models');
 const employeeService = require('../src/services/employeeService');
+// Tenant (owning Admin) resolution is a DB lookup — pinned here; code uniqueness is checked per Admin tenant.
+require('../src/services/companyAccessControlService').resolveTenantAdminId = async () => 7;
 
 const TEAM_LEAD_ROLE_ID = 3;
 const PROJECT_MANAGER_ROLE_ID = 2;
@@ -22,7 +24,7 @@ const PROJECT_MANAGER_ROLE_ID = 2;
 const ORIGINAL = {
   findById: employeeRepository.findById,
   findByIdWithEmail: employeeRepository.findByIdWithEmail,
-  findByCode: employeeRepository.findByCode,
+  findByCodeInTenant: employeeRepository.findByCodeInTenant,
   findByEmail: employeeRepository.findByEmail,
   findEligibleManagers: employeeRepository.findEligibleManagers,
   findIdsByEmployeeId: employeeRoleRepository.findIdsByEmployeeId,
@@ -35,7 +37,7 @@ const ORIGINAL = {
 function restore() {
   employeeRepository.findById = ORIGINAL.findById;
   employeeRepository.findByIdWithEmail = ORIGINAL.findByIdWithEmail;
-  employeeRepository.findByCode = ORIGINAL.findByCode;
+  employeeRepository.findByCodeInTenant = ORIGINAL.findByCodeInTenant;
   employeeRepository.findByEmail = ORIGINAL.findByEmail;
   employeeRepository.findEligibleManagers = ORIGINAL.findEligibleManagers;
   employeeRoleRepository.findIdsByEmployeeId = ORIGINAL.findIdsByEmployeeId;
@@ -111,7 +113,7 @@ test('update() does not re-validate an UNCHANGED legacy (pre-rule) Project Manag
 
 test('create() rejects a Project Manager as Primary Manager', async () => {
   stubCommon({ managerRoleIds: [PROJECT_MANAGER_ROLE_ID] });
-  employeeRepository.findByCode = async () => null;
+  employeeRepository.findByCodeInTenant = async () => null;
   employeeRepository.findByEmail = async () => null;
 
   await assert.rejects(

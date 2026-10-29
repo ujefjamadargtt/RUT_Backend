@@ -24,7 +24,9 @@ async function generate(prompt, opts) {
   const data = await postJson(url, {
     body: {
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: { maxOutputTokens: maxTokens },
+      // JSON mode: the reply is guaranteed to be syntactically valid JSON (without it the model sometimes
+      // slips, e.g. closes an array with `}`, and the whole insight is lost)
+      generationConfig: { maxOutputTokens: maxTokens, responseMimeType: 'application/json' },
     },
     timeoutMs,
   });

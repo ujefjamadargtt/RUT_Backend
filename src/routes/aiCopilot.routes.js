@@ -3,7 +3,15 @@
 const express = require('express');
 const router = express.Router();
 
-const authenticate = require('../middlewares/auth');
+const authenticateBase = require('../middlewares/auth');
+const resolveReportCompanyScope = require('../middlewares/resolveReportCompanyScope');
+// Same scope contract as the analytics dashboard and /reports endpoints this copilot reads from:
+// req.companyIds (always an array) — Platform Admin: every Company; Admin / Entity Admin: their own
+// Entities' BUs; a BU-scoped actor: their mapped BU(s) + Sub-BUs; X-Company-Id / company_id narrows it.
+// (The plain authenticate() leaves req.companyId undefined for Admin / Entity Admin, which made every
+// data question fail with "Named replacement :companyId has no entry in the replacement map".)
+const authenticate = [authenticateBase.authenticateIdentity, resolveReportCompanyScope];
+const requireFormAccess = require('../middlewares/requireFormAccess');
 const { validate } = require('../middlewares/validateRequest');
 const { aiLimiter } = require('../middlewares/rateLimiters');
 const { aiQuerySchema } = require('../validations/aiCopilotValidation');
@@ -52,6 +60,8 @@ const aiCopilotController = require('../controllers/aiCopilot.controller');
  *           "not available yet" answer instead of a fabricated one.
  *       401:
  *         description: Unauthorized
+ *       403:
+ *         description: The caller's active role has no "AI Copilot" form mapped (Role Form Mapping). Platform Admin is exempt.
  *       422:
  *         description: Validation error
  *       429:
@@ -60,6 +70,7 @@ const aiCopilotController = require('../controllers/aiCopilot.controller');
 router.post(
   '/query',
   authenticate,
+  requireFormAccess('AI Copilot'),
   aiLimiter,
   validate(aiQuerySchema, 'body'),
   aiCopilotController.query

@@ -4,12 +4,28 @@ const express = require('express');
 const router = express.Router();
 
 const authenticateBase = require('../middlewares/auth');
-const resolveCompanyContextForCompanyLessActors = require('../middlewares/resolveCompanyContextForCompanyLessActors');
-// Admin/Entity Admin (ranks 2-3) have no single req.companyId from
-// authenticateBase alone — every AI Insight endpoint reads req.companyId
-// directly, so every route resolves ONE Business Unit context for them too
-// (see resolveCompanyContextForCompanyLessActors.js for the contract).
-const authenticate = [authenticateBase, resolveCompanyContextForCompanyLessActors];
+const resolveInsightCompanyScope = require('../middlewares/resolveInsightCompanyScope');
+const roleHierarchyService = require('../services/roleHierarchyService');
+// Insights are BU / Sub-BU scoped, so every endpoint reads req.companyIds (the
+// caller's authorized reach) instead of a single req.companyId:
+//   Platform Admin -> every Company; Admin / Entity Admin -> Companies under
+//   their OWN Entities only; a BU-scoped actor -> their mapped BU(s) plus those
+//   BUs' Sub-BUs. An optional X-Company-Id header / company_id / company_ids (multi) narrows it
+//   (403 if outside the reach). Mounted after authenticateIdentity, not the
+//   full authenticate(), so a multi-BU actor omitting the header isn't 400'd
+//   (see resolveInsightCompanyScope.js for the contract).
+const authenticate = [authenticateBase.authenticateIdentity, resolveInsightCompanyScope];
+
+// Manual runs spend AI quota — restricted to BU Admin and above (the "senior
+// tier": Platform Admin / Admin / Entity Admin / BU Admin), within their reach.
+const requireSeniorTier = (req, res, next) => {
+  if (roleHierarchyService.isSeniorTier(req.hierarchyRank)) return next();
+  return res.status(403).json({
+    success: false,
+    message: 'Access denied. Running AI insights is restricted to BU Admin and above.',
+    code: 'SENIOR_TIER_REQUIRED',
+  });
+};
 const { validate } = require('../middlewares/validateRequest');
 const aiInsightController = require('../controllers/aiInsight.controller');
 const { listInsightsQuerySchema, runJobBodySchema } = require('../validations/aiInsightValidation');
@@ -32,6 +48,14 @@ const { aiLimiter } = require('../middlewares/rateLimiters');
  *       - bearerAuth: []
  *     parameters:
  *       - in: query
+ *         name: company_ids
+ *         schema: { type: string, example: '1,2,3' }
+ *         description: Comma-separated BU / Sub-BU ids (multi-select). A Parent id includes its Sub-BUs. 403 BU_NOT_MAPPED if any id is outside the caller's reach. Wins over company_id and X-Company-Id. Also accepted by /my-role and /unread.
+ *       - in: query
+ *         name: company_id
+ *         schema: { type: integer }
+ *         description: A single BU / Sub-BU id (same as the X-Company-Id header).
+ *       - in: query
  *         name: job_key
  *         schema: { type: string }
  *       - in: query
@@ -43,6 +67,10 @@ const { aiLimiter } = require('../middlewares/rateLimiters');
  *       - in: query
  *         name: include_dismissed
  *         schema: { type: string, enum: ['true', 'false'] }
+ *       - in: query
+ *         name: month
+ *         schema: { type: string, example: '2026-10' }
+ *         description: Calendar month of generated_at, YYYY-MM, in IST. Applied before pagination. Invalid value -> 400 INVALID_MONTH. Also accepted by /my-role and /unread.
  *       - in: query
  *         name: page
  *         schema: { type: integer, minimum: 1 }
@@ -125,6 +153,7 @@ router.get(
 router.post(
   '/run-all',
   authenticate,
+  requireSeniorTier,
   aiLimiter,
   aiInsightController.runAllJobs
 );
@@ -168,6 +197,7 @@ router.post(
 router.post(
   '/run/:jobKey',
   authenticate,
+  requireSeniorTier,
   aiLimiter,
   validate(runJobBodySchema, 'body'),
   aiInsightController.runSingleJob

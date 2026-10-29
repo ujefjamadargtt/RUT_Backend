@@ -74,13 +74,13 @@ function buildBasePrompt({ jobKey, audienceRoles, instructions, data }) {
  */
 const JOB_TEMPLATES = {
   weekly_resource_digest: {
-    audienceRoles: ['Management'],
-    instructions: `Generate a Weekly Resource Digest summarizing the just-ended work week for Management.
+    audienceRoles: ['Admin', 'BU Admin'],
+    instructions: `Generate a Weekly Resource Digest summarizing the just-ended work week for Admin and BU Admin.
 Cover: overall utilization (hours/billable/utilization %), the biggest risks visible in the data (bench, sole-contributor concentration, etc.), notable achievements (e.g. POs completed, strong client delivery), and the top 3 recommended actions for the week ahead.`,
   },
   po_ending_alerts: {
-    audienceRoles: ['Project Manager', 'Division Head'],
-    instructions: `Generate PO Ending Alerts for Project Managers and Division Heads.
+    audienceRoles: ['Admin', 'BU Admin'],
+    instructions: `Generate PO Ending Alerts for Admin and BU Admin.
 
 The data buckets Service POs ending soon into three windows — within_7_days, within_15_days, within_30_days (each entry has service_po_name, client_name, end_date, days_remaining) — plus a combined employees_becoming_free list (employees whose every active PO assignment ends within the next 30 days) and candidate_open_projects (understaffed active projects to consider for reallocation).
 
@@ -93,24 +93,24 @@ A bare count (e.g. "6 POs") is not sufficient — always list the individual POs
 Ground every PO name, client, date, and employee strictly in the data — never invent one that is not present above.`,
   },
   bench_escalation: {
-    audienceRoles: ['HR'],
+    audienceRoles: ['Admin', 'BU Admin'],
     instructions: `Generate a Bench Escalation report for HR.
 The data lists employees with bench percentage >= 75% over the trailing 30 days, their bench hours, and (if any) their last active project. For each notable employee, infer a likely reason from the data (e.g. no active assignment, project ended), suggest which of the listed understaffed active projects they could be deployed to, and assign a priority (high/medium/low) based on how high their bench % is and how long they appear to have been idle.`,
   },
   sole_contributor_risk: {
-    audienceRoles: ['Division Head'],
-    instructions: `Generate a Sole Contributor Risk report for the Division Head.
+    audienceRoles: ['Admin', 'BU Admin'],
+    instructions: `Generate a Sole Contributor Risk report for Admin and BU Admin.
 The data lists active Service POs where a single employee contributed >= 90% of logged hours in the last 90 days. For each, explain the risk (single point of failure / key-person dependency) and recommend cross-training or a backup resource.`,
   },
   monthly_cost_commentary: {
-    audienceRoles: ['Finance', 'Management'],
-    instructions: `Generate Monthly Cost Commentary for Finance and Management.
+    audienceRoles: ['Admin', 'BU Admin'],
+    instructions: `Generate Monthly Cost Commentary for Admin and BU Admin.
 The data compares the just-ended month's total cost and headcount against the prior month, and lists the top cost-driving clients. Explain the cost movement (increase/decrease and by how much), plausible reasons grounded in the data (e.g. headcount change, client mix), and recommendations.
 Remember: current_total_cost, previous_total_cost, and every cost in top_cost_driving_clients are Indian Rupees — display them with ₹, never "$".`,
   },
   client_concentration: {
-    audienceRoles: ['Management'],
-    instructions: `Generate a Client Concentration report for Management.
+    audienceRoles: ['Admin', 'BU Admin'],
+    instructions: `Generate a Client Concentration report for Admin and BU Admin.
 
 The data lists the top clients by cost over a trailing period (current_window) versus the prior period of the same length (previous_window), in top_clients — each entry has client_name, cost, revenue_share_pct (its share of total_cost), previous_cost, and trend_pct (change vs the prior period; null if there is no prior-period data for that client).
 
@@ -122,19 +122,19 @@ This report must be concise and management-focused — do not produce a detailed
 Ground every percentage strictly in revenue_share_pct / trend_pct as given — never invent a number not present in the data.`,
   },
   utilization_anomaly: {
-    audienceRoles: ['Management'],
-    instructions: `Generate a Utilization Anomaly report for Management.
+    audienceRoles: ['Admin', 'BU Admin'],
+    instructions: `Generate a Utilization Anomaly report for Admin and BU Admin.
 The data compares this month's utilization % against last month's, plus the clients with the biggest hour swings between the two months. Explain what changed and why, using only the clients/swings given.`,
   },
   quarter_end_review: {
-    audienceRoles: ['Management'],
-    instructions: `Generate a complete Quarter End Review for Management.
+    audienceRoles: ['Admin', 'BU Admin'],
+    instructions: `Generate a complete Quarter End Review for Admin and BU Admin.
 The data covers the fiscal quarter that just ended: utilization, cost, top clients, resource risk counts (bench, sole-contributor), completed POs, and new clients onboarded. Produce a rounded review covering achievements, risks, utilization, a resource summary, and recommendations for next quarter.
 Remember: total_cost and every cost in top_clients_by_cost are Indian Rupees — display them with ₹, never "$".`,
   },
   new_po_staffing_suggestion: {
-    audienceRoles: ['Project Manager'],
-    instructions: `Generate a New PO Staffing Suggestion for the Project Manager who just created this Service PO.
+    audienceRoles: ['Admin', 'BU Admin'],
+    instructions: `Generate a New PO Staffing Suggestion for the Admin / BU Admin who just created this Service PO.
 The data has the new PO's details (client, service type/category, description, expected hours) and a shortlist of candidate employees with their designation, bench %, and a resource-description snippet. Rank the best-fit candidates based on how well their designation/description matches the PO's stated needs and their current availability (bench %), and explain why each recommended candidate is a good fit.`,
   },
 };

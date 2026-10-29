@@ -12,7 +12,11 @@ const { AiInsightJob } = require('../models');
  */
 
 /**
- * The 10 insight jobs implemented by this module. frequency='event' means
+ * Each job's schedule is set in its own columns (see utils/scheduleExpression.js):
+ * schedule_type MI / DL / WL / ML / QL, plus scheduled_time (HH:mm), week_day (MON..SUN),
+ * month_day (1-28) and interval_minutes as the type needs.
+ *
+ * The insight jobs implemented by this module. frequency='event' means
  * the job has no cron schedule — it fires from an application event
  * (see servicePOService.js's create() hook for new_po_staffing_suggestion).
  */
@@ -22,72 +26,72 @@ const JOB_DEFINITIONS = [
     title: 'Weekly Resource Digest',
     description: 'Overall utilization, major risks, achievements, and top 3 actions for the week just ended.',
     frequency: 'weekly',
-    cron_expression: '0 9 * * 1', // every Monday, 9 AM
-    audience_roles: ['Management'],
+    schedule_type: 'WL', week_day: 'MON', scheduled_time: '09:00', // weekly, every Monday 09:00
+    audience_roles: ['Admin', 'BU Admin'],
   },
   {
     job_key: 'po_ending_alerts',
     title: 'PO Ending Alerts',
     description: 'Service POs ending within 30/15/7 days, employees becoming free, and suggested reallocations.',
     frequency: 'daily',
-    cron_expression: '0 8 * * *',
-    audience_roles: ['Project Manager', 'Division Head'],
+    schedule_type: 'DL', scheduled_time: '08:00', // daily 08:00
+    audience_roles: ['Admin', 'BU Admin'],
   },
   {
     job_key: 'bench_escalation',
     title: 'Bench Escalation',
     description: 'Employees with bench >= 75% over the trailing 30 days, with reason, priority, and suggested projects.',
     frequency: 'daily',
-    cron_expression: '15 8 * * *',
-    audience_roles: ['HR'],
+    schedule_type: 'DL', scheduled_time: '08:15', // daily 08:15
+    audience_roles: ['Admin', 'BU Admin'],
   },
   {
     job_key: 'sole_contributor_risk',
     title: 'Sole Contributor Risk',
     description: 'Active projects where one employee contributes more than 90% of hours, with cross-training/backup suggestions.',
     frequency: 'weekly',
-    cron_expression: '0 9 * * 2', // Tuesday, 9 AM
-    audience_roles: ['Division Head'],
+    schedule_type: 'WL', week_day: 'TUE', scheduled_time: '09:00', // weekly, every Tuesday 09:00
+    audience_roles: ['Admin', 'BU Admin'],
   },
   {
     job_key: 'monthly_cost_commentary',
     title: 'Monthly Cost Commentary',
     description: 'Cost movement vs the prior month, reasons, and recommendations.',
     frequency: 'monthly',
-    cron_expression: '0 9 1 * *', // 1st of every month, 9 AM
-    audience_roles: ['Finance', 'Management'],
+    schedule_type: 'ML', month_day: 1, scheduled_time: '09:00', // monthly, 1st at 09:00
+    audience_roles: ['Admin', 'BU Admin'],
   },
   {
     job_key: 'client_concentration',
     title: 'Client Concentration',
     description: 'Top clients, revenue share, trend, and concentration risk.',
     frequency: 'monthly',
-    cron_expression: '30 9 1 * *',
-    audience_roles: ['Management'],
+    schedule_type: 'ML', month_day: 1, scheduled_time: '09:30', // monthly, 1st at 09:30
+    audience_roles: ['Admin', 'BU Admin'],
   },
   {
     job_key: 'utilization_anomaly',
     title: 'Utilization Anomaly',
     description: 'Current vs previous month utilization, with an explanation of the increase/decrease.',
     frequency: 'monthly',
-    cron_expression: '0 10 1 * *',
-    audience_roles: ['Management'],
+    schedule_type: 'ML', month_day: 1, scheduled_time: '10:00', // monthly, 1st at 10:00
+    audience_roles: ['Admin', 'BU Admin'],
   },
   {
     job_key: 'quarter_end_review',
     title: 'Quarter End Review',
     description: 'Complete quarter review: achievements, risks, utilization, resource summary, recommendations.',
     frequency: 'quarterly',
-    cron_expression: '0 9 1 1,4,7,10 *', // 1st of Jan/Apr/Jul/Oct, 9 AM
-    audience_roles: ['Management'],
+    schedule_type: 'QL', month_day: 1, scheduled_time: '09:00', // quarterly, 1st of Jan/Apr/Jul/Oct at 09:00
+    audience_roles: ['Admin', 'BU Admin'],
   },
   {
     job_key: 'new_po_staffing_suggestion',
     title: 'New PO Staffing Suggestion',
     description: 'Suggested employees for a newly created Service PO, based on matching skills, availability, and bench %.',
     frequency: 'event',
-    cron_expression: null,
-    audience_roles: ['Project Manager'],
+    // event-driven: no schedule columns
+    audience_roles: ['Admin', 'BU Admin'],
   },
 ];
 
@@ -121,14 +125,15 @@ async function findByKey(jobKey) {
 }
 
 /**
- * Active, cron-scheduled jobs (excludes event-driven jobs, which have no
- * cron_expression and are never picked up by the scheduler loop).
+ * Active, scheduled jobs. Event-driven jobs (frequency = 'event') are NEVER returned,
+ * even if a schedule was set on them by mistake: they need a reference (e.g. the new
+ * Service PO's id) that only their triggering event has, so a timer can't run them.
  * @returns {Promise<AiInsightJob[]>}
  */
 async function findActiveCronJobs() {
   return AiInsightJob.findAll({
     where: { is_active: true },
-  }).then((jobs) => jobs.filter((job) => job.cron_expression));
+  }).then((jobs) => jobs.filter((job) => job.frequency !== 'event' && (job.schedule_type || job.cron_expression)));
 }
 
 /**

@@ -14,9 +14,11 @@ const companyAccessControlService = require('../src/services/companyAccessContro
 const companyRepository = require('../src/repositories/companyRepository');
 const { Role, Company, sequelize } = require('../src/models');
 const employeeService = require('../src/services/employeeService');
+// Tenant (owning Admin) resolution is a DB lookup — pinned here; code uniqueness is checked per Admin tenant.
+require('../src/services/companyAccessControlService').resolveTenantAdminId = async () => 7;
 
 const ORIGINAL = {
-  findByCode: employeeRepository.findByCode,
+  findByCodeInTenant: employeeRepository.findByCodeInTenant,
   findByEmail: employeeRepository.findByEmail,
   create: employeeRepository.create,
   replaceRoles: employeeRoleRepository.replaceForEmployee,
@@ -31,7 +33,7 @@ const ORIGINAL = {
 };
 
 function restore() {
-  employeeRepository.findByCode = ORIGINAL.findByCode;
+  employeeRepository.findByCodeInTenant = ORIGINAL.findByCodeInTenant;
   employeeRepository.findByEmail = ORIGINAL.findByEmail;
   employeeRepository.create = ORIGINAL.create;
   employeeRoleRepository.replaceForEmployee = ORIGINAL.replaceRoles;
@@ -46,7 +48,7 @@ function restore() {
 }
 
 function stubCommonCreatePath({ companies, ownedScope }) {
-  employeeRepository.findByCode = async () => null;
+  employeeRepository.findByCodeInTenant = async () => null;
   employeeRepository.findByEmail = async () => null;
   employeeRepository.create = async (data) => ({ id: 900, ...data, toJSON() { return this; } });
   employeeRoleRepository.replaceForEmployee = async () => {};

@@ -884,8 +884,12 @@ const create = async (data, userId, ipAddress = null, authContext) => {
     throw badRequestError('Secondary Manager must be different from the Primary Manager.');
   }
 
+  // Employee code is unique per Admin tenant (not global, not per company).
+  const tenantAdminId = await companyAccessControlService.resolveTenantAdminId(
+    authContext, [companyId, ...businessUnitIds]
+  );
   if (employeeFields.employee_code) {
-    const existingCode = await employeeRepository.findByCode(employeeFields.employee_code, companyId);
+    const existingCode = await employeeRepository.findByCodeInTenant(employeeFields.employee_code, tenantAdminId);
     if (existingCode) {
       throw conflictError(`Employee code "${employeeFields.employee_code}" is already in use.`);
     }
@@ -936,6 +940,8 @@ const create = async (data, userId, ipAddress = null, authContext) => {
       email,
       password: temporaryPassword,
       company_id: companyId,
+      // An Admin account itself lives at platform level (admin_id NULL).
+      admin_id: isAdminRole ? null : tenantAdminId,
       created_by: userId,
       updated_by: userId,
     }, { transaction });
@@ -1049,7 +1055,7 @@ const update = async (id, data, userId, ipAddress = null, authContext) => {
   } = data;
 
   if (employeeFields.employee_code && employeeFields.employee_code !== existing.employee_code) {
-    const taken = await employeeRepository.findByCode(employeeFields.employee_code, companyId);
+    const taken = await employeeRepository.findByCodeInTenant(employeeFields.employee_code, existing.admin_id);
     if (taken && taken.id !== id) {
       throw conflictError(`Employee code "${employeeFields.employee_code}" is already in use.`);
     }

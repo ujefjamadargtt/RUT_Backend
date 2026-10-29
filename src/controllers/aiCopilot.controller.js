@@ -21,7 +21,8 @@ async function query(req, res, next) {
       roleId,
       hoursSource,
       audienceRoles: req.userRoles,
-      companyId: req.companyId,
+      companyId: req.companyIds,
+      employeeId: req.employeeId,
     });
     return sendSuccess(res, result, 'AI Copilot answered the question.');
   } catch (err) {

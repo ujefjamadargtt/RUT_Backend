@@ -12,9 +12,11 @@ const employeeRepository = require('../src/repositories/employeeRepository');
 const employeeAccessControlService = require('../src/services/employeeAccessControlService');
 const { Role, Company, sequelize } = require('../src/models');
 const employeeService = require('../src/services/employeeService');
+// Tenant (owning Admin) resolution is a DB lookup — pinned here; code uniqueness is checked per Admin tenant.
+require('../src/services/companyAccessControlService').resolveTenantAdminId = async () => 7;
 
 const ORIGINAL = {
-  findByCode: employeeRepository.findByCode,
+  findByCodeInTenant: employeeRepository.findByCodeInTenant,
   findById: employeeRepository.findById,
   findByIdWithEmail: employeeRepository.findByIdWithEmail,
   create: employeeRepository.create,
@@ -26,7 +28,7 @@ const ORIGINAL = {
 };
 
 function restore() {
-  employeeRepository.findByCode = ORIGINAL.findByCode;
+  employeeRepository.findByCodeInTenant = ORIGINAL.findByCodeInTenant;
   employeeRepository.findById = ORIGINAL.findById;
   employeeRepository.findByIdWithEmail = ORIGINAL.findByIdWithEmail;
   employeeRepository.create = ORIGINAL.create;
@@ -51,7 +53,7 @@ function stopBeforeTransaction() {
 }
 
 // A soft-deleted employee row still holding the code being requested —
-// employeeRepository.findByCode() intentionally has no is_deleted filter
+// employeeRepository.findByCodeInTenant() intentionally has no is_deleted filter
 // (see its doc comment in src/repositories/employeeRepository.js), so this
 // is exactly what it would return.
 function deletedEmployeeRow(overrides) {
@@ -59,9 +61,9 @@ function deletedEmployeeRow(overrides) {
 }
 
 test('create() rejects a code already held by a SOFT-DELETED employee in the same company, with a clear conflict message', async () => {
-  employeeRepository.findByCode = async (code, companyId) => {
+  employeeRepository.findByCodeInTenant = async (code, companyId) => {
     assert.equal(code, 'EMP001');
-    assert.equal(companyId, 10);
+    assert.equal(companyId, 7); // admin tenant id
     return deletedEmployeeRow();
   };
   employeeRepository.findByEmail = async () => {
@@ -89,7 +91,7 @@ test('create() rejects a code already held by a SOFT-DELETED employee in the sam
 
 test('create() lets a genuinely free code (held by no one, deleted or active) pass the conflict check', async () => {
   let codeChecked = false;
-  employeeRepository.findByCode = async () => { codeChecked = true; return null; };
+  employeeRepository.findByCodeInTenant = async () => { codeChecked = true; return null; };
   employeeRepository.findByEmail = async () => null;
   Role.findOne = async () => ({ id: 8, role_name: 'Employee', status: 'active', hierarchy_rank: 8 });
   Company.findAll = async () => [{ id: 10 }];
@@ -108,11 +110,11 @@ test('create() lets a genuinely free code (held by no one, deleted or active) pa
 
 test('update() rejects renaming to a code already held by a SOFT-DELETED employee in the same company', async () => {
   employeeRepository.findByIdWithEmail = async () => ({
-    id: 61, employee_code: 'EMP777', company_id: 10, is_deleted: false, toJSON() { return this; },
+    id: 61, employee_code: 'EMP777', company_id: 10, admin_id: 7, is_deleted: false, toJSON() { return this; },
   });
-  employeeRepository.findByCode = async (code, companyId) => {
+  employeeRepository.findByCodeInTenant = async (code, companyId) => {
     assert.equal(code, 'EMP001');
-    assert.equal(companyId, 10);
+    assert.equal(companyId, 7); // admin tenant id
     return deletedEmployeeRow();
   };
 
@@ -131,7 +133,7 @@ test('update() skips the code-conflict check entirely when employee_code is unch
   employeeRepository.findByIdWithEmail = async () => ({
     id: 61, employee_code: 'EMP777', company_id: 10, is_deleted: false, toJSON() { return this; },
   });
-  employeeRepository.findByCode = async () => {
+  employeeRepository.findByCodeInTenant = async () => {
     throw new Error('must not be called — employee_code did not actually change');
   };
   stopBeforeTransaction(); // never reach a real DB update
@@ -158,7 +160,7 @@ test('update() 404s when the target Employee falls outside the caller\'s resolve
     assert.deepEqual(accessWhere, { id: -1 }, 'the resolved accessWhere must be passed through, not ignored');
     return null; // out of scope -> not found, same as a genuinely missing id
   };
-  employeeRepository.findByCode = async () => {
+  employeeRepository.findByCodeInTenant = async () => {
     throw new Error('must not be reached — the access-scope check must 404 first');
   };
 

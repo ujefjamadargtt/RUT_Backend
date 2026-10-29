@@ -5,7 +5,7 @@
  * or not (abort and throw a meaningful error), per the AI Gateway's failover
  * policy.
  *
- * Retryable:     429, 500, 502, 503, 504, 529 (provider-overloaded), timeout,
+ * Retryable:     429, 500, 502, 503, 504, 529 (provider-overloaded), timeout, 404 model-not-found,
  *                network error, rate limit / quota / overloaded wording.
  * Non-retryable: invalid request (400/422), auth errors (401/403), explicit
  *                json-parse / programming-error flags, anything unclassified.
@@ -13,6 +13,9 @@
 
 const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504, 529]);
 const RETRYABLE_MESSAGE_PATTERN = /rate.?limit|quota|overloaded|too many requests/i;
+// Groq/OpenAI: "The model `x` does not exist or you do not have access to it."
+// Gemini: "models/x is not found for API version ...". Anthropic: "model: x".
+const MODEL_UNAVAILABLE_PATTERN = /(model|models\/).*(does not exist|not found|no access|not available|unavailable|decommissioned|deprecated)|do(es)? not have access to it|HTTP 404: model:/i;
 
 /**
  * @param {Error} err
@@ -32,6 +35,14 @@ function classify(err) {
   if (err.isNetworkError) return { retryable: true, reason: 'network_error' };
 
   const status = err.statusCode;
+
+  // A model that doesn't exist / isn't accessible on this key is a problem with THAT
+  // model only — move on to the next model/key/provider instead of aborting the whole
+  // call. A bare 404 (wrong URL/endpoint) stays non-retryable below.
+  if (status === 404 && MODEL_UNAVAILABLE_PATTERN.test(err.message || '')) {
+    return { retryable: true, reason: 'model_unavailable' };
+  }
+
   if (status === 401 || status === 403) return { retryable: false, reason: 'auth_error' };
   if (status === 400 || status === 422) return { retryable: false, reason: 'invalid_request' };
   if (RETRYABLE_STATUS_CODES.has(status)) return { retryable: true, reason: `http_${status}` };

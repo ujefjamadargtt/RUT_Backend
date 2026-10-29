@@ -15,7 +15,7 @@ const logger = require('../utils/logger');
  */
 async function getAllInsights(req, res, next) {
   try {
-    const { data, meta } = await aiInsightService.getAllInsights(req.query, req.companyId);
+    const { data, meta } = await aiInsightService.getAllInsights(req.query, req.companyIds);
     return sendPaginated(res, data, meta, 'AI insights fetched successfully.');
   } catch (err) {
     logger.error('getAllInsights error', { error: err.message, userId: req.userId });
@@ -33,7 +33,7 @@ async function getInsightById(req, res, next) {
       return sendError(res, 'Invalid insight ID.', 400);
     }
 
-    const insight = await aiInsightService.getInsightById(id, req.companyId);
+    const insight = await aiInsightService.getInsightById(id, req.companyIds);
     return sendSuccess(res, insight, 'AI insight fetched successfully.');
   } catch (err) {
     if (err.statusCode === 404) {
@@ -51,7 +51,7 @@ async function getInsightById(req, res, next) {
 async function getInsightsByRole(req, res, next) {
   try {
     const roles = req.userRoles || [];
-    const { data, meta } = await aiInsightService.getInsightsByRoles(roles, req.query, req.companyId);
+    const { data, meta } = await aiInsightService.getInsightsByRoles(roles, req.query, req.companyIds);
     return sendPaginated(res, data, meta, 'AI insights for your role fetched successfully.');
   } catch (err) {
     logger.error('getInsightsByRole error', { error: err.message, userId: req.userId });
@@ -66,7 +66,7 @@ async function getInsightsByRole(req, res, next) {
 async function getUnreadInsights(req, res, next) {
   try {
     const roles = req.userRoles || [];
-    const { data, meta } = await aiInsightService.getUnreadInsights(roles, req.query, req.companyId);
+    const { data, meta } = await aiInsightService.getUnreadInsights(roles, req.query, req.companyIds);
     return sendPaginated(res, data, meta, 'Unread AI insights fetched successfully.');
   } catch (err) {
     logger.error('getUnreadInsights error', { error: err.message, userId: req.userId });
@@ -86,7 +86,8 @@ async function runSingleJob(req, res, next) {
     const { jobKey } = req.params;
     const context = req.body?.reference_id ? { referenceId: req.body.reference_id } : {};
 
-    const insight = await aiInsightService.runJob(jobKey, context, req.companyId);
+    const companyId = await aiInsightService.resolveManualRunCompanyId(req.companyIds);
+    const insight = await aiInsightService.runJob(jobKey, context, companyId);
 
     if (insight === null) {
       return sendSuccess(res, null, `Job "${jobKey}" ran successfully but produced no insight (no matching data).`);
@@ -108,7 +109,8 @@ async function runSingleJob(req, res, next) {
  */
 async function runAllJobs(req, res, next) {
   try {
-    const results = await aiInsightService.runAllJobs(req.companyId);
+    const companyId = await aiInsightService.resolveManualRunCompanyId(req.companyIds);
+    const results = await aiInsightService.runAllJobs(companyId);
     const succeeded = results.filter((r) => r.status === 'success').length;
     const failed = results.filter((r) => r.status === 'failed').length;
 
@@ -118,6 +120,9 @@ async function runAllJobs(req, res, next) {
       `Ran ${results.length} job(s): ${succeeded} succeeded, ${failed} failed.`
     );
   } catch (err) {
+    if (err.statusCode) {
+      return sendError(res, err.message, err.statusCode);
+    }
     logger.error('runAllJobs error', { error: err.message, userId: req.userId });
     next(err);
   }
@@ -133,7 +138,7 @@ async function markAsRead(req, res, next) {
       return sendError(res, 'Invalid insight ID.', 400);
     }
 
-    const insight = await aiInsightService.markAsRead(id, req.companyId);
+    const insight = await aiInsightService.markAsRead(id, req.companyIds);
     return sendSuccess(res, insight, 'AI insight marked as read.');
   } catch (err) {
     if (err.statusCode === 404) {
@@ -154,7 +159,7 @@ async function dismissInsight(req, res, next) {
       return sendError(res, 'Invalid insight ID.', 400);
     }
 
-    const insight = await aiInsightService.dismissInsight(id, req.companyId);
+    const insight = await aiInsightService.dismissInsight(id, req.companyIds);
     return sendSuccess(res, insight, 'AI insight dismissed.');
   } catch (err) {
     if (err.statusCode === 404) {

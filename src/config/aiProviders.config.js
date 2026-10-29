@@ -65,8 +65,6 @@ const providers = {
     models: collectModels('GROQ_MODELS', [
       'openai/gpt-oss-120b',
       'openai/gpt-oss-20b',
-      'llama-3.3-70b-versatile',
-      'llama-3.1-8b-instant',
     ]),
     baseUrl: process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1/chat/completions',
   },
@@ -97,8 +95,31 @@ const providers = {
   },
 };
 
+function parseNonNegativeInt(envVar, defaultValue) {
+  const value = parseInt(process.env[envVar], 10);
+  return Number.isInteger(value) && value >= 0 ? value : defaultValue;
+}
+
+function parseBoolean(envVar, defaultValue) {
+  const raw = process.env[envVar];
+  if (raw === undefined || raw === '') return defaultValue;
+  return ['true', '1', 'yes', 'on'].includes(String(raw).trim().toLowerCase());
+}
+
 module.exports = {
   providerPriority: parsePriority('AI_PROVIDER_PRIORITY', DEFAULT_PROVIDER_PRIORITY),
+  // false (default): ONE provider only — the first one in AI_PROVIDER_PRIORITY that has a key and a
+  // model configured. If it fails, the call fails; no other provider is tried (keys/models of that
+  // same provider are still tried). true: on failure, move on to the next provider in the list.
+  // A transient failure (provider overloaded 502/503/504/529, a network error, or a rate limit that says
+  // "try again in a few seconds") is retried on the SAME model after a short wait, up to this many times,
+  // before moving on to the next model / key. Never switches provider.
+  sameModelRetries: parseNonNegativeInt('AI_SAME_MODEL_RETRIES', 2),
+  retryBaseDelayMs: parseNonNegativeInt('AI_RETRY_BASE_DELAY_MS', 1500), // 1.5s, then 3s for 5xx / network errors
+  retryMaxWaitMs: parseNonNegativeInt('AI_RETRY_MAX_WAIT_MS', 8000), // a rate-limit wait longer than this is not waited for
+  // A reply that is not valid JSON is asked for again (same provider/model) this many extra times.
+  invalidJsonRetries: parseNonNegativeInt('AI_INVALID_JSON_RETRIES', 2),
+  failoverAcrossProviders: parseBoolean('AI_PROVIDER_FAILOVER', false),
   providers,
   maxTokens: parseInt(process.env.AI_MAX_TOKENS, 10) || 4096,
   timeoutMs: parseInt(process.env.AI_TIMEOUT_MS, 10) || 60000,

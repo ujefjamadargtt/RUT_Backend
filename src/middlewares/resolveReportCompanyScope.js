@@ -1,6 +1,7 @@
 'use strict';
 
 const companyAccessControlService = require('../services/companyAccessControlService');
+const logger = require('../utils/logger');
 
 /**
  * Company-scope resolution for the `/reports/*`, `/management-reports/*`,
@@ -51,6 +52,17 @@ const resolveReportCompanyScope = async (req, res, next) => {
       { hierarchyRank: req.hierarchyRank, employeeId: req.employeeId, employeeBusinessUnits: req.employeeBusinessUnits },
       requestedCompanyId != null && !isNaN(requestedCompanyId) ? requestedCompanyId : null
     );
+    if (req.companyIds.length === 0) {
+      // Valid state (e.g. a new Admin with no Entity/BU mapped yet): queries
+      // return empty data, but log it so the endpoint/scope is easy to spot.
+      logger.warn('Empty company scope resolved — endpoint will return empty data', {
+        method: req.method,
+        path: req.originalUrl,
+        employeeId: req.employeeId,
+        hierarchyRank: req.hierarchyRank,
+        requestedCompanyId: requestedCompanyId != null && !isNaN(requestedCompanyId) ? requestedCompanyId : null,
+      });
+    }
     return next();
   } catch (err) {
     if (err.statusCode) {

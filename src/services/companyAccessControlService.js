@@ -873,6 +873,29 @@ async function resolveOwningAdminIdForCompany(companyId) {
 }
 
 /**
+ * The TENANT a new/imported Employee belongs to — the id stored in
+ * employees.admin_id, the scope key of Employee-code uniqueness (see
+ * 20261031_employee_code_unique_per_admin.sql). An Admin (rank 2) IS the
+ * tenant; anyone else resolves it from the first Business Unit they can
+ * name (`companyIds`: their own BU(s) / the BU(s) the employee is created
+ * into) via Company -> Entity -> created_by. Platform Admin with no BU, or an
+ * unresolvable BU, is the platform level: null.
+ *
+ * @param {{ hierarchyRank: number|null, employeeId: number|null }} actor
+ * @param {Array<number|null|undefined>} [companyIds]
+ * @returns {Promise<number|null>}
+ */
+async function resolveTenantAdminId({ hierarchyRank, employeeId }, companyIds = []) {
+  if (hierarchyRank === 2) return employeeId != null ? employeeId : null;
+  for (const companyId of companyIds) {
+    if (companyId == null) continue;
+    const adminId = await resolveOwningAdminIdForCompany(companyId);
+    if (adminId != null) return adminId;
+  }
+  return null;
+}
+
+/**
  * Resolve BOTH the owning Admin id(s) AND the FULL Company scope for a BU
  * Admin/Project Manager/Delivery Head (or any other non-Admin/Entity-
  * Admin actor) — "operating under the Admin's scope," per the Service PO ->
@@ -1034,6 +1057,7 @@ module.exports = {
   areSameOrRelatedBusinessUnits,
   resolveImportBusinessUnitId,
   resolveOwningAdminIdForCompany,
+  resolveTenantAdminId,
   resolveAdminOwnershipForBusinessUnits,
   resolveAdminScopeForBusinessUnits,
 };

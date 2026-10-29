@@ -271,6 +271,18 @@ const findByCode = async (code, companyId) => {
 };
 
 /**
+ * Find a single employee by employee_code inside ONE Admin tenant
+ * (uniqueness is per Admin — see uq_employees_admin_code; `adminId` null =
+ * the platform level), regardless of status or soft-delete state.
+ * @param {string} code
+ * @param {number|null} adminId
+ * @returns {Promise<Employee|null>}
+ */
+const findByCodeInTenant = async (code, adminId) => {
+  return Employee.findOne({ where: { employee_code: code, admin_id: adminId == null ? null : adminId } });
+};
+
+/**
  * Insert a new employee record.
  * @param {object} data
  * @param {object} [options] - Sequelize options (e.g. { transaction })
@@ -457,12 +469,12 @@ const findActiveAllocations = async (employeeId, companyId) => {
  * otherwise this would flag every employee_code on the whole platform as
  * taken instead of just the ones actually sharing this row's (lack of a)
  * company.
- * @param {number|null} companyId
+ * @param {number|null} adminId - the importing tenant (employees.admin_id)
  * @returns {Promise<{ employee_code: string }[]>}
  */
-const findAllForImport = async (companyId) => {
+const findAllForImport = async (adminId) => {
   return Employee.findAll({
-    where: companyId === null ? { company_id: null } : { ...(await employeeScope(companyId)) },
+    where: { admin_id: adminId == null ? null : adminId },
     attributes: ['employee_code'],
     raw: true,
   });
@@ -664,6 +676,7 @@ module.exports = {
   findById,
   findByIdWithEmail,
   findByCode,
+  findByCodeInTenant,
   findByEmail,
   updatePassword,
   findByRoleAndCreator,
