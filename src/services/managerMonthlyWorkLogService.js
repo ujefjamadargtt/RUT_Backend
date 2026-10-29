@@ -159,7 +159,7 @@ const submitMonthlyWorkLogForEmployee = async (managerUserId, employeeId, compan
 const deleteMonthlyWorkLogForEmployee = async (managerUserId, employeeId, companyId, month, year, hierarchyRank = null, callerBuIds = []) => {
   await managerSelfServiceService.assertOwnEmployeeForApproval(managerUserId, employeeId, companyId, hierarchyRank, callerBuIds);
 
-  await employeeMonthlyWorkLogService.deleteMonthlyWorkLog(employeeId, companyId, month, year);
+  await employeeMonthlyWorkLogService.deleteMonthlyWorkLog(employeeId, companyId, month, year, { byApprover: true });
 
   logger.info('Manager deleted Monthly Work Log for Employee', { managerUserId, employeeId, month, year });
 };

@@ -54,7 +54,7 @@ const createAuditLog = async (
     const actorId = userId || (req && req.employeeId) || null;
     const deviceId = options.deviceId || requestContext.getDeviceId(req);
     const deviceName = options.deviceName || requestContext.getDeviceName(req);
-    await AuditLog.create({
+    const row = {
       user_id: actorId,
       company_id: companyId,
       actor_role: (options.actorRole || (req && req.userRoleName) || null),
@@ -67,8 +67,12 @@ const createAuditLog = async (
       device_name: deviceName ? String(deviceName).slice(0, 120) : null,
       session_id: (options.sessionId || (req && req.sessionId)) ? String(options.sessionId || req.sessionId).slice(0, 64) : null,
       ip_address: null,
-    });
+    };
+    // options.transaction writes the row inside the caller's transaction (so it commits or rolls back with
+    // the change it describes); options.throwOnError then makes a failed write fail that transaction too.
+    await AuditLog.create(row, options.transaction ? { transaction: options.transaction } : undefined);
   } catch (error) {
+    if (options.throwOnError) throw error;
     // Log the failure but never propagate — audit is a side effect
     logger.error('Failed to write audit log', {
       error: error.message,

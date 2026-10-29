@@ -235,9 +235,10 @@ const bulkCreate = async (rows, transaction) => {
  * @param {object} transaction
  * @returns {Promise<number>} rows deleted
  */
-const deleteByEmployeeAndDate = async (employeeId, date, companyId, transaction) => {
+const deleteByEmployeeAndDate = async (employeeId, date, companyId, transaction, keepApproved = false) => {
   return EmployeeWorkLog.destroy({
-    where: { employee_id: employeeId, work_date: date },
+    // keepApproved: the employee's replace-save must never wipe a row an approver already approved.
+    where: { employee_id: employeeId, work_date: date, ...(keepApproved && { status: { [Op.ne]: 'approved' } }) },
     transaction,
   });
 };
@@ -1574,11 +1575,12 @@ const existsForHierarchyNodes = async (hierarchyNodeIds) => {
  * @param {object} transaction
  * @returns {Promise<number>} rows deleted
  */
-const deleteByEmployeeAndDateRange = async (employeeId, startDate, endDate, companyId, transaction, servicePOIds = null) => {
+const deleteByEmployeeAndDateRange = async (employeeId, startDate, endDate, companyId, transaction, servicePOIds = null, keepApproved = false) => {
   return EmployeeWorkLog.destroy({
     where: {
       employee_id: employeeId,
       work_date: { [Op.gte]: startDate, [Op.lte]: endDate },
+      ...(keepApproved && { status: { [Op.ne]: 'approved' } }),
       // Optional: a Project Manager's bulk upload may only replace the rows of the
       // Service POs they manage — every other PO's rows for the month stay untouched.
       ...(Array.isArray(servicePOIds) && { service_po_id: { [Op.in]: servicePOIds } }),
@@ -1817,6 +1819,109 @@ const getPendingServicePOIds = async (employeeId) => {
   return rows.map((r) => r.service_po_id);
 };
 
+/**
+ * Approved-log protection (approver Revert/Delete + the employee lock on Approved rows).
+ * The helpers below never touch company scope: like every other work-log lookup here, the
+ * boundary is employee_id / id (see findById's doc comment).
+ */
+
+// A row an approver may still revert/delete: approved AND not picked up by any Sync. Sync stamps
+// synced_at / timesheet_import_id together with status='synced', so checking all three means a row that is
+// being synced right now can never match.
+const APPROVED_UNSYNCED_WHERE = { status: 'approved', synced_at: null, timesheet_import_id: null };
+
+/**
+ * Row-lock one work log inside a transaction (SELECT ... FOR UPDATE), so a concurrent Revert/Delete/
+ * Sync/Edit of the same row waits for this transaction and then sees its final state.
+ * @param {number} id
+ * @param {object} transaction
+ * @returns {Promise<EmployeeWorkLog|null>}
+ */
+const findByIdForUpdate = async (id, transaction) => {
+  return EmployeeWorkLog.findOne({ where: { id }, transaction, lock: transaction.LOCK.UPDATE });
+};
+
+/**
+ * Time-entry segments of one work log (for the delete snapshot).
+ * @param {number} workLogId
+ * @param {object} [transaction]
+ * @returns {Promise<object[]>} plain rows
+ */
+const findTimeEntriesByWorkLogId = async (workLogId, transaction = null) => {
+  const rows = await EmployeeWorkLogTimeEntry.findAll({ where: { employee_work_log_id: workLogId }, transaction });
+  return rows.map((row) => row.get({ plain: true }));
+};
+
+/**
+ * Row-lock (FOR UPDATE) every approved, unsynced log of one employee on the given dates — the day-wise
+ * Revert/Delete. Optionally limited to the Service POs the approver may act on (a Project Manager's own POs).
+ * Whoever holds the lock first wins; a concurrent request then finds nothing left to act on.
+ * @param {number} employeeId
+ * @param {string[]} dates - "YYYY-MM-DD"
+ * @param {number[]|null} servicePOIds - null = no PO restriction
+ * @param {object} transaction
+ * @returns {Promise<EmployeeWorkLog[]>} ordered by date, then PO
+ */
+const findApprovedByEmployeeAndDatesForUpdate = async (employeeId, dates, servicePOIds, transaction) => {
+  return EmployeeWorkLog.findAll({
+    where: {
+      employee_id: employeeId,
+      work_date: { [Op.in]: dates },
+      ...APPROVED_UNSYNCED_WHERE,
+      ...(Array.isArray(servicePOIds) && { service_po_id: { [Op.in]: servicePOIds } }),
+    },
+    order: [['work_date', 'ASC'], ['id', 'ASC']],
+    transaction,
+    lock: transaction.LOCK.UPDATE,
+  });
+};
+
+/**
+ * Atomically flips ONE row from 'approved' (and unsynced) back to 'pending', recording reason / who / when.
+ * @param {number} id
+ * @param {{ reason: string, revertedBy: number }} params
+ * @param {object} transaction
+ * @returns {Promise<number>} rows updated (0 = no longer approved-and-unsynced)
+ */
+const revertApprovedById = async (id, { reason, revertedBy }, transaction) => {
+  const [count] = await EmployeeWorkLog.update(
+    { status: 'pending', revert_reason: reason, reverted_by: revertedBy, reverted_at: new Date(), updated_by: revertedBy },
+    { where: { id, ...APPROVED_UNSYNCED_WHERE }, transaction }
+  );
+  return count;
+};
+
+/**
+ * Removes ONE approved, unsynced row (same hard delete as deleteById; its time entries cascade).
+ * @param {number} id
+ * @param {object} transaction
+ * @returns {Promise<number>} rows deleted (0 = no longer approved-and-unsynced)
+ */
+const deleteApprovedById = async (id, transaction) => {
+  return EmployeeWorkLog.destroy({ where: { id, ...APPROVED_UNSYNCED_WHERE }, transaction });
+};
+
+/**
+ * The employee's APPROVED rows in a date range (optionally only some Service POs). Drives the
+ * "Employee + Date + PO is locked once approved" rule and the monthly/daily caps.
+ * @param {number} employeeId
+ * @param {string} startDate - "YYYY-MM-DD"
+ * @param {string} endDate - "YYYY-MM-DD"
+ * @param {{ servicePOIds?: number[]|null, excludeId?: number|null }} [options]
+ * @returns {Promise<Array<{ id: number, service_po_id: number, work_date: string, hours: string }>>}
+ */
+const findApprovedInRange = async (employeeId, startDate, endDate, { servicePOIds = null, excludeId = null } = {}) => {
+  const where = {
+    employee_id: employeeId,
+    status: 'approved',
+    work_date: { [Op.gte]: startDate, [Op.lte]: endDate },
+  };
+  if (Array.isArray(servicePOIds)) where.service_po_id = { [Op.in]: servicePOIds };
+  if (excludeId) where.id = { [Op.ne]: excludeId };
+  const rows = await EmployeeWorkLog.findAll({ where, attributes: ['id', 'service_po_id', 'work_date', 'hours'], raw: true });
+  return rows;
+};
+
 module.exports = {
   findAll,
   findById,
@@ -1825,6 +1930,12 @@ module.exports = {
   create,
   bulkCreate,
   deleteByEmployeeAndDate,
+  findByIdForUpdate,
+  findTimeEntriesByWorkLogId,
+  findApprovedByEmployeeAndDatesForUpdate,
+  revertApprovedById,
+  deleteApprovedById,
+  findApprovedInRange,
   deleteByEmployeeAndDateRange,
   sumHoursInRangeExcludingPOs,
   hasSyncedEntriesInRange,

@@ -139,6 +139,60 @@ const rejectWorkLogSchema = Joi.object({
   }),
 });
 
+/**
+ * Approver Revert / Delete of an approved work log — a non-empty reason is mandatory.
+ */
+const approvedWorkLogActionSchema = Joi.object({
+  reason: Joi.string().trim().min(1).max(1000).required().messages({
+    'any.required': 'reason is required.',
+    'string.base': 'reason is required.',
+    'string.empty': 'reason is required.',
+    'string.min': 'reason is required.',
+    'string.max': 'reason cannot exceed 1000 characters.',
+  }),
+});
+
+/**
+ * Day-wise (bulk) Revert / Delete of approved work logs: one or more employees, each with one or more dates,
+ * and ONE reason for all of them. Delete also needs confirm:true (it cannot be undone).
+ */
+const approvedWorkLogDateSelectionSchema = Joi.array().items(
+  Joi.object({
+    employee_id: Joi.number().integer().positive().required(),
+    dates: Joi.array()
+      .items(Joi.string().pattern(/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/).messages({
+        'string.pattern.base': 'dates must be YYYY-MM-DD.',
+      }))
+      .min(1)
+      .max(62)
+      .unique()
+      .required()
+      .messages({ 'array.min': 'Select at least one date.', 'array.unique': 'dates must not repeat.' }),
+  })
+).min(1).max(100).required().messages({ 'array.min': 'Select at least one employee and date.' });
+
+const approvedWorkLogReasonSchema = Joi.string().trim().min(1).max(1000).required().messages({
+  'any.required': 'reason is required.',
+  'string.base': 'reason is required.',
+  'string.empty': 'reason is required.',
+  'string.min': 'reason is required.',
+  'string.max': 'reason cannot exceed 1000 characters.',
+});
+
+const revertApprovedWorkLogsByDateSchema = Joi.object({
+  selections: approvedWorkLogDateSelectionSchema,
+  reason: approvedWorkLogReasonSchema,
+});
+
+const deleteApprovedWorkLogsByDateSchema = Joi.object({
+  selections: approvedWorkLogDateSelectionSchema,
+  reason: approvedWorkLogReasonSchema,
+  confirm: Joi.boolean().valid(true).required().messages({
+    'any.required': 'confirm must be true — deleting approved logs cannot be undone.',
+    'any.only': 'confirm must be true — deleting approved logs cannot be undone.',
+  }),
+});
+
 module.exports = {
   assignServicePOSchema,
   mapEmployeeSchema,
@@ -149,4 +203,7 @@ module.exports = {
   approvalSummaryAllExportQuerySchema,
   bulkApproveTimesheetsSchema,
   rejectWorkLogSchema,
+  approvedWorkLogActionSchema,
+  revertApprovedWorkLogsByDateSchema,
+  deleteApprovedWorkLogsByDateSchema,
 };

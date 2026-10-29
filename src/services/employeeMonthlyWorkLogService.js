@@ -156,6 +156,25 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data, options = {}) =
     );
   }
 
+  // Approved-log lock (employee path only — a manager's upload sets forceApproved): approved rows are
+  // never wiped by this replace-save, a line against a PO that already has an approved log in this month is
+  // refused (the monthly row would double-count it), and the kept approved hours count towards the cap.
+  let approvedHoursKept = 0;
+  if (!forceApproved) {
+    const approvedRows = await employeeWorkLogRepository.findApprovedInRange(
+      employeeId, startDate, endDate, { servicePOIds: Array.isArray(scopeServicePOIds) ? scopeServicePOIds : null }
+    );
+    const linePoIds = new Set(lines.map((line) => Number(line.service_po_id)));
+    const clash = approvedRows.find((row) => linePoIds.has(Number(row.service_po_id)));
+    if (clash) {
+      throw conflictError(
+        `An approved timesheet log already exists for Service PO #${clash.service_po_id} in this month (${clash.work_date}). `
+        + 'It cannot be replaced; ask your approver to revert or delete it first.'
+      );
+    }
+    approvedHoursKept = approvedRows.reduce((sum, row) => sum + parseFloat(row.hours), 0);
+  }
+
   // Deliberately does NOT reject when Daily entries (TIME_BASED or HOURLY)
   // already exist for this month — submitting a Monthly Work Log is
   // ALLOWED to consolidate/replace them: deleteByEmployeeAndDateRange below
@@ -182,7 +201,7 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data, options = {}) =
   const keptHours = Array.isArray(scopeServicePOIds)
     ? await employeeWorkLogRepository.sumHoursInRangeExcludingPOs(employeeId, startDate, endDate, scopeServicePOIds)
     : 0;
-  const totalHours = keptHours + lines.reduce((sum, line) => sum + parseFloat(line.hours), 0);
+  const totalHours = keptHours + approvedHoursKept + lines.reduce((sum, line) => sum + parseFloat(line.hours), 0);
   const monthlyHourCap = getMonthlyHourCap(month, year);
   if (totalHours > monthlyHourCap) {
     throw badRequestError(
@@ -209,7 +228,7 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data, options = {}) =
   }
 
   const insertedRows = await sequelize.transaction(async (transaction) => {
-    await employeeWorkLogRepository.deleteByEmployeeAndDateRange(employeeId, startDate, endDate, companyId, transaction, scopeServicePOIds);
+    await employeeWorkLogRepository.deleteByEmployeeAndDateRange(employeeId, startDate, endDate, companyId, transaction, scopeServicePOIds, !forceApproved);
 
     return employeeWorkLogRepository.bulkCreate(
       resolvedLines.map(({ line, po }) => ({
@@ -274,13 +293,25 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data, options = {}) =
  * @param {number} year
  * @returns {Promise<void>}
  */
-const deleteMonthlyWorkLog = async (employeeId, companyId, month, year) => {
+const deleteMonthlyWorkLog = async (employeeId, companyId, month, year, { byApprover = false } = {}) => {
   const { startDate, endDate } = dateHelper.getMonthBounds(month, year);
 
   if (await employeeWorkLogRepository.hasSyncedEntriesInRange(employeeId, startDate, endDate, companyId)) {
     throw conflictError(
       `This month's work log has already been synced to the official Timesheet and can no longer be deleted.`
     );
+  }
+
+  // An employee can never delete an approved log (an approver's Revert/Delete is the only way): refuse the
+  // whole request rather than silently deleting only some of the month. An approver's own
+  // month delete (byApprover) is unchanged.
+  if (!byApprover) {
+    const approvedRows = await employeeWorkLogRepository.findApprovedInRange(employeeId, startDate, endDate);
+    if (approvedRows.length > 0) {
+      throw conflictError(
+        'This month has approved timesheet logs, which cannot be deleted. Ask your approver to revert or delete them first.'
+      );
+    }
   }
 
   await employeeWorkLogRepository.deleteByEmployeeAndDateRange(employeeId, startDate, endDate, companyId);

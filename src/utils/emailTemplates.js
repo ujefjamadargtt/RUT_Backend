@@ -279,6 +279,95 @@ function buildWorkLogComplianceReminderHtml({
 </html>`;
 }
 
+/**
+ * Build the subject + body of the e-mail an Employee gets when an approver REVERTS (Approved -> Pending)
+ * or DELETES approved work logs (see managerSelfServiceService.revertApprovedWorkLog / deleteApprovedWorkLog
+ * and the *ByDate bulk variants). One e-mail per employee, listing every affected date with its logs:
+ *
+ *   Date 10-10-26
+ *   ABC - 12 hrs
+ *   XYZ - 1 hrs
+ *
+ * The reason is always shown.
+ *
+ * @param {object} params
+ * @param {'REVERT'|'DELETE'} params.action
+ * @param {string} params.employeeName
+ * @param {Array<{ date: string, items: Array<{ poName: string, hours: number|string }> }>} params.groups
+ *   date is already formatted for display (DD-MM-YY), in the order it should appear
+ * @param {string} params.reason
+ * @param {string} params.actionByName - who reverted / deleted it
+ * @param {string} params.actionAt - already formatted for display (IST)
+ * @returns {{ subject: string, html: string }}
+ */
+function buildApprovedWorkLogActionEmail({ action, employeeName, groups, reason, actionByName, actionAt }) {
+  const isRevert = action === 'REVERT';
+  const subject = isRevert
+    ? 'Your approved work logs were reverted to Pending'
+    : 'Your approved work logs were deleted';
+  const intro = isRevert
+    ? 'An approver has reverted your approved work logs below to <strong>Pending</strong>. You can edit them now and they will need approval again.'
+    : 'An approver has <strong>deleted</strong> your approved work logs below.';
+  const hoursText = (hours) => `${parseFloat(hours)} hrs`;
+  const groupsHtml = (groups || [])
+    .map((group) => {
+      const lines = (group.items || [])
+        .map((item) => `<tr><td style="padding:2px 0; font-size:14px; color:#1f2937;">${escapeHtml(item.poName)} - ${escapeHtml(hoursText(item.hours))}</td></tr>`)
+        .join('');
+      return `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 14px 0;"><tr><td style="padding:0 0 4px 0; font-size:14px; font-weight:bold; color:#1a3d6d;">Date ${escapeHtml(group.date)}</td></tr>${lines}</table>`;
+    })
+    .join('');
+  const details = [
+    ['Previous status', 'Approved'],
+    ['New status', isRevert ? 'Pending' : 'Deleted'],
+    [isRevert ? 'Revert reason' : 'Delete reason', reason],
+    [isRevert ? 'Reverted by' : 'Deleted by', actionByName],
+    [isRevert ? 'Reverted at' : 'Deleted at', actionAt],
+  ];
+  const detailsHtml = details
+    .map(([label, value]) => `<tr><td style="padding:4px 12px 4px 0; font-size:13px; color:#6b7280; vertical-align:top; white-space:nowrap;">${escapeHtml(label)}</td><td style="padding:4px 0; font-size:14px; color:#1f2937;">${escapeHtml(value)}</td></tr>`)
+    .join('');
+  const html = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>${escapeHtml(subject)}</title>
+  </head>
+  <body style="margin:0; padding:0; background-color:#f4f5f7; font-family:Arial, Helvetica, sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f5f7; padding:24px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px; width:100%; background-color:#ffffff; border-radius:8px; overflow:hidden; box-shadow:0 1px 4px rgba(0,0,0,0.08);">
+            <tr>
+              <td style="background-color:#1a3d6d; padding:20px 32px;">
+                <span style="color:#ffffff; font-size:18px; font-weight:bold;">GTT Data Solutions Limited</span>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:32px;">
+                <p style="margin:0 0 16px 0; font-size:15px; color:#1f2937;">Hi ${escapeHtml(employeeName)},</p>
+                <p style="margin:0 0 20px 0; font-size:15px; color:#1f2937; line-height:1.5;">${intro}</p>
+                ${groupsHtml}
+                <table role="presentation" cellpadding="0" cellspacing="0" style="margin:8px 0 24px 0;">${detailsHtml}</table>
+                <p style="margin:0; font-size:14px; color:#1f2937;">Regards,</p>
+                <p style="margin:0; font-size:14px; color:#1f2937; font-weight:bold;">Trackio</p>
+              </td>
+            </tr>
+            <tr>
+              <td style="background-color:#f8fafc; padding:16px 32px; text-align:center;">
+                <p style="margin:0; font-size:11px; color:#9ca3af;">This is an automated message — please do not reply to this email.</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`;
+  return { subject, html };
+}
+
 module.exports = {
   OTP_EMAIL_SUBJECT,
   buildOtpEmailHtml,
@@ -286,4 +375,5 @@ module.exports = {
   buildApprovalReminderEmailHtml,
   buildWorkLogComplianceReminderSubject,
   buildWorkLogComplianceReminderHtml,
+  buildApprovedWorkLogActionEmail,
 };

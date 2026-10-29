@@ -13,6 +13,9 @@ const employeeRepository = require('../repositories/employeeRepository');
 const { resolveCentralisedServicePOTenant, expandBusinessUnitIdsWithDescendants } = require('./companyAccessControlService');
 const { createAuditLog } = require('../middlewares/auditLog');
 const logger = require('../utils/logger');
+const dateHelper = require('../helpers/dateHelper');
+const emailLogService = require('./emailLogService');
+const { buildApprovedWorkLogActionEmail } = require('../utils/emailTemplates');
 const { parseIdList } = require('../utils/idListParser');
 
 // Platform Admin (1) / Admin (2) / Entity Admin (3) — full cross-company scope, no mapping check needed.
@@ -1335,6 +1338,329 @@ const unmapEmployeeFromSelf = async (managerUserId, employeeId, companyId) => {
   logger.info('Manager removed own mapping to Employee', { managerUserId, employeeId });
 };
 
+/**
+ * Approver "Revert" / "Delete" of an APPROVED, not-yet-synced Employee Work Log — the shared engine behind
+ * revertApprovedWorkLog and deleteApprovedWorkLog.
+ *
+ * Authorisation is exactly the Approve/Reject one (assertOwnEmployeeForApproval, scoped to the entry's own
+ * Service PO). The eligibility check is then repeated INSIDE the transaction on a row lock
+ * (SELECT ... FOR UPDATE) and once more in the guarded UPDATE/DELETE itself, so a double click, a second
+ * approver, an employee edit, or a Sync that finished a moment ago can never slip through: whoever gets
+ * the lock second sees the final status and gets a 409. The audit row is written in the same transaction
+ * (a failed audit write rolls the change back); the e-mail is sent after commit and can never undo it.
+ *
+ * @param {'REVERT'|'DELETE'} action
+ * @param {number} managerUserId
+ * @param {number} id - employee_work_logs.id
+ * @param {string} reason - mandatory (validated by managerSelfServiceValidation before this runs)
+ * @param {number} companyId
+ * @param {number} actorId
+ * @param {string} ipAddress
+ * @param {number|null} [hierarchyRank]
+ * @param {number[]} [callerBuIds]
+ * @returns {Promise<object>}
+ */
+const performApprovedWorkLogAction = async (action, managerUserId, id, reason, companyId, actorId, ipAddress, hierarchyRank = null, callerBuIds = []) => {
+  const isRevert = action === 'REVERT';
+  const verb = isRevert ? 'reverted' : 'deleted';
+
+  const entry = await employeeWorkLogRepository.findById(id);
+  if (!entry) {
+    throw notFoundError(`Work log entry #${id} was not found.`);
+  }
+
+  await assertOwnEmployeeForApproval(managerUserId, entry.employee_id, companyId, hierarchyRank, callerBuIds, entry.service_po_id);
+
+  const assertApprovedAndUnsynced = (row) => {
+    if (row.status === 'synced' || row.synced_at || row.timesheet_import_id) {
+      throw conflictError(`Work log entry #${id} has already been synced to the official Timesheet and cannot be ${verb}.`);
+    }
+    if (row.status !== 'approved') {
+      throw conflictError(`Only an approved work log entry can be ${verb} (current status: ${row.status}).`);
+    }
+  };
+  assertApprovedAndUnsynced(entry);
+
+  const actionAt = new Date();
+  let snapshot;
+
+  await sequelize.transaction(async (transaction) => {
+    const locked = await employeeWorkLogRepository.findByIdForUpdate(id, transaction);
+    if (!locked) {
+      throw conflictError(`Work log entry #${id} no longer exists.`);
+    }
+    assertApprovedAndUnsynced(locked);
+
+    snapshot = {
+      ...locked.get({ plain: true }),
+      time_entries: await employeeWorkLogRepository.findTimeEntriesByWorkLogId(id, transaction),
+    };
+
+    const affected = isRevert
+      ? await employeeWorkLogRepository.revertApprovedById(id, { reason, revertedBy: actorId }, transaction)
+      : await employeeWorkLogRepository.deleteApprovedById(id, transaction);
+    if (affected !== 1) {
+      throw conflictError(`Work log entry #${id} is no longer approved and unsynced, so it was not ${verb}.`);
+    }
+
+    await writeApprovedLogActionAudit({ isRevert, snapshot, reason, actorId, actionAt, ipAddress, transaction });
+  });
+
+  logger.info(`Approver ${verb} an approved Employee Work Log entry`, {
+    managerUserId, workLogId: id, employeeId: snapshot.employee_id, actorId,
+  });
+
+  const emailStatus = await notifyEmployeeOfApprovedLogAction({
+    action,
+    employeeId: snapshot.employee_id,
+    companyId: snapshot.company_id || companyId,
+    reason,
+    actorId,
+    actionAt,
+    logs: [{
+      work_date: snapshot.work_date,
+      service_po_id: snapshot.service_po_id,
+      hours: snapshot.hours,
+      po_name: entry.servicePO && entry.servicePO.service_po_name,
+    }],
+  });
+
+  const base = {
+    id,
+    action_type: isRevert ? 'REVERT_APPROVED_LOG' : 'DELETE_APPROVED_LOG',
+    previous_status: 'approved',
+    new_status: isRevert ? 'pending' : 'deleted',
+    reason,
+    email_status: emailStatus,
+  };
+  return isRevert
+    ? { ...base, work_log: await employeeWorkLogRepository.findById(id) }
+    : { ...base, deleted_log: snapshot };
+};
+
+/**
+ * Audit row for one reverted / deleted log, written inside the caller's transaction (a failed write rolls the
+ * action back). Same shape for the single and the day-wise bulk path.
+ */
+const writeApprovedLogActionAudit = ({ isRevert, snapshot, reason, actorId, actionAt, ipAddress, transaction }) => {
+  const actionType = isRevert ? 'REVERT_APPROVED_LOG' : 'DELETE_APPROVED_LOG';
+  return createAuditLog(
+    actorId,
+    actionType,
+    'employee_work_logs',
+    snapshot.id,
+    snapshot,
+    {
+      action_type: actionType,
+      log_id: snapshot.id,
+      employee_id: snapshot.employee_id,
+      log_date: snapshot.work_date,
+      po_id: snapshot.service_po_id,
+      hours: snapshot.hours,
+      previous_status: 'approved',
+      new_status: isRevert ? 'pending' : 'deleted',
+      reason,
+      action_by: actorId,
+      action_at: actionAt.toISOString(),
+    },
+    ipAddress,
+    { transaction, throwOnError: true, companyId: snapshot.company_id }
+  );
+};
+
+/**
+ * Best-effort e-mail to ONE affected employee, AFTER the transaction committed — one e-mail listing every
+ * affected date and its logs (date, then "PO - N hrs" per log). emailLogService.sendAndLog always writes one
+ * email_logs row (status sent/failed + error), so a failed delivery is on record; a failure here is logged and
+ * reported as email_status:'failed' but never undoes the action.
+ *
+ * @param {object} params
+ * @param {Array<{ work_date: string, service_po_id: number, hours: number|string, po_name?: string }>} params.logs
+ * @returns {Promise<'sent'|'failed'|'no_email'>}
+ */
+const notifyEmployeeOfApprovedLogAction = async ({ action, employeeId, companyId, reason, actorId, actionAt, logs }) => {
+  try {
+    const missingPoIds = [...new Set(logs.filter((log) => !log.po_name).map((log) => log.service_po_id))];
+    const [employee, actor, pos] = await Promise.all([
+      Employee.findByPk(employeeId, { attributes: ['id', 'full_name', 'email'] }),
+      Employee.findByPk(actorId, { attributes: ['id', 'full_name'] }),
+      missingPoIds.length > 0
+        ? ServicePO.findAll({ where: { id: { [Op.in]: missingPoIds } }, attributes: ['id', 'service_po_name'] })
+        : [],
+    ]);
+
+    if (!employee || !employee.email) {
+      logger.warn('Approved work log action e-mail skipped: employee has no e-mail address', { employeeId });
+      return 'no_email';
+    }
+
+    const poNameById = new Map((pos || []).map((po) => [po.id, po.service_po_name]));
+    const byDate = new Map();
+    for (const log of logs) {
+      if (!byDate.has(log.work_date)) byDate.set(log.work_date, []);
+      byDate.get(log.work_date).push({
+        poName: log.po_name || poNameById.get(log.service_po_id) || `PO #${log.service_po_id}`,
+        hours: log.hours,
+      });
+    }
+    const groups = [...byDate.keys()].sort().map((date) => ({
+      date: moment(date, 'YYYY-MM-DD').format('DD-MM-YY'),
+      items: byDate.get(date),
+    }));
+
+    const { subject, html } = buildApprovedWorkLogActionEmail({
+      action,
+      employeeName: employee.full_name,
+      groups,
+      reason,
+      actionByName: actor ? actor.full_name : `User #${actorId}`,
+      actionAt: dateHelper.formatDateTime(actionAt),
+    });
+
+    await emailLogService.sendAndLog({
+      to: employee.email,
+      subject,
+      html,
+      mailType: action === 'REVERT' ? emailLogService.MAIL_TYPES.WORKLOG_APPROVED_REVERTED : emailLogService.MAIL_TYPES.WORKLOG_APPROVED_DELETED,
+      companyId,
+      triggeredByEmployeeId: actorId,
+      relatedEmployeeId: employeeId,
+    });
+    return 'sent';
+  } catch (err) {
+    logger.error('Approved work log action e-mail failed (the action itself was completed)', {
+      employeeId, action, error: err.message,
+    });
+    return 'failed';
+  }
+};
+
+/**
+ * Day-wise (bulk) Revert / Delete: the approver picks one or more employees and, per employee, one or more
+ * dates; EVERY approved, unsynced log of that employee on those dates (all POs the approver may act on) is
+ * reverted / deleted, with ONE shared reason.
+ *
+ * Each employee is processed in their own transaction on row locks (all-or-nothing per employee, and a
+ * concurrent request simply finds nothing left to act on), authorised exactly like Bulk Approve
+ * (assertOwnEmployeeForApproval + the Project Manager / BU Admin PO restriction). One employee failing never
+ * blocks the others — the result lists every employee's outcome. Each employee then gets ONE e-mail with
+ * their own dates and logs.
+ *
+ * @param {'REVERT'|'DELETE'} action
+ * @param {number} managerUserId
+ * @param {{ selections: Array<{ employee_id: number, dates: string[] }>, reason: string }} body
+ * @returns {Promise<{ action_type: string, reason: string, total_logs_affected: number, employees_processed: number,
+ *   employees_failed: number, results: object[] }>}
+ */
+const performApprovedWorkLogActionByDate = async (action, managerUserId, body, companyId, actorId, ipAddress, hierarchyRank = null, callerBuIds = []) => {
+  const isRevert = action === 'REVERT';
+  const verb = isRevert ? 'reverted' : 'deleted';
+  const reason = body.reason;
+  const actionAt = new Date();
+
+  const datesByEmployee = new Map();
+  for (const selection of body.selections) {
+    const employeeId = Number(selection.employee_id);
+    if (!datesByEmployee.has(employeeId)) datesByEmployee.set(employeeId, new Set());
+    selection.dates.forEach((date) => datesByEmployee.get(employeeId).add(date));
+  }
+
+  const results = [];
+  for (const [employeeId, dateSet] of datesByEmployee) {
+    const dates = [...dateSet].sort();
+    try {
+      const poIds = (await assertOwnEmployeeForApproval(managerUserId, employeeId, companyId, hierarchyRank, callerBuIds))
+        ?? await resolveBuAdminApprovalPoIds(managerUserId, companyId, hierarchyRank, callerBuIds, employeeId);
+
+      const affected = [];
+      await sequelize.transaction(async (transaction) => {
+        const rows = await employeeWorkLogRepository.findApprovedByEmployeeAndDatesForUpdate(employeeId, dates, poIds, transaction);
+        for (const row of rows) {
+          const snapshot = {
+            ...row.get({ plain: true }),
+            time_entries: await employeeWorkLogRepository.findTimeEntriesByWorkLogId(row.id, transaction),
+          };
+          const count = isRevert
+            ? await employeeWorkLogRepository.revertApprovedById(row.id, { reason, revertedBy: actorId }, transaction)
+            : await employeeWorkLogRepository.deleteApprovedById(row.id, transaction);
+          if (count !== 1) {
+            throw conflictError(`Work log entry #${row.id} is no longer approved and unsynced, so it was not ${verb}.`);
+          }
+          await writeApprovedLogActionAudit({ isRevert, snapshot, reason, actorId, actionAt, ipAddress, transaction });
+          affected.push(snapshot);
+        }
+      });
+
+      const affectedDates = [...new Set(affected.map((log) => log.work_date))];
+      const emailStatus = affected.length > 0
+        ? await notifyEmployeeOfApprovedLogAction({
+            action,
+            employeeId,
+            companyId: affected[0].company_id || companyId,
+            reason,
+            actorId,
+            actionAt,
+            logs: affected,
+          })
+        : 'not_needed';
+
+      logger.info(`Approver ${verb} approved Employee Work Logs by date`, {
+        managerUserId, employeeId, dates, logsAffected: affected.length, actorId,
+      });
+
+      results.push({
+        employee_id: employeeId,
+        status: affected.length > 0 ? 'done' : 'nothing_to_do',
+        logs_affected: affected.length,
+        affected_dates: affectedDates,
+        skipped_dates: dates.filter((date) => !affectedDates.includes(date)),
+        email_status: emailStatus,
+      });
+    } catch (err) {
+      const statusCode = err.statusCode || 500;
+      if (statusCode >= 500) {
+        logger.error(`Bulk ${verb} of approved work logs failed for an employee`, { managerUserId, employeeId, error: err.message });
+      }
+      results.push({
+        employee_id: employeeId,
+        status: 'failed',
+        status_code: statusCode,
+        error: statusCode >= 500 ? 'An unexpected error occurred.' : err.message,
+      });
+    }
+  }
+
+  return {
+    action_type: isRevert ? 'REVERT_APPROVED_LOG' : 'DELETE_APPROVED_LOG',
+    previous_status: 'approved',
+    new_status: isRevert ? 'pending' : 'deleted',
+    reason,
+    total_logs_affected: results.reduce((sum, r) => sum + (r.logs_affected || 0), 0),
+    employees_processed: results.filter((r) => r.status === 'done').length,
+    employees_failed: results.filter((r) => r.status === 'failed').length,
+    results,
+  };
+};
+
+const revertApprovedWorkLogsByDate = (managerUserId, body, companyId, actorId, ipAddress, hierarchyRank = null, callerBuIds = []) =>
+  performApprovedWorkLogActionByDate('REVERT', managerUserId, body, companyId, actorId, ipAddress, hierarchyRank, callerBuIds);
+
+const deleteApprovedWorkLogsByDate = (managerUserId, body, companyId, actorId, ipAddress, hierarchyRank = null, callerBuIds = []) =>
+  performApprovedWorkLogActionByDate('DELETE', managerUserId, body, companyId, actorId, ipAddress, hierarchyRank, callerBuIds);
+
+/**
+ * Approver "Revert": Approved -> Pending, with a mandatory reason. See performApprovedWorkLogAction.
+ */
+const revertApprovedWorkLog = (managerUserId, id, reason, companyId, actorId, ipAddress, hierarchyRank = null, callerBuIds = []) =>
+  performApprovedWorkLogAction('REVERT', managerUserId, id, reason, companyId, actorId, ipAddress, hierarchyRank, callerBuIds);
+
+/**
+ * Approver "Delete": removes an approved, unsynced log (snapshot + reason kept in audit_logs), with a
+ * mandatory reason. See performApprovedWorkLogAction.
+ */
+const deleteApprovedWorkLog = (managerUserId, id, reason, companyId, actorId, ipAddress, hierarchyRank = null, callerBuIds = []) =>
+  performApprovedWorkLogAction('DELETE', managerUserId, id, reason, companyId, actorId, ipAddress, hierarchyRank, callerBuIds);
+
 module.exports = {
   getMyEmployees,
   getMyGrantedServicePOs,
@@ -1346,6 +1672,10 @@ module.exports = {
   exportApprovalSummaryAll,
   bulkApproveTimesheets,
   rejectWorkLogEntry,
+  revertApprovedWorkLog,
+  deleteApprovedWorkLog,
+  revertApprovedWorkLogsByDate,
+  deleteApprovedWorkLogsByDate,
   assignServicePOToEmployee,
   removeServicePOFromEmployee,
   mapEmployeeToSelf,

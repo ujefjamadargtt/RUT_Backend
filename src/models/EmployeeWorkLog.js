@@ -194,6 +194,21 @@ module.exports = (sequelize) => {
         type: DataTypes.DATE,
         allowNull: true,
       },
+      // Set together when an approver reverts an APPROVED, unsynced row back to 'pending'
+      // (managerSelfServiceService.revertApprovedWorkLog). Kept after the row is edited/re-approved —
+      // the full history is in audit_logs (REVERT_APPROVED_LOG).
+      revert_reason: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+      },
+      reverted_by: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
+      reverted_at: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
       synced_at: {
         type: DataTypes.DATE,
         allowNull: true,

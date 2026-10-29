@@ -195,6 +195,50 @@ const rejectWorkLogEntry = async (req, res) => {
   }
 };
 
+const approvedWorkLogActionHandler = (serviceMethod, successMessage, logLabel) => async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) return sendError(res, 'Invalid work log entry ID.', 400);
+
+    const result = await managerSelfServiceService[serviceMethod](
+      req.userId, id, req.body.reason, req.companyId, req.userId, getIpAddress(req), req.hierarchyRank, callerBuIds(req)
+    );
+    return sendSuccess(res, result, successMessage);
+  } catch (error) {
+    if (error.statusCode === 403) return sendError(res, error.message, 403);
+    if (error.statusCode === 404) return sendNotFound(res, 'Work log entry');
+    if (error.statusCode === 409) return sendError(res, error.message, 409);
+    logger.error(logLabel + ' error', { error: error.message, userId: req.userId });
+    return sendError(res, error.message, error.statusCode || 500);
+  }
+};
+
+const revertApprovedWorkLog = approvedWorkLogActionHandler(
+  'revertApprovedWorkLog', 'Work log entry reverted to Pending.', 'revertApprovedWorkLog'
+);
+const deleteApprovedWorkLog = approvedWorkLogActionHandler(
+  'deleteApprovedWorkLog', 'Work log entry deleted.', 'deleteApprovedWorkLog'
+);
+
+const approvedWorkLogsByDateHandler = (serviceMethod, successMessage, logLabel) => async (req, res) => {
+  try {
+    const result = await managerSelfServiceService[serviceMethod](
+      req.userId, req.body, req.companyId, req.userId, getIpAddress(req), req.hierarchyRank, callerBuIds(req)
+    );
+    return sendSuccess(res, result, result.total_logs_affected > 0 ? successMessage : 'No approved, unsynced work logs were found for the selected dates.');
+  } catch (error) {
+    logger.error(logLabel + ' error', { error: error.message, userId: req.userId });
+    return sendError(res, error.message, error.statusCode || 500);
+  }
+};
+
+const revertApprovedWorkLogsByDate = approvedWorkLogsByDateHandler(
+  'revertApprovedWorkLogsByDate', 'Approved work logs reverted to Pending.', 'revertApprovedWorkLogsByDate'
+);
+const deleteApprovedWorkLogsByDate = approvedWorkLogsByDateHandler(
+  'deleteApprovedWorkLogsByDate', 'Approved work logs deleted.', 'deleteApprovedWorkLogsByDate'
+);
+
 const getEmployeeServicePOs = async (req, res) => {
   try {
     const employeeId = parseInt(req.params.employeeId, 10);
@@ -343,6 +387,10 @@ module.exports = {
   exportApprovalSummaryAll,
   bulkApproveTimesheets,
   rejectWorkLogEntry,
+  revertApprovedWorkLog,
+  deleteApprovedWorkLog,
+  revertApprovedWorkLogsByDate,
+  deleteApprovedWorkLogsByDate,
   assignServicePO,
   removeServicePO,
   mapEmployee,

@@ -457,6 +457,13 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
   // against the same Module/Task/date are a valid, expected shape, so those
   // lines are merged into one combined line per key instead — see
   // mergeDuplicateKeyLines().
+  // Approved-log lock (Employee + Date + PO): this replace-save never touches an approved row, and a
+  // line against a PO that already has an approved log on this date is refused. Approved rows stay on the
+  // date, so their hours still count towards the daily cap below.
+  await assertNoApprovedLogForPOs(employeeId, dateStr, dateStr, (data.entries || []).map((line) => line.service_po_id));
+  const approvedHoursKept = (await employeeWorkLogRepository.findApprovedInRange(employeeId, dateStr, dateStr))
+    .reduce((sum, row) => sum + parseFloat(row.hours), 0);
+
   const mergedLines = mergeDuplicateKeyLines(data.entries || []);
 
   // A line that didn't supply its own `time_entries` but matches an
@@ -491,7 +498,7 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
   // DB to add on top of. assertDailyCap's DB-lookup version still backs
   // updateEntry below, which edits one row in place rather than replacing
   // the whole day.
-  const totalHours = resolvedTimes.reduce((sum, r) => sum + r.hours, 0);
+  const totalHours = approvedHoursKept + resolvedTimes.reduce((sum, r) => sum + r.hours, 0);
   if (totalHours > DAILY_HOUR_CAP) {
     throw badRequestError(
       `Total hours for ${dateStr} cannot exceed ${DAILY_HOUR_CAP}. This request totals ${Math.round(totalHours * 100) / 100} hours.`
@@ -557,7 +564,7 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
   }
 
   const insertedRows = await sequelize.transaction(async (transaction) => {
-    await employeeWorkLogRepository.deleteByEmployeeAndDate(employeeId, dateStr, companyId, transaction);
+    await employeeWorkLogRepository.deleteByEmployeeAndDate(employeeId, dateStr, companyId, transaction, true);
 
     const rows = await employeeWorkLogRepository.bulkCreate(
       resolvedLines.map(({ line, po }, i) => ({
@@ -633,6 +640,33 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
   }));
 };
 
+const APPROVED_LOG_EDIT_MESSAGE = 'This timesheet log is approved and cannot be edited.';
+
+/**
+ * Approved-log lock — scope is Employee + Log Date + PO, NOT the whole day. Once an approver has approved a
+ * log, the employee can neither change it nor add another log against that same PO on that date (other POs
+ * on the same date stay open). Only an approver's Revert (back to Pending) or Delete releases it — see
+ * managerSelfServiceService.revertApprovedWorkLog / deleteApprovedWorkLog.
+ *
+ * @param {number} employeeId
+ * @param {string} startDate - "YYYY-MM-DD"
+ * @param {string} endDate - "YYYY-MM-DD"
+ * @param {number[]} servicePOIds - the POs the employee is trying to write to
+ * @param {{ excludeId?: number|null }} [options] - the row being edited (it is checked by its own status)
+ * @throws {Error} 409 when an approved log already exists for one of the POs in the range
+ */
+const assertNoApprovedLogForPOs = async (employeeId, startDate, endDate, servicePOIds, { excludeId = null } = {}) => {
+  const ids = [...new Set((servicePOIds || []).map(Number).filter(Boolean))];
+  if (ids.length === 0) return;
+  const approved = await employeeWorkLogRepository.findApprovedInRange(employeeId, startDate, endDate, { servicePOIds: ids, excludeId });
+  if (approved.length === 0) return;
+  const clash = approved[0];
+  throw conflictError(
+    `An approved timesheet log already exists for Service PO #${clash.service_po_id} on ${clash.work_date}. `
+    + 'No further logs can be added or changed for that PO on this date.'
+  );
+};
+
 /**
  * Update an existing work log entry. Employee may only edit their own
  * entries — EXCLUDING already-synced ones: once a row has been included in
@@ -658,6 +692,10 @@ const updateEntry = async (employeeId, companyId, id, data) => {
     throw conflictError(
       `Work log entry #${id} has already been synced to the official Timesheet and can no longer be edited.`
     );
+  }
+
+  if (existing.status === 'approved') {
+    throw conflictError(APPROVED_LOG_EDIT_MESSAGE);
   }
 
   const servicePOId = data.service_po_id ?? existing.service_po_id;
@@ -710,6 +748,8 @@ const updateEntry = async (employeeId, companyId, id, data) => {
   );
 
   const hierarchyNode = await resolveHierarchyNode(hierarchyNodeId, servicePOId);
+
+  await assertNoApprovedLogForPOs(employeeId, dateStr, dateStr, [servicePOId], { excludeId: id });
 
   const duplicate = await employeeWorkLogRepository.checkDuplicate(
     employeeId, servicePOId, hierarchyNodeId || null, dateStr, id, companyId
@@ -811,6 +851,7 @@ const addTimeEntries = async (employeeId, companyId, data) => {
   const dateStr = assertNotFutureDate(data.work_date);
   await assertNoMonthlyLogForDate(employeeId, dateStr, companyId, 'TIME_BASED');
   await assertProjectMapped(employeeId, data.service_po_id, companyId);
+  await assertNoApprovedLogForPOs(employeeId, dateStr, dateStr, [data.service_po_id]);
 
   const { po } = await timesheetService.resolveManualEntryReferences(
     { employee_id: employeeId, service_po_id: data.service_po_id, sub_project_id: data.sub_project_id },
@@ -1103,6 +1144,10 @@ const deleteEntry = async (employeeId, companyId, id) => {
     throw conflictError(
       `Work log entry #${id} has already been synced to the official Timesheet and can no longer be deleted.`
     );
+  }
+
+  if (existing.status === 'approved') {
+    throw conflictError('This timesheet log is approved and cannot be deleted.');
   }
 
   await employeeWorkLogRepository.deleteById(id, companyId);
@@ -1575,6 +1620,7 @@ const remindPrimaryManagerForApproval = async (employeeId, employeeName, company
 };
 
 module.exports = {
+  assertNoApprovedLogForPOs,
   replaceDailyEntries,
   updateEntry,
   addTimeEntries,

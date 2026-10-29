@@ -32,6 +32,9 @@ const {
   approvalSummaryAllExportQuerySchema,
   bulkApproveTimesheetsSchema,
   rejectWorkLogSchema,
+  approvedWorkLogActionSchema,
+  revertApprovedWorkLogsByDateSchema,
+  deleteApprovedWorkLogsByDateSchema,
 } = require('../validations/managerSelfServiceValidation');
 const {
   listOffDayQueueQuerySchema,
@@ -361,6 +364,186 @@ router.put(
   authorize(['manager.approve_timesheets', 'servicepo.approve_timesheets']),
   validate(rejectWorkLogSchema),
   controller.rejectWorkLogEntry
+);
+
+/**
+ * @swagger
+ * /my-team/timesheets/revert-by-date:
+ *   patch:
+ *     summary: >
+ *       Day-wise bulk Revert: for each selected employee and date, every approved, not-yet-synced work log
+ *       (all POs the caller may approve) goes back to 'pending'. ONE reason for the whole request. Each employee
+ *       gets ONE e-mail listing their own dates and logs. One employee failing does not block the others.
+ *     tags: [My Team]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [selections, reason]
+ *             properties:
+ *               selections:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [employee_id, dates]
+ *                   properties:
+ *                     employee_id: { type: integer, example: 101 }
+ *                     dates: { type: array, items: { type: string, example: "2026-10-10" } }
+ *               reason: { type: string, example: "Hours need to be corrected" }
+ *     responses:
+ *       200:
+ *         description: >
+ *           { action_type, previous_status, new_status, reason, total_logs_affected, employees_processed,
+ *           employees_failed, results: [{ employee_id, status: done|nothing_to_do|failed, logs_affected,
+ *           affected_dates, skipped_dates, email_status: sent|failed|no_email|not_needed, status_code?, error? }] }
+ *       422:
+ *         description: Invalid selections, date format, or empty reason
+ */
+router.patch(
+  '/timesheets/revert-by-date',
+  authenticate,
+  authorize(['manager.approve_timesheets', 'servicepo.approve_timesheets']),
+  validate(revertApprovedWorkLogsByDateSchema),
+  controller.revertApprovedWorkLogsByDate
+);
+
+/**
+ * @swagger
+ * /my-team/timesheets/by-date:
+ *   delete:
+ *     summary: >
+ *       Day-wise bulk Delete: for each selected employee and date, every approved, not-yet-synced work log
+ *       (all POs the caller may approve) is removed. CANNOT BE UNDONE — confirm:true is required. ONE reason for
+ *       the whole request; each employee gets ONE e-mail with their own dates and logs. Snapshots are kept in
+ *       the audit log.
+ *     tags: [My Team]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [selections, reason, confirm]
+ *             properties:
+ *               selections:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required: [employee_id, dates]
+ *                   properties:
+ *                     employee_id: { type: integer, example: 101 }
+ *                     dates: { type: array, items: { type: string, example: "2026-10-10" } }
+ *               reason: { type: string, example: "Duplicate timesheet entries" }
+ *               confirm: { type: boolean, example: true }
+ *     responses:
+ *       200:
+ *         description: Same shape as revert-by-date, with new_status 'deleted'
+ *       422:
+ *         description: Invalid selections, date format, empty reason, or confirm is not true
+ */
+router.delete(
+  '/timesheets/by-date',
+  authenticate,
+  authorize(['manager.approve_timesheets', 'servicepo.approve_timesheets']),
+  validate(deleteApprovedWorkLogsByDateSchema),
+  controller.deleteApprovedWorkLogsByDate
+);
+
+/**
+ * @swagger
+ * /my-team/timesheets/{id}/revert:
+ *   patch:
+ *     summary: >
+ *       Revert ONE approved, not-yet-synced Employee Work Log entry back to 'pending' (approver action).
+ *       A reason is mandatory; it, the approver and the time are stored on the row and in the audit log
+ *       (REVERT_APPROVED_LOG), and the Employee is e-mailed. Same approver scoping as approve/reject.
+ *     tags: [My Team]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [reason]
+ *             properties:
+ *               reason: { type: string, example: "Incorrect hours submitted" }
+ *     responses:
+ *       200:
+ *         description: "{ id, action_type, previous_status:'approved', new_status:'pending', reason, email_status: sent|failed|no_email, work_log }"
+ *       403:
+ *         description: This entry's Employee/Service PO is not one the caller may approve
+ *       404:
+ *         description: Not found
+ *       409:
+ *         description: Entry is not approved, or is already synced (also returned to the loser of a concurrent request)
+ *       422:
+ *         description: reason is missing or empty
+ */
+router.patch(
+  '/timesheets/:id/revert',
+  authenticate,
+  authorize(['manager.approve_timesheets', 'servicepo.approve_timesheets']),
+  validate(approvedWorkLogActionSchema),
+  controller.revertApprovedWorkLog
+);
+
+/**
+ * @swagger
+ * /my-team/timesheets/{id}:
+ *   delete:
+ *     summary: >
+ *       Delete ONE approved, not-yet-synced Employee Work Log entry (approver action). A reason is mandatory
+ *       and goes in the request BODY. The row is removed from the active records; its full snapshot, the
+ *       reason, the approver and the time are kept in the audit log (DELETE_APPROVED_LOG), and the Employee
+ *       is e-mailed.
+ *     tags: [My Team]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [reason]
+ *             properties:
+ *               reason: { type: string, example: "Duplicate timesheet entry" }
+ *     responses:
+ *       200:
+ *         description: "{ id, action_type, previous_status:'approved', new_status:'deleted', reason, email_status, deleted_log }"
+ *       403:
+ *         description: This entry's Employee/Service PO is not one the caller may approve
+ *       404:
+ *         description: Not found
+ *       409:
+ *         description: Entry is not approved, or is already synced (also returned to the loser of a concurrent request)
+ *       422:
+ *         description: reason is missing or empty
+ */
+router.delete(
+  '/timesheets/:id',
+  authenticate,
+  authorize(['manager.approve_timesheets', 'servicepo.approve_timesheets']),
+  validate(approvedWorkLogActionSchema),
+  controller.deleteApprovedWorkLog
 );
 
 /**

@@ -28,7 +28,7 @@ module.exports = (sequelize) => {
         allowNull: false,
         validate: {
           isIn: {
-            args: [['PASSWORD_RESET_OTP', 'APPROVAL_REMINDER', 'WORKLOG_COMPLIANCE_REMINDER']],
+            args: [['PASSWORD_RESET_OTP', 'APPROVAL_REMINDER', 'WORKLOG_COMPLIANCE_REMINDER', 'WORKLOG_APPROVED_REVERTED', 'WORKLOG_APPROVED_DELETED']],
             msg: 'Invalid email log mail_type.',
           },
         },
