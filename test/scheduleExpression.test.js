@@ -14,25 +14,17 @@ const { JOB_DEFINITIONS } = require('../src/repositories/aiInsightJobRepository'
  * keep the exact schedules they had before.
  */
 
-test('every seeded job converts to the SAME cron it used before', () => {
-  const before = {
-    weekly_resource_digest: '0 9 * * 1',
-    po_ending_alerts: '0 8 * * *',
-    bench_escalation: '15 8 * * *',
-    sole_contributor_risk: '0 9 * * 2',
-    monthly_cost_commentary: '0 9 1 * *',
-    client_concentration: '30 9 1 * *',
-    utilization_anomaly: '0 10 1 * *',
-    quarter_end_review: '0 9 1 1,4,7,10 *',
-  };
-
+test('every seeded job converts to its expected cron', () => {
+  // The monthly, sync-gated reports run every day at 06:00 (they retry daily until every BU / Sub-BU is
+  // synced); the Service PO job is event-driven and has no schedule.
   for (const job of JOB_DEFINITIONS) {
     if (job.frequency === 'event') {
       assert.equal(job.schedule_type, undefined, `${job.job_key} has no schedule`);
       assert.equal(resolveJobCronExpression(job), null);
       continue;
     }
-    assert.equal(resolveJobCronExpression(job), before[job.job_key], job.job_key);
+    assert.equal(job.frequency, 'monthly', job.job_key);
+    assert.equal(resolveJobCronExpression(job), '0 6 * * *', job.job_key);
   }
 });
 

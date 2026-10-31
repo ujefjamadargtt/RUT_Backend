@@ -21,69 +21,130 @@ const { AiInsightJob } = require('../models');
  * (see servicePOService.js's create() hook for new_po_staffing_suggestion).
  */
 const JOB_DEFINITIONS = [
+  // ── Monthly, sync-gated reports (services/aiInsightMonthly.service.js) ──────
+  // Run daily for the month that just ended; a unit's data appears only after its timesheets are synced,
+  // and a report is replaced (not repeated) as more units sync. Capacity = the admin-set Monthly Cap Hours.
+  // BU Admin — one report per Business Unit / Sub-BU:
   {
-    job_key: 'weekly_resource_digest',
-    title: 'Weekly Resource Digest',
-    description: 'Overall utilization, major risks, achievements, and top 3 actions for the week just ended.',
-    frequency: 'weekly',
-    schedule_type: 'WL', week_day: 'MON', scheduled_time: '09:00', // weekly, every Monday 09:00
-    audience_roles: ['Admin', 'BU Admin'],
-  },
-  {
-    job_key: 'po_ending_alerts',
-    title: 'PO Ending Alerts',
-    description: 'Service POs ending within 30/15/7 days, employees becoming free, and suggested reallocations.',
-    frequency: 'daily',
-    schedule_type: 'DL', scheduled_time: '08:00', // daily 08:00
-    audience_roles: ['Admin', 'BU Admin'],
-  },
-  {
-    job_key: 'bench_escalation',
-    title: 'Bench Escalation',
-    description: 'Employees with bench >= 75% over the trailing 30 days, with reason, priority, and suggested projects.',
-    frequency: 'daily',
-    schedule_type: 'DL', scheduled_time: '08:15', // daily 08:15
-    audience_roles: ['Admin', 'BU Admin'],
-  },
-  {
-    job_key: 'sole_contributor_risk',
-    title: 'Sole Contributor Risk',
-    description: 'Active projects where one employee contributes more than 90% of hours, with cross-training/backup suggestions.',
-    frequency: 'weekly',
-    schedule_type: 'WL', week_day: 'TUE', scheduled_time: '09:00', // weekly, every Tuesday 09:00
-    audience_roles: ['Admin', 'BU Admin'],
-  },
-  {
-    job_key: 'monthly_cost_commentary',
-    title: 'Monthly Cost Commentary',
-    description: 'Cost movement vs the prior month, reasons, and recommendations.',
+    job_key: 'bu_utilization_summary',
+    title: 'BU Monthly Utilization Summary',
+    description: 'Utilization and billable utilization against the monthly cap, with change vs the previous month.',
     frequency: 'monthly',
-    schedule_type: 'ML', month_day: 1, scheduled_time: '09:00', // monthly, 1st at 09:00
-    audience_roles: ['Admin', 'BU Admin'],
+    schedule_type: 'DL', scheduled_time: '06:00', // runs daily 06:00 for the month just ended; sync-gated, stops once every unit is synced
+    audience_roles: ['BU Admin'],
   },
   {
-    job_key: 'client_concentration',
-    title: 'Client Concentration',
-    description: 'Top clients, revenue share, trend, and concentration risk.',
+    job_key: 'bu_underutilised_employees',
+    title: 'Under-utilised Employees',
+    description: 'Employees below 60% of the monthly cap, with hours logged.',
     frequency: 'monthly',
-    schedule_type: 'ML', month_day: 1, scheduled_time: '09:30', // monthly, 1st at 09:30
-    audience_roles: ['Admin', 'BU Admin'],
+    schedule_type: 'DL', scheduled_time: '06:00', // runs daily 06:00 for the month just ended; sync-gated, stops once every unit is synced
+    audience_roles: ['BU Admin'],
   },
   {
-    job_key: 'utilization_anomaly',
-    title: 'Utilization Anomaly',
-    description: 'Current vs previous month utilization, with an explanation of the increase/decrease.',
+    job_key: 'bu_overtime_overcap',
+    title: 'Over-cap and Overtime',
+    description: 'Employees at or above 90% of the monthly cap, and those above it, with repeat offenders.',
     frequency: 'monthly',
-    schedule_type: 'ML', month_day: 1, scheduled_time: '10:00', // monthly, 1st at 10:00
-    audience_roles: ['Admin', 'BU Admin'],
+    schedule_type: 'DL', scheduled_time: '06:00', // runs daily 06:00 for the month just ended; sync-gated, stops once every unit is synced
+    audience_roles: ['BU Admin'],
   },
   {
-    job_key: 'quarter_end_review',
-    title: 'Quarter End Review',
-    description: 'Complete quarter review: achievements, risks, utilization, resource summary, recommendations.',
-    frequency: 'quarterly',
-    schedule_type: 'QL', month_day: 1, scheduled_time: '09:00', // quarterly, 1st of Jan/Apr/Jul/Oct at 09:00
-    audience_roles: ['Admin', 'BU Admin'],
+    job_key: 'bu_bench_nonbillable',
+    title: 'Bench and Non-billable Load',
+    description: 'Hours spent on Idle / On Bench and other non-billable POs, and who carries them.',
+    frequency: 'monthly',
+    schedule_type: 'DL', scheduled_time: '06:00', // runs daily 06:00 for the month just ended; sync-gated, stops once every unit is synced
+    audience_roles: ['BU Admin'],
+  },
+  {
+    job_key: 'bu_po_concentration',
+    title: 'PO Hours and Concentration',
+    description: 'Hours by Service PO and single-person dependency on a PO.',
+    frequency: 'monthly',
+    schedule_type: 'DL', scheduled_time: '06:00', // runs daily 06:00 for the month just ended; sync-gated, stops once every unit is synced
+    audience_roles: ['BU Admin'],
+  },
+  {
+    job_key: 'bu_client_hours',
+    title: 'Client-wise Hours',
+    description: 'Top clients by hours, their share and change vs the previous month.',
+    frequency: 'monthly',
+    schedule_type: 'DL', scheduled_time: '06:00', // runs daily 06:00 for the month just ended; sync-gated, stops once every unit is synced
+    audience_roles: ['BU Admin'],
+  },
+  {
+    job_key: 'bu_timesheet_compliance',
+    title: 'Timesheet Compliance',
+    description: 'Pending approvals by manager and employees with no timesheet logs (does not wait for sync).',
+    frequency: 'monthly',
+    schedule_type: 'DL', scheduled_time: '06:00', // runs daily 06:00 for the month just ended; sync-gated, stops once every unit is synced
+    audience_roles: ['BU Admin'],
+  },
+  {
+    job_key: 'bu_po_timeline_risk',
+    title: 'PO Timeline Risk',
+    description: 'In-progress POs past their end date or ending within 30 days of the month end, with hours still logged.',
+    frequency: 'monthly',
+    schedule_type: 'DL', scheduled_time: '06:00', // runs daily 06:00 for the month just ended; sync-gated, stops once every unit is synced
+    audience_roles: ['BU Admin'],
+  },
+  // Admin — one report per tenant, across all its Business Units:
+  {
+    job_key: 'tenant_monthly_summary',
+    title: 'Monthly Summary (All BUs)',
+    description: 'Combined utilization against cap, billable share and trend, BU by BU.',
+    frequency: 'monthly',
+    schedule_type: 'DL', scheduled_time: '06:00', // runs daily 06:00 for the month just ended; sync-gated, stops once every unit is synced
+    audience_roles: ['Admin'],
+  },
+  {
+    job_key: 'tenant_bu_comparison',
+    title: 'BU Comparison and Capacity',
+    description: 'BU ranking and where spare capacity and overload sit (only when every BU is synced).',
+    frequency: 'monthly',
+    schedule_type: 'DL', scheduled_time: '06:00', // runs daily 06:00 for the month just ended; sync-gated, stops once every unit is synced
+    audience_roles: ['Admin'],
+  },
+  {
+    job_key: 'tenant_client_concentration',
+    title: 'Client Concentration (All BUs)',
+    description: 'Client share of hours across all BUs and concentration risk.',
+    frequency: 'monthly',
+    schedule_type: 'DL', scheduled_time: '06:00', // runs daily 06:00 for the month just ended; sync-gated, stops once every unit is synced
+    audience_roles: ['Admin'],
+  },
+  {
+    job_key: 'tenant_overtime_burnout',
+    title: 'Overtime and Burnout Risk',
+    description: 'Employees at or above 90% of cap across BUs, and repeat high months.',
+    frequency: 'monthly',
+    schedule_type: 'DL', scheduled_time: '06:00', // runs daily 06:00 for the month just ended; sync-gated, stops once every unit is synced
+    audience_roles: ['Admin'],
+  },
+  {
+    job_key: 'tenant_nonbillable_leakage',
+    title: 'Non-billable Leakage',
+    description: 'Non-billable and bench hours by BU.',
+    frequency: 'monthly',
+    schedule_type: 'DL', scheduled_time: '06:00', // runs daily 06:00 for the month just ended; sync-gated, stops once every unit is synced
+    audience_roles: ['Admin'],
+  },
+  {
+    job_key: 'tenant_sync_compliance_health',
+    title: 'Sync and Compliance Health',
+    description: 'Which BUs / Sub-BUs are synced for the month and pending approvals per BU.',
+    frequency: 'monthly',
+    schedule_type: 'DL', scheduled_time: '06:00', // runs daily 06:00 for the month just ended; sync-gated, stops once every unit is synced
+    audience_roles: ['Admin'],
+  },
+  {
+    job_key: 'tenant_quarter_end_brief',
+    title: 'Quarter-end Brief',
+    description: 'Utilization trend across the quarter, BU by BU (quarter-end months, once every BU is synced).',
+    frequency: 'monthly',
+    schedule_type: 'DL', scheduled_time: '06:00', // runs daily 06:00 for the month just ended; sync-gated, stops once every unit is synced
+    audience_roles: ['Admin'],
   },
   {
     job_key: 'new_po_staffing_suggestion',

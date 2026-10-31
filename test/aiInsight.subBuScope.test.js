@@ -169,9 +169,11 @@ test('aiInsightRepository: single-record lookup/update are restricted to the cal
     await aiInsightRepo.findById(5, [21, 22]);
     await aiInsightRepo.markAsRead(5, [21, 22]);
 
+    // reach = the caller's Companies, OR a tenant-level report whose whole tenant is inside the reach
     assert.equal(findWhere.id, 5);
-    assert.deepEqual(findWhere.company_id[Op.in], [21, 22]);
-    assert.deepEqual(updateWhere.company_id[Op.in], [21, 22]);
+    assert.deepEqual(findWhere[Op.or][0].company_id[Op.in], [21, 22]);
+    assert.equal(findWhere[Op.or].length, 2);
+    assert.deepEqual(updateWhere[Op.or][0].company_id[Op.in], [21, 22]);
   } finally {
     restore();
   }

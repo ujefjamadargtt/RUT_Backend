@@ -118,6 +118,42 @@ module.exports = (sequelize) => {
         allowNull: false,
         defaultValue: false,
       },
+      // Monthly, sync-gated reports (see services/aiInsightMonthly.service.js). All NULL / 'complete'
+      // for an event-driven or pre-existing insight.
+      period_month: {
+        type: DataTypes.DATEONLY,
+        allowNull: true,
+        // first day of the month the report is about
+      },
+      scope_type: {
+        type: DataTypes.STRING(10),
+        allowNull: true,
+        validate: { isIn: { args: [['bu', 'tenant']], msg: 'Scope type must be bu or tenant.' } },
+        // 'bu' = one leaf BU / Sub-BU (company_id); 'tenant' = one Admin's whole tenant (tenant_admin_id)
+      },
+      tenant_admin_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
+      report_state: {
+        type: DataTypes.STRING(20),
+        allowNull: false,
+        defaultValue: 'complete',
+        validate: {
+          isIn: { args: [['complete', 'partial', 'pending_sync']], msg: 'Report state must be complete, partial, or pending_sync.' },
+        },
+        // complete | partial (some BUs not synced yet) | pending_sync (message only, no AI content)
+      },
+      sync_status: {
+        type: DataTypes.JSONB,
+        allowNull: true,
+        // { synced_count, total_count, synced: [{ id, name }], pending: [{ id, name }] }
+      },
+      data_signature: {
+        type: DataTypes.STRING(64),
+        allowNull: true,
+        // hash of the data the report was built from — unchanged means no new AI call
+      },
     },
     {
       sequelize,

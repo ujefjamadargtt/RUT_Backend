@@ -3,8 +3,10 @@
 const schedulerService = require('../services/scheduler.service');
 const aiInsightJobRepo = require('../repositories/aiInsightJobRepository');
 const aiInsightService = require('../services/aiInsight.service');
+const aiInsightMonthlyService = require('../services/aiInsightMonthly.service');
 const companyRepository = require('../repositories/companyRepository');
 const logger = require('../utils/logger');
+const { resolveJobCronExpression } = require('../utils/scheduleExpression');
 
 /**
  * AI Insight Scheduler
@@ -30,6 +32,12 @@ const logger = require('../utils/logger');
  * own companyId.
  */
 async function runForAllCompanies(job) {
+  // Monthly, sync-gated jobs walk every tenant / unit themselves (daily retry until all are synced).
+  if (aiInsightMonthlyService.isMonthlyJob(job.job_key)) {
+    await aiInsightMonthlyService.runMonthlyJob(job);
+    return;
+  }
+
   // Insight units are leaf Companies only: a BU without Sub-BUs runs BU-wise;
   // a BU that has Sub-BUs is skipped and each of its Sub-BUs runs instead.
   const companyIds = await companyRepository.findInsightLeafCompanyIds();
@@ -92,15 +100,70 @@ function runExclusively(job) {
   return run.finally(() => activeJobKeys.delete(job.job_key));
 }
 
+// A schedule edited in ai_insight_jobs (schedule_type / scheduled_time / ... / is_active) takes effect without a
+// restart: the job list is re-read this often and only jobs whose cron changed are re-registered.
+const SCHEDULE_REFRESH_MS = 30 * 1000;
+const reportedInvalid = new Set();
+
+/**
+ * Make the registered cron tasks match ai_insight_jobs: register a new / changed schedule, drop a job that
+ * was switched off. A job whose schedule did not change is left alone.
+ */
+async function syncSchedules() {
+  const jobs = await aiInsightJobRepo.findActiveCronJobs();
+  const activeKeys = new Set(jobs.map((job) => job.job_key));
+
+  for (const job of jobs) {
+    let expression;
+    try {
+      expression = resolveJobCronExpression(job);
+    } catch (err) {
+      const problem = `${job.job_key}:${err.message}`;
+      if (!reportedInvalid.has(problem)) {
+        reportedInvalid.add(problem);
+        logger.error('Scheduler: invalid schedule — job not (re)registered', { jobKey: job.job_key, error: err.message });
+      }
+      continue;
+    }
+    if (expression && schedulerService.getRegisteredCron(job.job_key) !== expression) {
+      schedulerService.registerJob(job, runExclusively);
+    }
+  }
+
+  for (const jobKey of schedulerService.getRegisteredJobKeys()) {
+    if (!activeKeys.has(jobKey)) {
+      schedulerService.unregisterJob(jobKey);
+      logger.info('Scheduler: job switched off — unregistered', { jobKey });
+    }
+  }
+}
+
+let refreshing = false;
+function startScheduleRefresh() {
+  const timer = setInterval(async () => {
+    if (refreshing) return;
+    refreshing = true;
+    try {
+      await syncSchedules();
+    } catch (err) {
+      logger.error('Scheduler: schedule refresh failed', { error: err.message });
+    } finally {
+      refreshing = false;
+    }
+  }, SCHEDULE_REFRESH_MS);
+  timer.unref();
+}
+
 async function start() {
   await aiInsightJobRepo.ensureSeeded();
 
   const jobs = await aiInsightJobRepo.findActiveCronJobs();
   schedulerService.registerJobs(jobs, runExclusively);
+  startScheduleRefresh();
 
   logger.info('AI Insight scheduler started', {
     registeredJobs: schedulerService.getRegisteredJobKeys(),
   });
 }
 
-module.exports = { start, runForAllCompanies, runExclusively };
+module.exports = { start, syncSchedules, runForAllCompanies, runExclusively };

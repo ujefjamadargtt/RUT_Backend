@@ -766,4 +766,8 @@ module.exports = {
   getUtilizationAnomalyData,
   getQuarterEndReviewData,
   getNewPoStaffingSuggestionData,
+  // shared with aiInsightMonthlyDataRepository.js
+  AI_TS_SPO_SCOPE_SQL,
+  BENCH_PO_NAMES,
+  getSoleContributorRiskRows,
 };

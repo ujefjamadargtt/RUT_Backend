@@ -20,6 +20,8 @@ const TIMEZONE = process.env.APP_TIMEZONE || 'Asia/Kolkata';
 
 /** @type {Map<string, import('node-cron').ScheduledTask>} */
 const registeredTasks = new Map();
+/** @type {Map<string, string>} job_key -> the cron expression it was registered with */
+const registeredExpressions = new Map();
 
 /**
  * Register and start one cron-scheduled job. Re-registering the same
@@ -81,6 +83,7 @@ function registerJob(job, handler) {
   );
 
   registeredTasks.set(job.job_key, task);
+  registeredExpressions.set(job.job_key, cronExpression);
   logger.info('Scheduler: job registered', {
     jobKey: job.job_key,
     scheduleType: job.schedule_type || null,
@@ -109,6 +112,26 @@ function stopAll() {
     task.stop();
   }
   registeredTasks.clear();
+  registeredExpressions.clear();
+}
+
+/**
+ * Stop and unregister one job (e.g. it was switched off).
+ * @param {string} jobKey
+ */
+function unregisterJob(jobKey) {
+  const task = registeredTasks.get(jobKey);
+  if (task) task.stop();
+  registeredTasks.delete(jobKey);
+  registeredExpressions.delete(jobKey);
+}
+
+/**
+ * @param {string} jobKey
+ * @returns {string|undefined} the cron expression the job is currently registered with
+ */
+function getRegisteredCron(jobKey) {
+  return registeredExpressions.get(jobKey);
 }
 
 /**
@@ -122,5 +145,7 @@ module.exports = {
   registerJob,
   registerJobs,
   stopAll,
+  unregisterJob,
+  getRegisteredCron,
   getRegisteredJobKeys,
 };

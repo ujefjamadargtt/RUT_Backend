@@ -40,6 +40,13 @@ const CURRENCY_INSTRUCTION = `
 Currency: this project operates in Indian Rupees. Whenever the data below contains a monetary value (cost, revenue, billing amount, project cost, client cost, etc.), always display it with the ₹ symbol. Never use "$" or the word "USD". Never convert currency or assume an exchange rate — if the data already provides a formatted INR value, use it exactly as given; otherwise simply prefix the numeric value with ₹.
 `.trim();
 
+// Shared by the monthly, sync-gated jobs (services/aiInsightMonthly.service.js).
+const MONTHLY_BASE = `This is a MONTHLY report about the calendar month named in the data ("period"), built only from timesheets that have been synced.
+Capacity means headcount x the monthly cap hours set by the Admin (monthly_cap_hours_per_employee / capacity_hours); utilization % = logged hours / capacity. Never assume a 176-hour month — use the cap in the data.
+Hours only: do not mention cost, rates or budgets.
+If the data has a "data_coverage" section, some units are not synced yet: state in the summary which units are included and which are pending, and do not draw conclusions about the pending units.
+Name people, Business Units, POs and clients exactly as given. Be specific and short; every finding must carry a number from the data.`;
+
 /**
  * @param {object} params
  * @param {string} params.jobKey
@@ -131,6 +138,81 @@ The data compares this month's utilization % against last month's, plus the clie
     instructions: `Generate a complete Quarter End Review for Admin and BU Admin.
 The data covers the fiscal quarter that just ended: utilization, cost, top clients, resource risk counts (bench, sole-contributor), completed POs, and new clients onboarded. Produce a rounded review covering achievements, risks, utilization, a resource summary, and recommendations for next quarter.
 Remember: total_cost and every cost in top_clients_by_cost are Indian Rupees — display them with ₹, never "$".`,
+  },
+  bu_utilization_summary: {
+    audienceRoles: ['BU Admin'],
+    instructions: `${MONTHLY_BASE}
+Monthly Utilization Summary for one Business Unit / Sub-BU. Report logged hours against capacity (headcount x monthly cap), billable utilization, and the change vs the previous month. Say plainly whether the unit is under-, well- or over-utilised and what most likely drove the change.`,
+  },
+  bu_underutilised_employees: {
+    audienceRoles: ['BU Admin'],
+    instructions: `${MONTHLY_BASE}
+Under-utilised employees (below 60% of the monthly cap). State how many of the headcount, how many logged zero hours, and list the lowest employees with their hours and %. Recommend who to allocate first and flag zero-hour employees for a check (leave, onboarding, or a missing timesheet).`,
+  },
+  bu_overtime_overcap: {
+    audienceRoles: ['BU Admin'],
+    instructions: `${MONTHLY_BASE}
+Over-cap and overtime. State how many employees are at or above 90% of the cap and how many are above it, list the highest with hours above cap, and call out those who were also at or above 90% the previous month (repeat) as the burnout risk. Recommend workload redistribution.`,
+  },
+  bu_bench_nonbillable: {
+    audienceRoles: ['BU Admin'],
+    instructions: `${MONTHLY_BASE}
+Bench and non-billable load. Give bench and non-billable share of logged hours, the change vs the previous month, who carries the bench hours, and which non-billable POs take the most hours. Recommend how to reduce idle time.`,
+  },
+  bu_po_concentration: {
+    audienceRoles: ['BU Admin'],
+    instructions: `${MONTHLY_BASE}
+PO hours and concentration. Show where the hours went (top POs with share) and the sole-contributor risks (one person above 90% of a PO). For each risk, name the person and PO and recommend a backup or cross-training.`,
+  },
+  bu_client_hours: {
+    audienceRoles: ['BU Admin'],
+    instructions: `${MONTHLY_BASE}
+Client-wise hours. List the top clients with hours, share and change vs the previous month, state the top-3 share, and flag any client that grew or shrank sharply. Keep it short.`,
+  },
+  bu_timesheet_compliance: {
+    audienceRoles: ['BU Admin'],
+    instructions: `${MONTHLY_BASE}
+Timesheet compliance. Report work logs by status, how many are still pending approval and with which primary manager (oldest pending date), and employees who logged nothing in the month. Recommend who must approve or submit, in priority order. If the data_coverage section says the unit is not synced yet, say that sync is pending.`,
+  },
+  bu_po_timeline_risk: {
+    audienceRoles: ['BU Admin'],
+    instructions: `${MONTHLY_BASE}
+PO timeline risk. Dates are measured at the month end given in measured_at. List in-progress POs already past their end date (days overdue, hours still being logged) and POs ending within 30 days. Recommend which need an end-date extension, closure, or replacement work first. Display dates as DD-MMM-YYYY.`,
+  },
+  tenant_monthly_summary: {
+    audienceRoles: ['Admin'],
+    instructions: `${MONTHLY_BASE}
+Monthly summary across all Business Units of the tenant. Give the combined utilization against capacity, billable utilization and trend vs the previous month, then the strongest and weakest Business Units. Recommend the top actions for the month ahead.`,
+  },
+  tenant_bu_comparison: {
+    audienceRoles: ['Admin'],
+    instructions: `${MONTHLY_BASE}
+Business Unit comparison and capacity. Rank the Business Units by utilization and show where capacity is spare (low utilization, hours that could be absorbed) versus overloaded (employees at or above 90%, hours above cap). Suggest concrete cross-BU capacity moves, naming the Business Units.`,
+  },
+  tenant_client_concentration: {
+    audienceRoles: ['Admin'],
+    instructions: `${MONTHLY_BASE}
+Client concentration across all Business Units. List the top clients with share of hours, how many Business Units serve each, and the top-3 share. Flag over-reliance on one client (for example a top-3 share above half) and give one clear recommendation.`,
+  },
+  tenant_overtime_burnout: {
+    audienceRoles: ['Admin'],
+    instructions: `${MONTHLY_BASE}
+Overtime and burnout risk across Business Units. State how many employees are at or above 90% of cap and above it, which Business Units concentrate them, and how many were high in both months (repeat). Recommend staffing or workload changes per Business Unit.`,
+  },
+  tenant_nonbillable_leakage: {
+    audienceRoles: ['Admin'],
+    instructions: `${MONTHLY_BASE}
+Non-billable leakage. Give non-billable and bench share of all logged hours and rank the Business Units by non-billable hours. Say where the leakage is largest and what to review first. Hours only — do not estimate money.`,
+  },
+  tenant_sync_compliance_health: {
+    audienceRoles: ['Admin'],
+    instructions: `${MONTHLY_BASE}
+Sync and compliance health for the month. List which Business Units / Sub-BUs are synced and which are pending, and the pending-approval work logs per Business Unit. Recommend who to chase first. Do not describe utilization — only readiness of the data.`,
+  },
+  tenant_quarter_end_brief: {
+    audienceRoles: ['Admin'],
+    instructions: `${MONTHLY_BASE}
+Quarter-end brief. Cover the three months of the quarter: utilization and billable utilization trend, bench hours, and Business Units ranked for the quarter. Give the top 3 risks, top 3 opportunities and the recommended focus for the next quarter.`,
   },
   new_po_staffing_suggestion: {
     audienceRoles: ['Admin', 'BU Admin'],

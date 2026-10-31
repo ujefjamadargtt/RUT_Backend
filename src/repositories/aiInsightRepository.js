@@ -26,6 +26,31 @@ function isEmptyScope(companyIds) {
 }
 
 /**
+ * A TENANT-level monthly insight (scope_type 'tenant', company_id NULL) covers every Business Unit of one
+ * Admin's tenant, so it is visible only to a caller whose reach covers ALL of that tenant's active Business
+ * Units / Sub-BUs (the Admin) — never to a BU-scoped caller, nor to an Admin who narrowed the view to one BU.
+ * `idsSql` is the SQL for the caller's company ids: ':companyIds' (raw query) or an inline integer list.
+ */
+function tenantVisibleSql(idsSql) {
+  return `(ai.scope_type = 'tenant' AND ai.tenant_admin_id IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM companies tc
+        JOIN entities te ON te.id = tc.entity_id AND te.is_deleted = false
+       WHERE te.created_by = ai.tenant_admin_id AND tc.is_deleted = false AND tc.status = 'active'
+         AND tc.id NOT IN (${idsSql})))`;
+}
+
+// ORM where-fragment for "this insight is inside the caller's reach" (a Company insight, or a visible tenant one).
+function scopeWhere(companyIds) {
+  const inlineIds = companyIds.map((id) => Number(id)).filter(Number.isInteger).join(', ') || 'NULL';
+  return {
+    [Op.or]: [
+      { company_id: { [Op.in]: companyIds } },
+      sequelize.literal(tenantVisibleSql(inlineIds).replace(/\bai\./g, '')),
+    ],
+  };
+}
+
+/**
  * @param {object} payload - Matches the AiInsight model fields
  * @returns {Promise<AiInsight>}
  */
@@ -41,7 +66,7 @@ async function create(payload) {
 async function findById(id, companyIds) {
   if (isEmptyScope(companyIds)) return null;
   return AiInsight.findOne({
-    where: { id, company_id: { [Op.in]: companyIds } },
+    where: { id, ...scopeWhere(companyIds) },
     include: [
       { model: AiInsightJob, as: 'job', attributes: ['job_key', 'title', 'frequency'] },
       { model: Company, as: 'company', attributes: ['id', 'company_name', 'parent_business_unit_id'] },
@@ -49,8 +74,8 @@ async function findById(id, companyIds) {
   });
 }
 
-function buildBaseConditions({ jobKey, severity, isRead, includeDismissed, companyIds, monthStart, monthEnd }, replacements) {
-  const conditions = ['ai.company_id IN (:companyIds)'];
+function buildBaseConditions({ jobKey, severity, isRead, includeDismissed, companyIds, monthStart, monthEnd, periodStart, periodEnd }, replacements) {
+  const conditions = [`(ai.company_id IN (:companyIds) OR ${tenantVisibleSql(':companyIds')})`];
   replacements.companyIds = companyIds;
 
   if (jobKey) {
@@ -66,9 +91,12 @@ function buildBaseConditions({ jobKey, severity, isRead, includeDismissed, compa
     replacements.isRead = isRead;
   }
   if (monthStart && monthEnd) {
-    conditions.push('ai.generated_at >= :monthStart AND ai.generated_at < :monthEnd');
+    conditions.push(`((ai.period_month IS NOT NULL AND ai.period_month >= :periodStart AND ai.period_month < :periodEnd)
+      OR (ai.period_month IS NULL AND ai.generated_at >= :monthStart AND ai.generated_at < :monthEnd))`);
     replacements.monthStart = monthStart;
     replacements.monthEnd = monthEnd;
+    replacements.periodStart = periodStart;
+    replacements.periodEnd = periodEnd;
   }
   if (!includeDismissed) {
     conditions.push('ai.is_dismissed = false');
@@ -113,11 +141,11 @@ async function runList(conditions, replacements) {
  * @param {object} filters - { jobKey, severity, isRead, includeDismissed, limit, offset, companyIds }
  * @returns {Promise<{ rows: object[], count: number }>}
  */
-async function findAll({ jobKey, severity, isRead, includeDismissed, limit, offset, companyIds, monthStart, monthEnd } = {}) {
+async function findAll({ jobKey, severity, isRead, includeDismissed, limit, offset, companyIds, monthStart, monthEnd, periodStart, periodEnd } = {}) {
   if (isEmptyScope(companyIds)) return { rows: [], count: 0 };
 
   const replacements = { limit, offset };
-  const conditions = buildBaseConditions({ jobKey, severity, isRead, includeDismissed, companyIds, monthStart, monthEnd }, replacements);
+  const conditions = buildBaseConditions({ jobKey, severity, isRead, includeDismissed, companyIds, monthStart, monthEnd, periodStart, periodEnd }, replacements);
   return runList(conditions, replacements);
 }
 
@@ -129,11 +157,11 @@ async function findAll({ jobKey, severity, isRead, includeDismissed, limit, offs
  * @param {object} filters - { jobKey, severity, isRead, includeDismissed, limit, offset, companyIds }
  * @returns {Promise<{ rows: object[], count: number }>}
  */
-async function findByRoles(roles, { jobKey, severity, isRead, includeDismissed, limit, offset, companyIds, monthStart, monthEnd } = {}) {
+async function findByRoles(roles, { jobKey, severity, isRead, includeDismissed, limit, offset, companyIds, monthStart, monthEnd, periodStart, periodEnd } = {}) {
   if (isEmptyScope(companyIds) || !Array.isArray(roles) || roles.length === 0) return { rows: [], count: 0 };
 
   const replacements = { limit, offset };
-  const conditions = buildBaseConditions({ jobKey, severity, isRead, includeDismissed, companyIds, monthStart, monthEnd }, replacements);
+  const conditions = buildBaseConditions({ jobKey, severity, isRead, includeDismissed, companyIds, monthStart, monthEnd, periodStart, periodEnd }, replacements);
 
   const roleParams = roles.map((_, i) => `:role${i}`).join(', ');
   roles.forEach((role, i) => {
@@ -152,7 +180,7 @@ async function findByRoles(roles, { jobKey, severity, isRead, includeDismissed, 
  */
 async function markAsRead(id, companyIds) {
   if (isEmptyScope(companyIds)) return [0];
-  return AiInsight.update({ is_read: true }, { where: { id, company_id: { [Op.in]: companyIds } } });
+  return AiInsight.update({ is_read: true }, { where: { id, ...scopeWhere(companyIds) } });
 }
 
 /**
@@ -163,7 +191,92 @@ async function markAsRead(id, companyIds) {
  */
 async function dismiss(id, companyIds) {
   if (isEmptyScope(companyIds)) return [0];
-  return AiInsight.update({ is_dismissed: true }, { where: { id, company_id: { [Op.in]: companyIds } } });
+  return AiInsight.update({ is_dismissed: true }, { where: { id, ...scopeWhere(companyIds) } });
+}
+
+/**
+ * The monthly report of one scope + month + job, if it exists ('bu' by company_id, 'tenant' by tenant_admin_id).
+ * @param {{ scopeType: 'bu'|'tenant', companyId?: number, tenantAdminId?: number, periodMonth: string, jobKey: string }} key
+ * @returns {Promise<AiInsight|null>}
+ */
+async function findMonthly({ scopeType, companyId, tenantAdminId, periodMonth, jobKey }) {
+  return AiInsight.findOne({
+    where: {
+      scope_type: scopeType,
+      period_month: periodMonth,
+      job_key: jobKey,
+      ...(scopeType === 'bu' ? { company_id: companyId } : { tenant_admin_id: tenantAdminId }),
+    },
+  });
+}
+
+/**
+ * Create the monthly report, or — when one already exists for the same scope + month + job — REPLACE its
+ * content in place (never a second row). A changed report is shown as new again (unread, not dismissed).
+ * @param {{ scopeType: 'bu'|'tenant', companyId?: number, tenantAdminId?: number, periodMonth: string, jobKey: string }} key
+ * @param {object} payload - AiInsight fields (title, severity, summary, findings, actions, ...)
+ * @returns {Promise<AiInsight>}
+ */
+async function upsertMonthly(key, payload) {
+  const identity = {
+    scope_type: key.scopeType,
+    period_month: key.periodMonth,
+    job_key: key.jobKey,
+    company_id: key.scopeType === 'bu' ? key.companyId : null,
+    tenant_admin_id: key.scopeType === 'tenant' ? key.tenantAdminId : null,
+  };
+  const existing = await findMonthly(key);
+  if (existing) {
+    await existing.update({ ...payload, is_read: false, is_dismissed: false });
+    return existing;
+  }
+  return AiInsight.create({ ...payload, ...identity });
+}
+
+/**
+ * (tenant, month) pairs, among the candidate months, that still have a tenant report that is not complete —
+ * the scheduler keeps retrying those until every BU / Sub-BU is synced.
+ * @param {string[]} periodMonths - 'YYYY-MM-01'
+ * @returns {Promise<{ tenantAdminId: number, periodMonth: string }[]>}
+ */
+async function findOpenTenantPeriods(periodMonths) {
+  if (!periodMonths.length) return [];
+  const rows = await AiInsight.findAll({
+    where: { scope_type: 'tenant', period_month: { [Op.in]: periodMonths }, report_state: { [Op.ne]: 'complete' } },
+    attributes: ['tenant_admin_id', 'period_month'],
+    group: ['tenant_admin_id', 'period_month'],
+    raw: true,
+  });
+  return rows.map((r) => ({ tenantAdminId: r.tenant_admin_id, periodMonth: r.period_month }));
+}
+
+/**
+ * The (tenant, month) pairs a job has already finished for good (every unit synced and processed) — see
+ * ai_insight_period_state. The scheduler skips them without touching any data.
+ * @param {string} jobKey
+ * @param {string[]} periodMonths - 'YYYY-MM-01'
+ * @returns {Promise<Set<string>>} keys 'tenantAdminId|YYYY-MM-01'
+ */
+async function findDonePeriods(jobKey, periodMonths) {
+  if (!periodMonths.length) return new Set();
+  const rows = await sequelize.query(
+    `SELECT tenant_admin_id, TO_CHAR(period_month, 'YYYY-MM-DD') AS period_month
+       FROM ai_insight_period_state WHERE job_key = :jobKey AND period_month IN (:periodMonths)`,
+    { replacements: { jobKey, periodMonths }, type: QueryTypes.SELECT }
+  );
+  return new Set(rows.map((r) => `${r.tenant_admin_id}|${r.period_month}`));
+}
+
+/**
+ * Record that a job is finished for a tenant + month (idempotent).
+ */
+async function markPeriodDone(jobKey, tenantAdminId, periodMonth) {
+  await sequelize.query(
+    `INSERT INTO ai_insight_period_state (tenant_admin_id, period_month, job_key)
+     VALUES (:tenantAdminId, :periodMonth, :jobKey)
+     ON CONFLICT (job_key, period_month, tenant_admin_id) DO NOTHING`,
+    { replacements: { tenantAdminId, periodMonth, jobKey } }
+  );
 }
 
 module.exports = {
@@ -173,4 +286,9 @@ module.exports = {
   findByRoles,
   markAsRead,
   dismiss,
+  findMonthly,
+  upsertMonthly,
+  findOpenTenantPeriods,
+  findDonePeriods,
+  markPeriodDone,
 };

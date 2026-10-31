@@ -6,6 +6,7 @@ const aiInsightDataRepo = require('../repositories/aiInsightDataRepository');
 const companyRepository = require('../repositories/companyRepository');
 const aiGateway = require('../providers/gateway.provider');
 const promptBuilder = require('../utils/promptBuilder');
+const aiInsightMonthlyService = require('./aiInsightMonthly.service');
 const logger = require('../utils/logger');
 const moment = require('moment-timezone');
 const { getPaginationParams, getPaginationMeta } = require('../utils/pagination');
@@ -81,8 +82,9 @@ async function runJob(jobKey, context = {}, companyId) {
     throw err;
   }
 
+  const isMonthly = aiInsightMonthlyService.isMonthlyJob(jobKey);
   const collector = DATA_COLLECTORS[jobKey];
-  if (!collector) {
+  if (!collector && !isMonthly) {
     const err = new Error(`No data collector registered for job_key "${jobKey}".`);
     err.statusCode = 500;
     throw err;
@@ -101,6 +103,12 @@ async function runJob(jobKey, context = {}, companyId) {
   if (leafCompanyId === undefined) {
     logger.info('AI Insight job skipped — company is not an insight unit (inactive, no company, or a Parent BU with Sub-BUs)', { jobKey, companyId });
     return null;
+  }
+
+  // Monthly, sync-gated jobs (BU / tenant reports) have their own flow — see aiInsightMonthly.service.js.
+  if (isMonthly) {
+    const { insights } = await aiInsightMonthlyService.runMonthlyJob(job, { companyId });
+    return insights[0] || null;
   }
 
   const runAt = new Date();
@@ -156,17 +164,19 @@ async function runJob(jobKey, context = {}, companyId) {
  */
 async function runAllJobs(companyId) {
   const jobs = await aiInsightJobRepo.findAll();
-  const runnable = jobs.filter((job) => job.frequency !== 'event');
+  const runnable = jobs.filter((job) => job.is_active && job.frequency !== 'event');
 
-  const settled = await Promise.allSettled(runnable.map((job) => runJob(job.job_key, {}, companyId)));
-
-  return runnable.map((job, i) => {
-    const result = settled[i];
-    if (result.status === 'rejected') {
-      return { job_key: job.job_key, status: 'failed', error: result.reason.message };
+  // One job at a time — a burst of simultaneous AI calls trips the providers' rate limits.
+  const results = [];
+  for (const job of runnable) {
+    try {
+      const insight = await runJob(job.job_key, {}, companyId);
+      results.push({ job_key: job.job_key, status: insight === null ? 'skipped' : 'success' });
+    } catch (err) {
+      results.push({ job_key: job.job_key, status: 'failed', error: err.message });
     }
-    return { job_key: job.job_key, status: result.value === null ? 'skipped' : 'success' };
-  });
+  }
+  return results;
 }
 
 /**
@@ -214,7 +224,14 @@ function parseMonthFilter(value) {
     throw err;
   }
   const start = moment.tz(text, 'YYYY-MM', INSIGHT_MONTH_TZ).startOf('month');
-  return { monthStart: start.toDate(), monthEnd: start.clone().add(1, 'month').toDate() };
+  // A monthly report is filed under the month it is ABOUT (period_month), not the day it was generated; an
+  // insight without one (event-driven / older) falls back to generated_at in that month.
+  return {
+    monthStart: start.toDate(),
+    monthEnd: start.clone().add(1, 'month').toDate(),
+    periodStart: start.format('YYYY-MM-DD'),
+    periodEnd: start.clone().add(1, 'month').format('YYYY-MM-DD'),
+  };
 }
 
 function buildListFilters(query) {
@@ -309,6 +326,7 @@ async function dismissInsight(id, companyIds) {
 }
 
 module.exports = {
+  normalizeAiResponse,
   runJob,
   runAllJobs,
   resolveManualRunCompanyId,
