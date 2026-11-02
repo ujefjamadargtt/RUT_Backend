@@ -690,17 +690,24 @@ async function getPMWiseUtilization(query, companyIds) {
 // ---------------------------------------------------------------------------
 // 12. Project-wise Utilization Report
 // ---------------------------------------------------------------------------
-async function getProjectWiseUtilization(query, companyIds) {
+async function getProjectWiseUtilization(query, companyIds, authContext = {}) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
   companyIds = await applyEntityBuFilters(companyIds, filters);
   const range = resolveMonthRange(query);
 
+  // A Project Manager (rank 6) sees only the Service POs they are the flagged PM of — PO-wise, never BU-wise.
+  // Lazy require — avoids a load-order cycle with the mapping service. null = every other role (BU scope).
+  const pmServicePoIds = (authContext && authContext.hierarchyRank === 6 && authContext.employeeId)
+    // eslint-disable-next-line global-require
+    ? await require('./employeeServicePOMappingService').getProjectManagerServicePOIds(authContext.employeeId)
+    : null;
+
   logger.info('ManagementReport: getProjectWiseUtilization', { range, page, limit });
 
   const { rows, count, summary: fullDatasetSummary } = await managementReportRepo.getProjectWiseUtilization({
     ...range, search: filters.search, sortBy: filters.sortBy, sortOrder: filters.sortOrder,
-    hoursSource: filters.hoursSource, limit, offset, companyIds,
+    hoursSource: filters.hoursSource, limit, offset, companyIds, pmServicePoIds,
   });
 
   const meta = getPaginationMeta(count, page, limit);

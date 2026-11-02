@@ -1242,9 +1242,10 @@ const groupHoursByServicePO = (rows) => {
     const nodeKey = row.hierarchy_node_id ? String(row.hierarchy_node_id) : 'po';
     const hours = parseFloat(row.total_hours) || 0;
     const description = row.description || '';
+    const isApproved = row.is_approved === true;
 
     if (!hoursByPOId.has(poKey)) hoursByPOId.set(poKey, new Map());
-    hoursByPOId.get(poKey).set(nodeKey, { hours, description });
+    hoursByPOId.get(poKey).set(nodeKey, { hours, description, is_approved: isApproved });
   }
   return hoursByPOId;
 };
@@ -1294,6 +1295,9 @@ const buildServicePOsForDate = (mappedPOs, hierarchyRowsByPOId, hoursByPOId) => 
       service_po_name: po.service_po_name,
       hours: round2(direct.hours),
       description: direct.description,
+      // Approved logs are locked (see assertNoApprovedLogForPOs / the monthly replace-save): the Employee
+      // screens read this to leave the row out of a save payload instead of triggering a 409.
+      is_approved: direct.is_approved === true,
       po_total_hrs: round2(sumHoursByMinute([direct.hours, hierarchyHours])),
       children,
     };
@@ -1394,10 +1398,12 @@ const collapseRowsAcrossDates = (rows) => {
     const key = `${row.service_po_id}|${row.hierarchy_node_id || ''}`;
     const hours = parseFloat(row.total_hours) || 0;
     if (!totals.has(key)) {
-      totals.set(key, { service_po_id: row.service_po_id, hierarchy_node_id: row.hierarchy_node_id, total_hours: 0, minutes: 0 });
+      totals.set(key, { service_po_id: row.service_po_id, hierarchy_node_id: row.hierarchy_node_id, total_hours: 0, minutes: 0, is_approved: false });
     }
     // Added in whole minutes (utils/hoursSum.js) so a month of 0.33h (20 min) entries adds up exactly.
     totals.get(key).minutes += toMinutes(hours);
+    // Approved on ANY of the collapsed dates = the node is approved (the lock is per PO, not per date).
+    if (row.is_approved === true) totals.get(key).is_approved = true;
   }
   return Array.from(totals.values()).map(({ minutes, ...rest }) => ({ ...rest, total_hours: minutes / 60 }));
 };

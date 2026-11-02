@@ -4,15 +4,29 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const managerEmployeeMappingRepository = require('../src/repositories/managerEmployeeMappingRepository');
+const employeeServicePOMappingRepository = require('../src/repositories/employeeServicePOMappingRepository');
 const { resolveEmployeeScope } = require('../src/services/timesheetApprovalReportService');
 const { timesheetApprovalStatusQuerySchema } = require('../src/validations/employeeReportValidation');
 
 // The caller (user 1, own employee 100) manages employees 12, 45 and 78.
 const originalFindByManager = managerEmployeeMappingRepository.findByManager;
-const stubTeam = () => {
+const originalPoTeam = employeeServicePOMappingRepository.findEmployeeIdsOnProjectManagerPOs;
+const stubTeam = (poTeam = []) => {
   managerEmployeeMappingRepository.findByManager = async () => ([12, 45, 78].map((employee_id) => ({ employee_id })));
+  employeeServicePOMappingRepository.findEmployeeIdsOnProjectManagerPOs = async () => poTeam;
 };
-const restore = () => { managerEmployeeMappingRepository.findByManager = originalFindByManager; };
+const restore = () => {
+  managerEmployeeMappingRepository.findByManager = originalFindByManager;
+  employeeServicePOMappingRepository.findEmployeeIdsOnProjectManagerPOs = originalPoTeam;
+};
+
+test('resolveEmployeeScope: a Project Manager also reaches employees on the Service POs they are PM of', async () => {
+  stubTeam([100, 201, 202]);
+  try {
+    assert.deepEqual(await resolveEmployeeScope(1, 100, undefined, 5), [12, 45, 78, 100, 201, 202]);
+    assert.deepEqual(await resolveEmployeeScope(1, 100, [201], 5), [201]);
+  } finally { restore(); }
+});
 
 test('resolveEmployeeScope: several requested ids inside the team are all returned', async () => {
   stubTeam();

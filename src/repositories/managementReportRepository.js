@@ -1523,7 +1523,9 @@ async function getPMWiseUtilization(filters) {
  * @returns {Promise<{ rows: object[], count: number }>}
  */
 async function getProjectWiseUtilization(filters) {
-  if (isEmptyCompanyScope(filters.companyIds)) {
+  // pmServicePoIds (array) = Project Manager mode: only the PM's own Service POs, no BU condition; null = other roles.
+  const pmMode = Array.isArray(filters.pmServicePoIds);
+  if (pmMode ? filters.pmServicePoIds.length === 0 : isEmptyCompanyScope(filters.companyIds)) {
     return {
       rows: [],
       count: 0,
@@ -1551,9 +1553,10 @@ async function getProjectWiseUtilization(filters) {
 
   const conditions = [
     'sp.is_deleted = false',
-    '(sp.company_id IN (:companyIds) OR ' + buLessServicePOInTenantSql('sp', 'companyIds') + ')',
+    pmMode ? 'sp.id IN (:pmServicePoIds)' : '(sp.company_id IN (:companyIds) OR ' + buLessServicePOInTenantSql('sp', 'companyIds') + ')',
     BILLABLE_ENTRY_FILTER_SQL,
   ];
+  if (pmMode) replacements.pmServicePoIds = filters.pmServicePoIds;
   if (search) {
     conditions.push('(c.client_name ILIKE :search OR p.project_name ILIKE :search OR sp.service_po_name ILIKE :search OR sp.service_po_code ILIKE :search)');
     replacements.search = `%${search}%`;

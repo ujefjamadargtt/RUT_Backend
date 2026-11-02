@@ -53,6 +53,16 @@ function buildWhere(f) {
     conditions.push('wl.employee_id IN (:employeeIds)');
     replacements.employeeIds = f.employeeIds;
   }
+  // Project Manager scope (PO-wise): employees actively mapped to one of the PM's own Service POs, limited to
+  // their entries on those POs plus on Centralised POs (Leave / Bench / ...). Other roles never set pmServicePoIds.
+  if (f.pmServicePoIds && f.pmServicePoIds.length) {
+    conditions.push(`wl.employee_id IN (
+      SELECT pm_m.employee_id FROM employee_servicepo_mapping pm_m
+      WHERE pm_m.service_po_id IN (:pmServicePoIds) AND pm_m.status = 'active'
+    )`);
+    conditions.push('(wl.service_po_id IN (:pmServicePoIds) OR sp.is_centralised = true)');
+    replacements.pmServicePoIds = f.pmServicePoIds;
+  }
 
   if (f.filterEmployeeIds && f.filterEmployeeIds.length) {
     conditions.push('wl.employee_id IN (:filterEmployeeIds)');

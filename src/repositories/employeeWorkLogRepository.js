@@ -373,6 +373,9 @@ const getDailyHierarchyBreakdown = async ({ employeeId, date, companyId }) => {
       // more than one row — MAX is just how Postgres allows a non-aggregated
       // column to sit alongside a SUM without also adding it to GROUP BY.
       [fn('MAX', col('description')), 'description'],
+      // true when this (po, node[, date]) holds an approved log — the Employee screens lock such a PO
+      // (approved rows are never replaced by a save), so they need to know which rows to leave out of a payload.
+      [literal(`BOOL_OR("status" = 'approved')`), 'is_approved'],
     ],
     where: {
       work_date: date,
@@ -411,6 +414,9 @@ const getMonthlyHierarchyBreakdown = async ({ employeeId, month, year, companyId
       // (employee, service_po, hierarchy_node, work_date) is already unique,
       // so grouping by date too never actually collapses more than one row.
       [fn('MAX', col('description')), 'description'],
+      // true when this (po, node[, date]) holds an approved log — the Employee screens lock such a PO
+      // (approved rows are never replaced by a save), so they need to know which rows to leave out of a payload.
+      [literal(`BOOL_OR("status" = 'approved')`), 'is_approved'],
     ],
     where: {
       [Op.and]: [
@@ -461,6 +467,9 @@ const getHierarchyBreakdownForRange = async ({ employeeId, startDate, endDate })
       // real Monthly Work Log submission), where exactly one row exists per
       // node for the whole range.
       [fn('MAX', col('description')), 'description'],
+      // true when this (po, node[, date]) holds an approved log — the Employee screens lock such a PO
+      // (approved rows are never replaced by a save), so they need to know which rows to leave out of a payload.
+      [literal(`BOOL_OR("status" = 'approved')`), 'is_approved'],
     ],
     where: {
       employee_id: parseInt(employeeId, 10),

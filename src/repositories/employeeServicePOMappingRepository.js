@@ -399,6 +399,42 @@ const findByServicePOs = async (servicePoIds, status, options = {}) => {
 };
 
 /**
+ * Every Employee actively mapped to ANY non-Centralised Service PO the given
+ * Project Manager is flagged (is_project_manager = true) on - the PM's
+ * "everyone on my projects" roster, the PO-based counterpart of the
+ * manager_employee_mappings/team_mappings team rule. Includes the PM themself
+ * (they are mapped to those POs too). Centralised POs (Leaves, On Bench, ...)
+ * are auto-mapped to every Employee, so they are excluded or the roster would
+ * be the whole company. Three plain id queries, no joins/includes.
+ *
+ * @param {number|null} pmEmployeeId
+ * @returns {Promise<number[]>}
+ */
+const findEmployeeIdsOnProjectManagerPOs = async (pmEmployeeId) => {
+  if (!pmEmployeeId) return [];
+  const pmRows = await EmployeeServicePOMapping.findAll({
+    where: { employee_id: pmEmployeeId, status: 'active', is_project_manager: true },
+    attributes: ['service_po_id'],
+    raw: true,
+  });
+  if (pmRows.length === 0) return [];
+
+  const pos = await ServicePO.findAll({
+    where: { id: { [Op.in]: pmRows.map((r) => r.service_po_id) }, is_centralised: false, is_deleted: false },
+    attributes: ['id'],
+    raw: true,
+  });
+  if (pos.length === 0) return [];
+
+  const rows = await EmployeeServicePOMapping.findAll({
+    where: { service_po_id: { [Op.in]: pos.map((p) => p.id) }, status: 'active' },
+    attributes: ['employee_id'],
+    raw: true,
+  });
+  return [...new Set(rows.map((r) => r.employee_id))];
+};
+
+/**
  * Find every mapping row (any status) for one Employee, narrowed to a
  * specific set of Service PO ids — the diff-sync base query for
  * employeeServicePOMappingService.saveEmployeeServicePOMappings(). Callers
@@ -470,6 +506,7 @@ module.exports = {
   findAllByEmployeeWithProject,
   findByServicePO,
   findByServicePOs,
+  findEmployeeIdsOnProjectManagerPOs,
   findByEmployeeAndPOIds,
   bulkUpdateStatus,
   moveServicePOToCompany,

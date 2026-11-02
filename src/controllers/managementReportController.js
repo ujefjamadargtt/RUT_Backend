@@ -14,13 +14,16 @@ const { monthFillHex } = require('../utils/monthColors');
  * managementReport.routes.js. All are GET-only endpoints.
  */
 
-function buildHandler(name, serviceFn, { useReq = false } = {}) {
+function buildHandler(name, serviceFn, { useReq = false, withAuth = false } = {}) {
   return async function handler(req, res, next) {
     try {
       const filters = { ...req.body, ...req.query };
+      // withAuth: also hand the service the caller's identity (e.g. for a Project Manager's PO-wise scope).
       const result = useReq
         ? await serviceFn(filters, req)
-        : await serviceFn(filters, req.companyIds);
+        : await serviceFn(filters, req.companyIds, withAuth
+          ? { employeeId: req.employeeId, hierarchyRank: req.hierarchyRank }
+          : undefined);
       const { data, meta, ...rest } = result;
       return sendPaginated(res, { records: data, ...rest }, meta, `${name} fetched successfully.`);
     } catch (err) {
@@ -43,7 +46,7 @@ const getServicePOTimelineRisk = buildHandler('Service PO Budget & Timeline Risk
 const getDeliveryHeadPerformance = buildHandler('Delivery Head Performance report', managementReportService.getDeliveryHeadPerformance);
 const getInvoiceRealizationTrend = buildHandler('Invoice Realization / Billing Efficiency report', managementReportService.getInvoiceRealizationTrend);
 const getPMWiseUtilization = buildHandler('Project Manager-wise Utilization report', managementReportService.getPMWiseUtilization);
-const getProjectWiseUtilization = buildHandler('Project-wise Utilization report', managementReportService.getProjectWiseUtilization);
+const getProjectWiseUtilization = buildHandler('Project-wise Utilization report', managementReportService.getProjectWiseUtilization, { withAuth: true });
 const getResourceWiseBench = buildHandler('Resource-wise Bench % report', managementReportService.getResourceWiseBench);
 const getResourceCostUtilization = buildHandler('Resource Cost / Utilization report', managementReportService.getResourceCostUtilization);
 

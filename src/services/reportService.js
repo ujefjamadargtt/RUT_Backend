@@ -9,6 +9,19 @@ const dateHelper = require('../helpers/dateHelper');
 const { resolveCentralisedOwnerCreatorIds, intersectCompanyIdsWithEntity, intersectIdsWithBuHierarchy } = require('./companyAccessControlService');
 const { parseIdList } = require('../utils/idListParser');
 
+const PROJECT_MANAGER_RANK = 6;
+
+/**
+ * Service POs a Project Manager (rank 6) is the flagged PM of, or null for any
+ * other role (= keep the BU/employee scope). Lazy require — avoids a load-order
+ * cycle with the mapping service.
+ */
+async function resolvePmServicePoIds(authContext = {}) {
+  if (authContext.hierarchyRank !== PROJECT_MANAGER_RANK || !authContext.employeeId) return null;
+  // eslint-disable-next-line global-require
+  return require('./employeeServicePOMappingService').getProjectManagerServicePOIds(authContext.employeeId);
+}
+
 /**
  * Report Service
  * Orchestrates repo calls, applies pagination, and shapes response data.
@@ -512,10 +525,11 @@ function buildPivotResponse(rawColumns, rawRows, count, page, limit, fullDataset
  * @param {object} query - req.query
  * @returns {Promise<{ data: object[], meta: object }>}
  */
-async function getResourceAllocation(query, companyIds) {
+async function getResourceAllocation(query, companyIds, authContext = {}) {
   const { page, limit, offset } = getPaginationParams(query);
   const filters = parseCommonFilters(query);
   companyIds = await applyEntityBuFilters(companyIds, filters);
+  const pmServicePoIds = await resolvePmServicePoIds(authContext);
 
   const isBillable = query.isBillable !== undefined
     ? query.isBillable === 'true' || query.isBillable === true
@@ -544,6 +558,7 @@ async function getResourceAllocation(query, companyIds) {
     hoursSource: filters.hoursSource,
     roleId: filters.roleId,
     companyIds,
+    pmServicePoIds,
   });
 
   const meta = getPaginationMeta(count, page, limit);
@@ -897,9 +912,10 @@ async function getInvoicePOSummary(query, companyIds) {
  * @param {object} query - req.query (month, year required)
  * @returns {Promise<{ columns, data, meta, summary }>}
  */
-async function getResourceUtilization(query, companyIds) {
+async function getResourceUtilization(query, companyIds, authContext = {}) {
   const filters = parseCommonFilters(query);
   companyIds = await applyEntityBuFilters(companyIds, filters);
+  const pmServicePoIds = await resolvePmServicePoIds(authContext);
 
   if (!filters.month || !filters.year) {
     const err = new Error('month and year query parameters are required for this report.');
@@ -926,6 +942,7 @@ async function getResourceUtilization(query, companyIds) {
     hoursSource: filters.hoursSource,
     roleId: filters.roleId,
     companyIds,
+    pmServicePoIds,
   });
 
   return buildPivotResponse(rawColumns, rawRows, count, page, limit);
@@ -942,9 +959,11 @@ async function getResourceUtilization(query, companyIds) {
  * @param {object} query - req.query (month, year required)
  * @returns {Promise<{ columns, data, meta, summary }>}
  */
-async function getMonthlyResourceUtilization(query, companyIds) {
+async function getMonthlyResourceUtilization(query, companyIds, authContext = {}) {
   const filters = parseCommonFilters(query);
   companyIds = await applyEntityBuFilters(companyIds, filters);
+  // Project Manager: scoped by their own Service POs, not the employees' BU.
+  const pmServicePoIds = await resolvePmServicePoIds(authContext);
 
   if (!filters.month || !filters.year) {
     const err = new Error('month and year query parameters are required for this report.');
@@ -959,7 +978,10 @@ async function getMonthlyResourceUtilization(query, companyIds) {
 
   const { page, limit, offset } = getPaginationParams(query);
 
-  logger.info('Report: getMonthlyResourceUtilization', { filters, page, limit });
+  logger.info('Report: getMonthlyResourceUtilization', {
+    filters, page, limit,
+    hierarchyRank: authContext.hierarchyRank, employeeId: authContext.employeeId, pmServicePoIds,
+  });
 
   const { columns: rawColumns, rows: rawRows, count, summary } = await reportRepo.getMonthlyResourceUtilization({
     month:      filters.month,
@@ -971,6 +993,7 @@ async function getMonthlyResourceUtilization(query, companyIds) {
     hoursSource: filters.hoursSource,
     roleId: filters.roleId,
     companyIds,
+    pmServicePoIds,
   });
 
   return buildPivotResponse(rawColumns, rawRows, count, page, limit, summary);
@@ -1001,9 +1024,15 @@ async function getMonthlyResourceUtilization(query, companyIds) {
  * @param {object} query - req.query (month, year required)
  * @returns {Promise<{ data, meta, summary, month, year }>}
  */
-async function getResourceMonthlyUtilizationReport(query, companyIds) {
+async function getResourceMonthlyUtilizationReport(query, companyIds, authContext = {}) {
   const filters = parseCommonFilters(query);
   companyIds = await applyEntityBuFilters(companyIds, filters);
+
+  // A Project Manager (rank 6) sees THEIR projects only: the report is scoped by
+  // the Service POs they are the flagged PM of (employee_servicepo_mappings.
+  // is_project_manager), not by the employees' BU — same rule as the PM
+  // Dashboard / Project Timesheet report. Other roles keep the BU scope.
+  const pmServicePoIds = await resolvePmServicePoIds(authContext);
 
   if (!filters.month || !filters.year) {
     const err = new Error('month and year query parameters are required for this report.');
@@ -1029,6 +1058,7 @@ async function getResourceMonthlyUtilizationReport(query, companyIds) {
 
   logger.info('Report: getResourceMonthlyUtilizationReport', {
     filters, page, limit, clientId, poId, serviceTypeId,
+    hierarchyRank: authContext.hierarchyRank, employeeId: authContext.employeeId, pmServicePoIds,
   });
 
   const { columns: rawColumns, rows: rawRows, count, summary: fullDatasetSummary } = await reportRepo.getResourceMonthlyUtilization({
@@ -1044,6 +1074,7 @@ async function getResourceMonthlyUtilizationReport(query, companyIds) {
     hoursSource: filters.hoursSource,
     roleId: filters.roleId,
     companyIds,
+    pmServicePoIds,
   });
 
   // fullDatasetSummary (from the repo's own unpaginated summary query) makes
@@ -1110,8 +1141,9 @@ async function getResourceMonthlyUtilizationReport(query, companyIds) {
   return { data, meta, summary, month: filters.month, year: filters.year };
 }
 
-async function getResourseProjectUtilizationReport(query, companyIds) {
+async function getResourseProjectUtilizationReport(query, companyIds, authContext = {}) {
   const { page, limit, offset } = getPaginationParams(query);
+  const pmServicePoIds = await resolvePmServicePoIds(authContext);
 
   const now = new Date();
   const month = query.month ? parseInt(query.month, 10) : now.getMonth() + 1;
@@ -1167,6 +1199,7 @@ async function getResourseProjectUtilizationReport(query, companyIds) {
     hoursSource: query.hoursSource,
     roleId: query.roleId,
     companyIds,
+    pmServicePoIds,
   };
 
   logger.info('Report: getResourseProjectUtilizationReport', {

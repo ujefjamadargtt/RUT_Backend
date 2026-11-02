@@ -124,7 +124,9 @@ const getProjectHoursFilterTree = async (req, res, next) => {
  */
 const getTimesheetApprovalStatus = async (req, res, next) => {
   try {
-    const result = await timesheetApprovalReportService.getReport(req.userId, req.employeeId, req.companyId, req.query);
+    const result = await timesheetApprovalReportService.getReport(
+      req.userId, req.employeeId, req.companyId, req.query, { hierarchyRank: req.hierarchyRank }
+    );
     return sendSuccess(res, result, 'Timesheet approval status report fetched successfully.');
   } catch (err) {
     if (err.statusCode) return sendError(res, err.message, err.statusCode);

@@ -75,6 +75,17 @@ const TIMESHEET_EMPLOYEE_IN_SCOPE_SQL = `EXISTS (
     )
 )`;
 
+// Project Manager (rank 6) timesheet scope (aliases `t`, `sp`; needs :pmServicePoIds): PO-wise, never BU-wise.
+// The employees actively mapped to a Service PO the caller is the flagged PM of, limited to the hours they
+// booked on those POs plus on Centralised POs (Leave / Bench / Training ...) — their other projects stay hidden.
+const PM_TIMESHEET_SCOPE_SQL = `(
+  t.employee_id IN (
+    SELECT pm_m.employee_id FROM employee_servicepo_mapping pm_m
+    WHERE pm_m.service_po_id IN (:pmServicePoIds) AND pm_m.status = 'active'
+  )
+  AND (sp.id IN (:pmServicePoIds) OR sp.is_centralised = true)
+)`;
+
 // SPO-wise timesheet scope (aliases `t`, `sp`; needs :companyIds): the Service PO is the scope's own (or one of the
 // tenant's BU-less Centralised POs) and, for a Centralised PO, only the scope's own BU's timesheets count.
 const TIMESHEET_SERVICE_PO_IN_SCOPE_SQL =
@@ -799,7 +810,9 @@ async function getSubProjectHours(filters) {
  * @returns {{ rows: object[], count: number }}
  */
 async function getResourceAllocation(filters) {
-  if (isEmptyCompanyScope(filters.companyIds)) {
+  // pmServicePoIds (array) = Project Manager mode — PO-wise scope (PM_TIMESHEET_SCOPE_SQL); null = every other role.
+  const pmMode = Array.isArray(filters.pmServicePoIds);
+  if (pmMode ? filters.pmServicePoIds.length === 0 : isEmptyCompanyScope(filters.companyIds)) {
     return { rows: [], count: 0 };
   }
 
@@ -837,7 +850,13 @@ async function getResourceAllocation(filters) {
   const safeOrder = sortOrder.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
 
   const replacements = { limit, offset, companyIds: filters.companyIds };
-  const conditions = ["e.status = 'active'", EMPLOYEE_COMPANY_SCOPE_SQL_MULTI];
+  const conditions = ["e.status = 'active'"];
+  if (pmMode) {
+    conditions.push(PM_TIMESHEET_SCOPE_SQL);
+    replacements.pmServicePoIds = filters.pmServicePoIds;
+  } else {
+    conditions.push(EMPLOYEE_COMPANY_SCOPE_SQL_MULTI);
+  }
 
   if (employeeId) {
     conditions.push('e.id IN (:employeeId)');
@@ -1822,6 +1841,10 @@ async function getInvoicePOSummary(filters) {
  * @returns {{ columns: object[], rows: object[], count: number }}
  */
 async function getResourceUtilization(filters) {
+  // pmServicePoIds (array) = Project Manager mode — PO-wise scope (PM_TIMESHEET_SCOPE_SQL); null = every other role.
+  const pmMode = Array.isArray(filters.pmServicePoIds);
+  if (pmMode && filters.pmServicePoIds.length === 0) return { columns: [], rows: [], count: 0 };
+  const scopeSql = pmMode ? PM_TIMESHEET_SCOPE_SQL : TIMESHEET_EMPLOYEE_IN_SCOPE_SQL;
   const { month, year, employeeId, search, limit, offset, hoursSource, roleId } = filters;
   // hoursSource = 'O' -> original hours_logged. Anything else/default
   // (including no roleId, or roleId != 5) -> modified_hours. roleId plays no
@@ -1836,6 +1859,7 @@ async function getResourceUtilization(filters) {
     limit,
     offset,
     companyIds: filters.companyIds,
+    ...(pmMode ? { pmServicePoIds: filters.pmServicePoIds } : {}),
   };
 
   const empConditions = [];
@@ -1869,7 +1893,7 @@ async function getResourceUtilization(filters) {
     JOIN service_categories sc ON sc.id  = st.service_category_id AND sc.is_deleted = false
     WHERE EXTRACT(MONTH FROM t.timesheet_date) = :month
       AND EXTRACT(YEAR  FROM t.timesheet_date) = :year
-      AND ${TIMESHEET_EMPLOYEE_IN_SCOPE_SQL}
+      AND ${scopeSql}
       ${publishGuard}
     ORDER BY sc.name, st.service_type_name
   `;
@@ -1884,7 +1908,7 @@ async function getResourceUtilization(filters) {
     JOIN service_categories sc ON sc.id = st.service_category_id AND sc.is_deleted = false
     WHERE EXTRACT(MONTH FROM t.timesheet_date) = :month
       AND EXTRACT(YEAR  FROM t.timesheet_date) = :year
-      AND ${TIMESHEET_EMPLOYEE_IN_SCOPE_SQL}
+      AND ${scopeSql}
       ${empFilter}
       ${publishGuard}
   `;
@@ -1900,7 +1924,7 @@ async function getResourceUtilization(filters) {
       JOIN service_categories sc ON sc.id = st.service_category_id AND sc.is_deleted = false
       WHERE EXTRACT(MONTH FROM t.timesheet_date) = :month
         AND EXTRACT(YEAR  FROM t.timesheet_date) = :year
-        AND ${TIMESHEET_EMPLOYEE_IN_SCOPE_SQL}
+        AND ${scopeSql}
         ${empFilter}
         ${publishGuard}
       ORDER BY e.full_name
@@ -1925,7 +1949,7 @@ async function getResourceUtilization(filters) {
     JOIN emp_page ep           ON ep.employee_id = e.id
     WHERE EXTRACT(MONTH FROM t.timesheet_date) = :month
       AND EXTRACT(YEAR  FROM t.timesheet_date) = :year
-      AND ${TIMESHEET_EMPLOYEE_IN_SCOPE_SQL}
+      AND ${scopeSql}
       ${publishGuard}
     GROUP BY e.id, e.employee_code, e.full_name, e.designation, st.id, st.service_type_name, sc.id, sc.name
     ORDER BY e.full_name, sc.name, st.service_type_name
@@ -1960,7 +1984,10 @@ async function getResourceUtilization(filters) {
  * @returns {{ columns: object[], rows: object[], count: number }}
  */
 async function getMonthlyResourceUtilization(filters) {
-  if (isEmptyCompanyScope(filters.companyIds)) {
+  // pmServicePoIds (array) = Project Manager mode: scope is the PM's own Service
+  // POs instead of the employees' BU. null/undefined = every other role.
+  const pmMode = Array.isArray(filters.pmServicePoIds);
+  if (pmMode ? filters.pmServicePoIds.length === 0 : isEmptyCompanyScope(filters.companyIds)) {
     return {
       columns: [],
       rows: [],
@@ -1989,13 +2016,18 @@ async function getMonthlyResourceUtilization(filters) {
   const conditions = [
     "EXTRACT(MONTH FROM t.timesheet_date) = :month",
     "EXTRACT(YEAR  FROM t.timesheet_date) = :year",
-    TIMESHEET_EMPLOYEE_IN_SCOPE_SQL,
     "e.is_deleted = false",
     "e.status = 'active'",
     "sp.is_deleted = false",
     "st.is_deleted = false",
     "sc.is_deleted = false",
   ];
+  if (pmMode) {
+    conditions.push(PM_TIMESHEET_SCOPE_SQL);
+    replacements.pmServicePoIds = filters.pmServicePoIds;
+  } else {
+    conditions.push(TIMESHEET_EMPLOYEE_IN_SCOPE_SQL);
+  }
 
   if (employeeId) {
     conditions.push('e.id IN (:employeeId)');
@@ -2079,6 +2111,7 @@ async function getMonthlyResourceUtilization(filters) {
         AND EXTRACT(MONTH FROM t.timesheet_date) = :month
         AND EXTRACT(YEAR  FROM t.timesheet_date) = :year
         AND t.hours_logged > 0
+        ${pmMode ? 'AND (sp.id IN (:pmServicePoIds) OR sp.is_centralised = true)' : ''}
         ${publishGuard ? `AND ${publishGuard}` : ''}
       GROUP BY t.employee_id
     )
@@ -2177,7 +2210,18 @@ async function getMonthlyResourceUtilization(filters) {
  * @returns {{ columns: object[], rows: object[], count: number }}
  */
 async function getResourceMonthlyUtilization(filters) {
-  if (isEmptyCompanyScope(filters.companyIds)) {
+  // pmServicePoIds (array) = Project Manager mode: scope is the PM's own Service
+  // POs instead of the employees' BU. null/undefined = every other role.
+  const pmMode = Array.isArray(filters.pmServicePoIds);
+  if (pmMode && filters.pmServicePoIds.length === 0) {
+    return {
+      columns: [],
+      rows: [],
+      count: 0,
+      summary: { billable_total: 0, non_billable_total: 0, total_hours: 0, leaves_hours: 0, total_utilization: 0, original_billable_total: 0, original_non_billable_total: 0, original_total_hours: 0, original_leaves_hours: 0, original_total_utilization: 0, employee_count: 0 },
+    };
+  }
+  if (!pmMode && isEmptyCompanyScope(filters.companyIds)) {
     return {
       columns: [],
       rows: [],
@@ -2209,13 +2253,18 @@ async function getResourceMonthlyUtilization(filters) {
   const conditions = [
     "EXTRACT(MONTH FROM t.timesheet_date) = :month",
     "EXTRACT(YEAR  FROM t.timesheet_date) = :year",
-    TIMESHEET_EMPLOYEE_IN_SCOPE_SQL,
     "e.is_deleted = false",
     "e.status = 'active'",
     "sp.is_deleted = false",
     "st.is_deleted = false",
     "sc.is_deleted = false",
   ];
+  if (pmMode) {
+    conditions.push(PM_TIMESHEET_SCOPE_SQL);
+    replacements.pmServicePoIds = filters.pmServicePoIds;
+  } else {
+    conditions.push(TIMESHEET_EMPLOYEE_IN_SCOPE_SQL);
+  }
 
   if (employeeId) {
     conditions.push('e.id IN (:employeeId)');
@@ -2387,6 +2436,9 @@ async function getResourseProjectUtilizationReport(filters) {
     hoursSource,
     roleId,
   } = filters;
+  // pmServicePoIds (array) = Project Manager mode — PO-wise scope (PM_TIMESHEET_SCOPE_SQL); null = every other role.
+  const pmMode = Array.isArray(filters.pmServicePoIds);
+  if (pmMode && filters.pmServicePoIds.length === 0) return { rows: [], costs: [], count: 0 };
   // hoursSource = 'O' -> original hours_logged. Anything else/default
   // (including no roleId, or roleId != 5) -> modified_hours. roleId plays no
   // part in this selection — only hoursSource does.
@@ -2394,7 +2446,7 @@ async function getResourseProjectUtilizationReport(filters) {
     ? 'COALESCE(t.original_hours, t.hours_logged)'
     : 'COALESCE(t.modified_hours, t.hours_logged)';
 
-  const monthYear = `${year}-${String(month).padStart(2, '0')}`;
+  const monthYear =`${year}-${String(month).padStart(2, '0')}`;
 
   const replacements = {
     month,
@@ -2408,6 +2460,7 @@ async function getResourseProjectUtilizationReport(filters) {
     projectType: projectType || null,
     categoryId: categoryId || null,
     category: category || null,
+    ...(pmMode ? { pmServicePoIds: filters.pmServicePoIds } : {}),
     subProjectId: subProjectId || null,
     projectSubType: projectSubType || null,
     limit,
@@ -2480,7 +2533,7 @@ async function getResourseProjectUtilizationReport(filters) {
   const monthYearBlock = `
     AND EXTRACT(MONTH FROM t.timesheet_date) = :month
     AND EXTRACT(YEAR FROM t.timesheet_date) = :year
-    AND ${TIMESHEET_EMPLOYEE_IN_SCOPE_SQL}
+    AND ${pmMode ? PM_TIMESHEET_SCOPE_SQL : TIMESHEET_EMPLOYEE_IN_SCOPE_SQL}
     ${publishGuard}
   `;
 

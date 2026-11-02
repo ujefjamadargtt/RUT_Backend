@@ -14,7 +14,12 @@ const { Entity, Company } = require('../src/models');
 const employeeRepository = require('../src/repositories/employeeRepository');
 const managerEmployeeMappingRepository = require('../src/repositories/managerEmployeeMappingRepository');
 const teamMappingRepository = require('../src/repositories/teamMappingRepository');
+const employeeServicePOMappingRepository = require('../src/repositories/employeeServicePOMappingRepository');
 const { resolveEmployeeAccessWhere } = require('../src/services/employeeAccessControlService');
+
+// Employees on the Service POs the caller is flagged Project Manager of — empty unless a test sets it.
+let poTeamEmployeeIds = [];
+employeeServicePOMappingRepository.findEmployeeIdsOnProjectManagerPOs = async () => poTeamEmployeeIds;
 
 const ORIGINAL = {
   entityFindAll: Entity.findAll,
@@ -37,6 +42,7 @@ function stubEmployeeScopeAsLegacyOnly() {
 }
 
 function restore() {
+  poTeamEmployeeIds = [];
   Entity.findAll = ORIGINAL.entityFindAll;
   Company.findAll = ORIGINAL.companyFindAll;
   employeeRepository.employeeScope = ORIGINAL.employeeScope;
@@ -273,6 +279,37 @@ test('Project Manager (renamed from Service PO Admin) scope includes every Emplo
 
   const opIn = Object.getOwnPropertySymbols(where.id)[0];
   assert.deepEqual([...where.id[opIn]].sort((a, b) => a - b), [414, 428, 433]);
+  restore();
+});
+
+test('Project Manager of a Service PO also sees every Employee mapped to that PO, even with no manager/team mapping to them', async () => {
+  stubEmployeeScopeAsLegacyOnly();
+  stubNoMappings();
+  poTeamEmployeeIds = [414, 501, 502]; // the PM themself (414) + two employees staffed on their PO
+
+  const where = await resolveEmployeeAccessWhere({
+    userId: 52, employeeId: 414, companyId: 46, hierarchyRank: 6, roleNames: ['Project Manager'],
+  });
+
+  const opIn = Object.getOwnPropertySymbols(where.id)[0];
+  assert.deepEqual([...where.id[opIn]].sort((a, b) => a - b), [414, 501, 502]);
+  assert.equal(where.company_id, 46);
+  restore();
+});
+
+test('Project Manager PO roster is unioned with the manager and team_mappings rosters, not a replacement', async () => {
+  stubEmployeeScopeAsLegacyOnly();
+  managerEmployeeMappingRepository.findByManager = async () => [{ employee_id: 450 }];
+  managerEmployeeMappingRepository.findByManagerEmployeeIds = async () => [];
+  teamMappingRepository.findByServicePOAdmin = async () => [];
+  poTeamEmployeeIds = [501];
+
+  const where = await resolveEmployeeAccessWhere({
+    userId: 52, employeeId: 414, companyId: 46, hierarchyRank: 6, roleNames: ['Project Manager'],
+  });
+
+  const opIn = Object.getOwnPropertySymbols(where.id)[0];
+  assert.deepEqual([...where.id[opIn]].sort((a, b) => a - b), [414, 450, 501]);
   restore();
 });
 

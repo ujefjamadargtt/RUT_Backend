@@ -5,6 +5,7 @@ const companyAccessControlService = require('./companyAccessControlService');
 const managerEmployeeMappingRepository = require('../repositories/managerEmployeeMappingRepository');
 const teamMappingRepository = require('../repositories/teamMappingRepository');
 const employeeRepository = require('../repositories/employeeRepository');
+const employeeServicePOMappingRepository = require('../repositories/employeeServicePOMappingRepository');
 
 /**
  * True for any "BU Admin peer" role — hierarchy_rank NULL, capability/form
@@ -214,6 +215,11 @@ const resolveEmployeeAccessWhere = async ({ userId, employeeId, companyId, hiera
     teamMappingRepository.findByServicePOAdmin(employeeId, companyId),
   ]);
   managedDirectly.forEach((m) => employeeIds.add(m.employee_id));
+
+  // Project Manager of a Service PO: everyone mapped to the POs they are flagged PM on is on
+  // their team too, even without a Primary/Secondary Manager mapping to them.
+  (await employeeServicePOMappingRepository.findEmployeeIdsOnProjectManagerPOs(employeeId))
+    .forEach((id) => employeeIds.add(id));
 
   if (spaTeam.length > 0) {
     const managerEmployeeIds = spaTeam.map((t) => t.manager_employee_id);

@@ -62,16 +62,19 @@ async function buildFilters(query, authContext, companyIds) {
   const { startDate, endDate, period } = resolvePeriod(query);
   let employeeIds;
   let servicePoIds = parseIdList(query.service_po_ids);
+  let pmServicePoIds;
 
   if (authContext.hierarchyRank === PROJECT_MANAGER_RANK) {
-    // A Project Manager reviews THEIR projects: every entry on a Service PO
-    // they are the flagged Project Manager of (plus those employees' leave,
-    // via include_leave) — the same Service-PO-based scope Timesheet Approval
-    // uses for this role (employeeServicePOMappingService.
-    // getProjectManagerServicePOIds), not the Employee-Master team rule.
-    const pmServicePoIds = await employeeServicePOMappingService.getProjectManagerServicePOIds(authContext.employeeId);
-    servicePoIds = servicePoIds ? servicePoIds.filter((id) => pmServicePoIds.includes(id)) : pmServicePoIds;
-    employeeIds = servicePoIds.length ? null : [];
+    // A Project Manager reviews THEIR projects, PO-wise (never BU-wise): the
+    // employees mapped to a Service PO they are the flagged Project Manager of
+    // (employeeServicePOMappingService.getProjectManagerServicePOIds), with their
+    // entries on those POs plus on Centralised POs (Leave / Bench / ...) — the
+    // same rule the PM-scoped utilization reports use. A user-picked Service PO
+    // only narrows within the PM's own POs.
+    pmServicePoIds = await employeeServicePOMappingService.getProjectManagerServicePOIds(authContext.employeeId);
+    const requested = servicePoIds;
+    servicePoIds = requested ? requested.filter((id) => pmServicePoIds.includes(id)) : null;
+    employeeIds = (pmServicePoIds.length === 0 || (requested && servicePoIds.length === 0)) ? [] : null;
   } else {
     const scopedCompanyIds = await applyEntityBuFilters(companyIds || [], query);
     employeeIds = await resolveAuthorizedEmployeeIds(authContext, scopedCompanyIds);
@@ -85,6 +88,7 @@ async function buildFilters(query, authContext, companyIds) {
       endDate,
       projectIds: parseIdList(query.project_ids),
       servicePoIds,
+      pmServicePoIds,
       clientIds: parseIdList(query.client_ids),
       filterEmployeeIds: parseIdList(query.employee_ids),
       statuses: resolveApprovalStatuses(query.approval_status),

@@ -130,6 +130,7 @@ const toHierarchyTreeWithHours = (rows, dataByNodeId) => {
         type: row.node_type,
         hours: round2(data.hours || 0),
         description: data.description || '',
+        is_approved: data.is_approved === true,
         children: [],
       };
       nodeById.set(String(row.id), node);
@@ -145,6 +146,7 @@ const toHierarchyTreeWithHours = (rows, dataByNodeId) => {
         type: row.node_type,
         hours: round2(data.hours || 0),
         description: data.description || '',
+        is_approved: data.is_approved === true,
       };
       const parentNode = nodeById.get(String(row.parent_hierarchy_id));
       // A CHILD whose PARENT is missing (shouldn't happen — FK-enforced —

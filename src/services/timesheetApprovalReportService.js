@@ -2,6 +2,7 @@
 
 const { Employee, ServicePO, Project } = require('../models');
 const managerEmployeeMappingRepository = require('../repositories/managerEmployeeMappingRepository');
+const employeeServicePOMappingRepository = require('../repositories/employeeServicePOMappingRepository');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
 const servicePOHierarchyRepository = require('../repositories/servicePOHierarchyRepository');
 const dateHelper = require('../helpers/dateHelper');
@@ -105,6 +106,8 @@ function resolvePeriod(query) {
   };
 }
 
+const PROJECT_MANAGER_RANK = 6;
+
 /**
  * Employee scope — data-driven, not role-name-driven (same principle
  * assertOwnEmployee() already uses elsewhere): whoever is calling gets the
@@ -127,7 +130,9 @@ function resolvePeriod(query) {
  */
 async function resolveEmployeeScope(userId, ownEmployeeId, requestedEmployeeIds, companyId) {
   const managedMappings = await managerEmployeeMappingRepository.findByManager(userId, companyId);
-  const managedEmployeeIds = managedMappings.map((m) => m.employee_id);
+  // A Project Manager's team also includes everyone on the Service POs they are flagged PM of.
+  const poTeamEmployeeIds = await employeeServicePOMappingRepository.findEmployeeIdsOnProjectManagerPOs(ownEmployeeId);
+  const managedEmployeeIds = [...new Set([...managedMappings.map((m) => m.employee_id), ...poTeamEmployeeIds])];
 
   const scopeEmployeeIds = ownEmployeeId && !managedEmployeeIds.includes(ownEmployeeId)
     ? [...managedEmployeeIds, ownEmployeeId]
@@ -265,7 +270,7 @@ function buildHierarchyTreeWithStatus(hierarchyRows, nodeDataByKey) {
  * @param {object} query - { employee_ids? (comma-separated), employee_id?, date?, month?, year?, startDate?, endDate?, log_type? }
  * @returns {Promise<{ data: object[] }>}
  */
-const getReport = async (userId, ownEmployeeId, companyId, query) => {
+const getReport = async (userId, ownEmployeeId, companyId, query, authContext = {}) => {
   const { startDate, endDate, logType } = resolvePeriod(query);
   // employee_ids (comma-separated, several employees) wins over the legacy single employee_id; with
   // neither, every employee in the caller's scope is returned.
@@ -275,9 +280,23 @@ const getReport = async (userId, ownEmployeeId, companyId, query) => {
 
   const employeeIds = await resolveEmployeeScope(userId, ownEmployeeId, requestedEmployeeIds, companyId);
 
-  const rows = await employeeWorkLogRepository.findForApprovalSummaryByEmployees({
+  let rows = await employeeWorkLogRepository.findForApprovalSummaryByEmployees({
     employeeIds, startDate, endDate,
   });
+
+  // A Project Manager (rank 6) is scoped PO-wise: for their team members only the entries on the Service POs
+  // they are the flagged PM of, plus Centralised POs (Leave / Bench / ...), are shown — never the same
+  // employees' other projects. Their own entries stay whole. Every other role keeps the full employee view.
+  if (authContext.hierarchyRank === PROJECT_MANAGER_RANK && ownEmployeeId) {
+    // Lazy requires — avoid load-order cycles with the mapping service.
+    // eslint-disable-next-line global-require
+    const pmPoIds = new Set(await require('./employeeServicePOMappingService').getProjectManagerServicePOIds(ownEmployeeId));
+    // eslint-disable-next-line global-require
+    const centralisedIds = new Set(await require('../repositories/servicePORepository')
+      .findCentralisedIdsAmong([...new Set(rows.map((r) => r.service_po_id))]));
+    rows = rows.filter((r) => r.employee_id === ownEmployeeId
+      || pmPoIds.has(r.service_po_id) || centralisedIds.has(r.service_po_id));
+  }
 
   if (rows.length === 0) {
     return { data: [] };
