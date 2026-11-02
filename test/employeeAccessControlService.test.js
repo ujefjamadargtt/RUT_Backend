@@ -291,10 +291,33 @@ test('Project Manager of a Service PO also sees every Employee mapped to that PO
     userId: 52, employeeId: 414, companyId: 46, hierarchyRank: 6, roleNames: ['Project Manager'],
   });
 
-  const opIn = Object.getOwnPropertySymbols(where.id)[0];
-  assert.deepEqual([...where.id[opIn]].sort((a, b) => a - b), [414, 501, 502]);
-  assert.equal(where.company_id, 46);
+  // The BU-scoped branch keeps its company filter; the PO roster is a second OR branch that skips
+  // the BU-membership test (live: PO in BU 37, employees only members of BU 40).
+  const [buScoped, poRoster] = where[Op.or];
+  assert.deepEqual([...buScoped.id[Op.in]].sort((a, b) => a - b), [414, 501, 502]);
+  assert.equal(buScoped.company_id, 46);
+  assert.deepEqual([...poRoster.id[Op.in]].sort((a, b) => a - b), [414, 501, 502]);
   restore();
+});
+
+test('Project Manager PO roster is looked up only for POs of the selected BU', async () => {
+  stubEmployeeScopeAsLegacyOnly();
+  stubNoMappings();
+  let seen;
+  const stubbed = employeeServicePOMappingRepository.findEmployeeIdsOnProjectManagerPOs;
+  employeeServicePOMappingRepository.findEmployeeIdsOnProjectManagerPOs = async (pm, companyId) => { seen = [pm, companyId]; return []; };
+
+  try {
+    const where = await resolveEmployeeAccessWhere({
+      userId: 52, employeeId: 414, companyId: 46, hierarchyRank: 6, roleNames: ['Project Manager'],
+    });
+
+    assert.deepEqual(seen, [414, 46]);
+    assert.equal(where[Op.or], undefined); // no PO roster -> plain BU-scoped where, unchanged
+  } finally {
+    employeeServicePOMappingRepository.findEmployeeIdsOnProjectManagerPOs = stubbed;
+    restore();
+  }
 });
 
 test('Project Manager PO roster is unioned with the manager and team_mappings rosters, not a replacement', async () => {
@@ -308,8 +331,8 @@ test('Project Manager PO roster is unioned with the manager and team_mappings ro
     userId: 52, employeeId: 414, companyId: 46, hierarchyRank: 6, roleNames: ['Project Manager'],
   });
 
-  const opIn = Object.getOwnPropertySymbols(where.id)[0];
-  assert.deepEqual([...where.id[opIn]].sort((a, b) => a - b), [414, 450, 501]);
+  const [buScoped] = where[Op.or];
+  assert.deepEqual([...buScoped.id[Op.in]].sort((a, b) => a - b), [414, 450, 501]);
   restore();
 });
 

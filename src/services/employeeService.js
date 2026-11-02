@@ -785,9 +785,22 @@ async function resolveBusinessUnitIds(businessUnitIds, companyId, ownedScope, al
       childIdsByParent.get(c.parent_business_unit_id).push(c.id);
     });
 
+    // A Parent the Employee already holds is only exempt if they ALSO already hold one of its
+    // Sub-BUs (any status — e.g. that Sub-BU was later deactivated). A legacy bare Parent mapping
+    // made before its Sub-BUs existed is NOT exempt: the Sub-BU is now compulsory.
+    const mappedParentIds = parentIdsWithChildren.filter((parentId) => alreadyMappedIds.includes(parentId));
+    const heldChildParentIds = new Set();
+    if (mappedParentIds.length > 0 && alreadyMappedIds.length > 0) {
+      const heldChildren = await Company.findAll({
+        where: { id: { [Op.in]: alreadyMappedIds }, parent_business_unit_id: { [Op.in]: mappedParentIds }, is_deleted: false },
+        attributes: ['parent_business_unit_id'],
+      });
+      heldChildren.forEach((c) => heldChildParentIds.add(c.parent_business_unit_id));
+    }
+
     const requestedSet = new Set(ids);
     const bareParentIds = parentIdsWithChildren.filter((parentId) => {
-      if (alreadyMappedIds.includes(parentId)) return false;
+      if (heldChildParentIds.has(parentId)) return false;
       const children = childIdsByParent.get(parentId) || [];
       return !children.some((childId) => requestedSet.has(childId));
     });

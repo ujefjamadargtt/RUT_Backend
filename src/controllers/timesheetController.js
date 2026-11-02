@@ -232,7 +232,9 @@ const getImportRows = async (req, res, next) => {
     }
     const filters = { ...req.body, ...req.query };
 
-    const rows = await timesheetService.getImportRows(id, filters.role, req.companyId);
+    const search = typeof req.query.search === 'string' ? req.query.search : undefined;
+
+    const rows = await timesheetService.getImportRows(id, filters.role, req.companyId, search);
     return sendSuccess(res, rows, 'Imported timesheet rows fetched successfully.');
   } catch (err) {
     return handleError(next, err, 'getImportRows');

@@ -2580,7 +2580,7 @@ const getTimesheetById = async (id, role, companyId) => {
  * @param {string} [role] - from req.body.role/req.query.role, NOT the JWT — see hoursVisibility.js
  * @returns {Promise<object[]>}
  */
-const getImportRows = async (importId, role, companyId) => {
+const getImportRows = async (importId, role, companyId, search) => {
   const id = parseInt(importId, 10);
   if (isNaN(id) || id < 1) {
     const err = new Error('Invalid import ID.');
@@ -2588,7 +2588,7 @@ const getImportRows = async (importId, role, companyId) => {
     throw err;
   }
 
-  const rows = await timesheetRepository.findByImportBatch(id, companyId);
+  const rows = await timesheetRepository.findByImportBatch(id, companyId, { search });
   return applyHoursVisibility(rows, role);
 };
 

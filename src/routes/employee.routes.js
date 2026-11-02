@@ -173,9 +173,13 @@ router.post(
   employeeController.importEmployees
 );
 
+// Report/filter dropdowns: no X-Company-Id ("All Business Units") must mean every BU the caller can
+// reach, a header means that one BU — same contract as GET /employees (see
+// resolveEmployeeListCompanyScope.js), instead of 400/pinning a multi-BU BU Admin to one BU.
 router.get(
   '/active/list',
-  authenticate,
+  authenticate.authenticateIdentity,
+  resolveEmployeeListCompanyScope,
   employeeController.getActiveEmployees
 );
 

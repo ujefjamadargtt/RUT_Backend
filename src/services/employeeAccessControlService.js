@@ -218,8 +218,8 @@ const resolveEmployeeAccessWhere = async ({ userId, employeeId, companyId, hiera
 
   // Project Manager of a Service PO: everyone mapped to the POs they are flagged PM on is on
   // their team too, even without a Primary/Secondary Manager mapping to them.
-  (await employeeServicePOMappingRepository.findEmployeeIdsOnProjectManagerPOs(employeeId))
-    .forEach((id) => employeeIds.add(id));
+  const poTeamIds = await employeeServicePOMappingRepository.findEmployeeIdsOnProjectManagerPOs(employeeId, companyId);
+  poTeamIds.forEach((id) => employeeIds.add(id));
 
   if (spaTeam.length > 0) {
     const managerEmployeeIds = spaTeam.map((t) => t.manager_employee_id);
@@ -231,7 +231,14 @@ const resolveEmployeeAccessWhere = async ({ userId, employeeId, companyId, hiera
     return { id: -1 };
   }
 
-  return { id: { [Op.in]: [...employeeIds] }, ...(await employeeRepository.employeeScope(companyId)) };
+  const buScoped = { id: { [Op.in]: [...employeeIds] }, ...(await employeeRepository.employeeScope(companyId)) };
+  if (poTeamIds.length === 0) return buScoped;
+
+  // A PO belongs to one BU but an employee mapped to it may be a member of a different BU only
+  // (live: PO in BU 37, employees in BU 40). Intersecting those employees with employeeScope()
+  // silently dropped them from the PM's dropdown/reports, so the PO roster - already limited to
+  // POs of the selected BU above - is exempt from the BU-membership test.
+  return { [Op.or]: [buScoped, { id: { [Op.in]: poTeamIds } }] };
 };
 
 module.exports = { resolveEmployeeAccessWhere, isBuAdminPeerRole, isReadOnlyBuAdminPeer };

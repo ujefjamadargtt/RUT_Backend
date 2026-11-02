@@ -307,7 +307,7 @@ async function getBudgetedMarginForecast(filters) {
  */
 async function getResourceStaffingPlanAccuracy(filters) {
   const {
-    month, year, employeeId, poId, search, varianceThresholdPct,
+    month, year, employeeIds, poId, search, varianceThresholdPct,
     sortBy = 'variance', sortOrder = 'DESC', limit, offset, hoursSource, roleId, companyIds,
   } = filters;
 
@@ -338,7 +338,8 @@ async function getResourceStaffingPlanAccuracy(filters) {
 
   let employeeFilter = '';
   let poFilter = '';
-  if (employeeId) { employeeFilter = 'AND emp_id = :employeeId'; replacements.employeeId = employeeId; }
+  // ANDed with the in_scope_pos/companyIds scoping in the CTEs — only ever narrows.
+  if (employeeIds && employeeIds.length > 0) { employeeFilter = 'AND combined.emp_id IN (:employeeIds)'; replacements.employeeIds = employeeIds; }
   if (poId) { poFilter = 'AND po_id = :poId'; replacements.poId = poId; }
 
   const searchFilter = search

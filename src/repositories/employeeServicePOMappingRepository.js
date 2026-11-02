@@ -1,7 +1,7 @@
 'use strict';
 
 const { Op } = require('sequelize');
-const { EmployeeServicePOMapping, Employee, ServicePO, Project } = require('../models');
+const { EmployeeServicePOMapping, Employee, ServicePO, Project, EmployeeBusinessUnit } = require('../models');
 
 /**
  * Employee Service PO Mapping Repository
@@ -407,10 +407,14 @@ const findByServicePOs = async (servicePoIds, status, options = {}) => {
  * are auto-mapped to every Employee, so they are excluded or the roster would
  * be the whole company. Three plain id queries, no joins/includes.
  *
+ * `companyId` (a BU id or array of ids) narrows the roster to POs owned by those BUs; omit it for
+ * every PO the PM is flagged on.
+ *
  * @param {number|null} pmEmployeeId
+ * @param {number|number[]|null} [companyId]
  * @returns {Promise<number[]>}
  */
-const findEmployeeIdsOnProjectManagerPOs = async (pmEmployeeId) => {
+const findEmployeeIdsOnProjectManagerPOs = async (pmEmployeeId, companyId = null) => {
   if (!pmEmployeeId) return [];
   const pmRows = await EmployeeServicePOMapping.findAll({
     where: { employee_id: pmEmployeeId, status: 'active', is_project_manager: true },
@@ -420,7 +424,12 @@ const findEmployeeIdsOnProjectManagerPOs = async (pmEmployeeId) => {
   if (pmRows.length === 0) return [];
 
   const pos = await ServicePO.findAll({
-    where: { id: { [Op.in]: pmRows.map((r) => r.service_po_id) }, is_centralised: false, is_deleted: false },
+    where: {
+      id: { [Op.in]: pmRows.map((r) => r.service_po_id) },
+      is_centralised: false,
+      is_deleted: false,
+      ...(companyId != null && { company_id: Array.isArray(companyId) ? { [Op.in]: companyId } : companyId }),
+    },
     attributes: ['id'],
     raw: true,
   });
@@ -431,7 +440,26 @@ const findEmployeeIdsOnProjectManagerPOs = async (pmEmployeeId) => {
     attributes: ['employee_id'],
     raw: true,
   });
-  return [...new Set(rows.map((r) => r.employee_id))];
+  const mappedIds = [...new Set(rows.map((r) => r.employee_id))];
+  if (mappedIds.length === 0) return [];
+
+  // An employee on the PO may belong to a DIFFERENT BU than the PM (cross-BU is fine), but one with
+  // no active BU at all (never mapped, or every mapping inactive) is not part of any BU and stays
+  // out. A legacy employees.company_id still counts as a BU, same as employeeScope() treats it.
+  const [buRows, legacyRows] = await Promise.all([
+    EmployeeBusinessUnit.findAll({
+      where: { employee_id: { [Op.in]: mappedIds }, status: 'active' },
+      attributes: ['employee_id'],
+      raw: true,
+    }),
+    Employee.findAll({
+      where: { id: { [Op.in]: mappedIds }, company_id: { [Op.ne]: null } },
+      attributes: ['id'],
+      raw: true,
+    }),
+  ]);
+  const withBu = new Set([...buRows.map((r) => r.employee_id), ...legacyRows.map((r) => r.id)]);
+  return mappedIds.filter((id) => withBu.has(id));
 };
 
 /**

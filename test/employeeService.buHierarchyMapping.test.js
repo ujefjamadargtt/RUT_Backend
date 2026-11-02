@@ -261,9 +261,11 @@ async function runUpdate({ existingBuIds, roles, companies, parentRows = [], has
     id, employee_code: 'EMP1', company_id: null, is_deleted: false, toJSON() { return this; },
   });
   Company.findAll = async ({ where }) => {
-    if (where.parent_business_unit_id) return parentRows;
     const key = Object.getOwnPropertySymbols(where.id || {})[0];
     const wanted = key ? where.id[key] : [];
+    // Sub-BUs the Employee already holds (id IN existing + parent IN mapped parents).
+    if (where.parent_business_unit_id && where.id) return companies.filter((c) => wanted.includes(c.id) && c.parent_business_unit_id != null);
+    if (where.parent_business_unit_id) return parentRows;
     return companies.filter((c) => wanted.includes(c.id));
   };
   companyRepository.hasChildren = async (id) => hasChildrenIds.includes(id);
@@ -317,13 +319,24 @@ test('update(): mapping a Sub-BU also maps its Parent BU, even when the actor is
   assert.deepEqual(sortNum(out.replaced), [40, 42]);
 });
 
-test('update(): a Parent the Employee already holds is not rejected as bare on an unrelated edit', async () => {
-  const out = await runUpdate({
+test('update(): a legacy bare Parent mapping (Sub-BU created later) is rejected until a Sub-BU is picked', async () => {
+  await assert.rejects(runUpdate({
     existingBuIds: [40], roles: EMP_ROLE, companies: [{ id: 40, company_name: 'DATA + AI' }],
     parentRows: [{ id: 43, parent_business_unit_id: 40 }], hasChildrenIds: [40],
     submitted: [40], ctx: { ...AUTH_CONTEXT, companyId: 40, employeeBusinessUnits: [40] },
+  }), /have Sub-BUs/);
+});
+
+test('update(): a Parent the Employee already holds a Sub-BU of is not rejected as bare on an unrelated edit', async () => {
+  const out = await runUpdate({
+    existingBuIds: [40, 42],
+    roles: EMP_ROLE,
+    companies: [{ id: 40, company_name: 'DATA + AI' }, { id: 42, company_name: 'DAS', parent_business_unit_id: 40 }],
+    parentRows: [{ id: 43, parent_business_unit_id: 40 }], hasChildrenIds: [40],
+    submitted: [40], ctx: { ...AUTH_CONTEXT, companyId: 40, employeeBusinessUnits: [40] },
   });
-  assert.deepEqual(out.replaced, [40]);
+  // Accepted; the held Sub-BU (42, outside the actor's reach here) is kept untouched.
+  assert.deepEqual(sortNum(out.replaced), [40, 42]);
 });
 
 test('update(): a BU Admin with NO other role cannot unmap a BU from their OWN record, but can for another employee', async () => {

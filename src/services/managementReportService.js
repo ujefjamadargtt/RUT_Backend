@@ -191,7 +191,8 @@ async function getResourceStaffingPlanAccuracy(query, companyIds) {
   companyIds = await applyEntityBuFilters(companyIds, filters);
   requireMonthYear(filters);
 
-  const employeeId = query.employeeId ? parseInt(query.employeeId, 10) : undefined;
+  // Comma-separated (or repeated) ids; non-numeric entries are dropped, none usable = no filter.
+  const employeeIds = parseIdList(query.employeeId);
 
   // A raw value present (including 0) means the caller explicitly asked to
   // filter by it — apply it at the SQL level, before pagination, so
@@ -208,7 +209,7 @@ async function getResourceStaffingPlanAccuracy(query, companyIds) {
   logger.info('ManagementReport: getResourceStaffingPlanAccuracy', { filters, varianceThresholdPctFilter, page, limit });
 
   const { rows, count } = await managementReportRepo.getResourceStaffingPlanAccuracy({
-    ...filters, employeeId, varianceThresholdPct: varianceThresholdPctFilter, limit, offset, companyIds,
+    ...filters, employeeIds, varianceThresholdPct: varianceThresholdPctFilter, limit, offset, companyIds,
   });
 
   // Same "at risk" formula the filter itself now applies in SQL (absolute

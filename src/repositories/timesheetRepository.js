@@ -802,12 +802,35 @@ const reassignEmployeesToImport = async (employeeIds, month, year, companyId, im
  * fetched via the existing ServicePO -> ServiceType -> ServiceCategory
  * relationships in a single query (LEFT JOINs), not a per-row lookup.
  *
+ * `search` (optional) narrows the batch — never widens it, the import/company scope is always
+ * ANDed — by a case-insensitive contains-match on Employee name/code, Service PO name/code,
+ * Client name, Service Type and Service Category. LIKE wildcards in the term are escaped so
+ * "%" / "_" match literally; the value is parameterised by Sequelize, never concatenated.
+ *
  * @param {number} importId
+ * @param {number} companyId
+ * @param {{ search?: string }} [options]
  * @returns {Promise<Timesheet[]>}
  */
-const findByImportBatch = async (importId, companyId) => {
+const findByImportBatch = async (importId, companyId, { search } = {}) => {
+  const where = { timesheet_import_id: importId, company_id: companyId };
+  const term = typeof search === 'string' ? search.trim() : '';
+  if (term) {
+    const like = { [Op.iLike]: `%${term.replace(/[\\%_]/g, '\\$&')}%` };
+    where[Op.and] = [{
+      [Op.or]: [
+        { '$employee.full_name$': like },
+        { '$employee.employee_code$': like },
+        { '$servicePO.service_po_name$': like },
+        { '$servicePO.service_po_code$': like },
+        { '$servicePO.client.client_name$': like },
+        { '$servicePO.serviceType.service_type_name$': like },
+        { '$servicePO.serviceType.serviceCategory.name$': like },
+      ],
+    }];
+  }
   return Timesheet.findAll({
-    where: { timesheet_import_id: importId, company_id: companyId },
+    where,
     include: buildIncludes({ includeServiceCategory: true }),
     order: [['timesheet_date', 'ASC']],
   });
