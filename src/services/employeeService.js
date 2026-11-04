@@ -1067,6 +1067,12 @@ const update = async (id, data, userId, ipAddress = null, authContext) => {
     ...employeeFields
   } = data;
 
+  // A BU Admin never changes their OWN roles / Business Units (profile fields stay editable).
+  // Before any lookup or write below.
+  if (roleIds !== undefined || businessUnitIds !== undefined) {
+    employeeAccessControlService.assertNotSelfMappingForBuAdmin(authContext, id);
+  }
+
   if (employeeFields.employee_code && employeeFields.employee_code !== existing.employee_code) {
     const taken = await employeeRepository.findByCodeInTenant(employeeFields.employee_code, existing.admin_id);
     if (taken && taken.id !== id) {
@@ -1126,18 +1132,21 @@ const update = async (id, data, userId, ipAddress = null, authContext) => {
     const resolvedSet = new Set(resolvedBusinessUnitIds);
     const removing = existingBuIds.filter((buId) => !resolvedSet.has(buId));
 
-    if (holdsBuAdmin && otherRoleIds.length > 0) {
+    // Unmapping EVERY Business Unit is a full unmap, not a role-wise one: the employee then belongs to
+    // no BU at all and must stay out of every BU-scoped list/report (only a company-less Admin sees
+    // them). Keeping the rows for the BU Admin role - as the partial-unmap branch below does - left
+    // such an employee still counted as a member of the BU by every employee_business_units scope.
+    const isFullUnmap = resolvedBusinessUnitIds.length === 0 && existingBuIds.length > 0;
+
+    // (A BU Admin changing their OWN mapping never reaches here — blocked up front by
+    // assertNotSelfMappingForBuAdmin, which supersedes the old "cannot unmap own BUs" rule.)
+    if (isFullUnmap) {
+      buExclusionsToClear = existingBuIds; // the rows go, so their per-role exclusions go too
+    } else if (holdsBuAdmin && otherRoleIds.length > 0) {
       buExclusionsToAdd = { buIds: removing, roleIds: otherRoleIds };
       buExclusionsToClear = resolvedBusinessUnitIds;
       // Nothing is actually deleted from employee_business_units — only hidden per role.
       resolvedBusinessUnitIds = [...new Set([...existingBuIds, ...resolvedBusinessUnitIds])];
-    } else {
-      // A BU Admin with no other role has nothing to fall back on: they can't unmap a BU from
-      // THEIR OWN record (it would strip their own access). Other Employees are unaffected.
-      const isBuAdminActor = authContext.hierarchyRank === 4 || (authContext.roleNames || []).includes(BU_ADMIN_ROLE);
-      if (isBuAdminActor && id === authContext.employeeId && removing.length > 0) {
-        throw forbiddenError('You cannot unmap Business Units from your own account — ask an Admin to do it.');
-      }
     }
   }
 

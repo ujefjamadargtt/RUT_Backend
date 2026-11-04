@@ -358,6 +358,12 @@ Timesheet.belongsTo(SubProject, { foreignKey: 'sub_project_id', as: 'subProject'
 User.hasMany(TimesheetImportHistory, { foreignKey: 'imported_by', as: 'importHistory' });
 TimesheetImportHistory.belongsTo(User, { foreignKey: 'imported_by', as: 'importer' });
 
+// imported_by is populated from req.userId, which since the identity redesign
+// is an Employee id (the users.id FK was dropped in 20260878), so the real
+// importer must be joined against Employee. The legacy User join above is kept
+// only for pre-redesign rows and is no longer used for display.
+TimesheetImportHistory.belongsTo(Employee, { foreignKey: 'imported_by', as: 'importerEmployee', constraints: false });
+
 // TimesheetImportHistory <-> TimesheetImportError
 TimesheetImportHistory.hasMany(TimesheetImportError, { foreignKey: 'import_id', as: 'errors' });
 TimesheetImportError.belongsTo(TimesheetImportHistory, { foreignKey: 'import_id', as: 'importHistory' });

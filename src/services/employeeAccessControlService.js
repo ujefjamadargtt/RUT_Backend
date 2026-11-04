@@ -241,4 +241,32 @@ const resolveEmployeeAccessWhere = async ({ userId, employeeId, companyId, hiera
   return { [Op.or]: [buScoped, { id: { [Op.in]: poTeamIds } }] };
 };
 
-module.exports = { resolveEmployeeAccessWhere, isBuAdminPeerRole, isReadOnlyBuAdminPeer };
+const SELF_MAPPING_NOT_ALLOWED_MESSAGE =
+  "You can't change your own roles, Business Units or Service POs. Ask another admin to update your mapping.";
+
+/**
+ * A caller whose ACTIVE role is "BU Admin" may map every other Employee in their reach but never
+ * their OWN record: roles, Business Units / Sub-BUs and Service PO mappings (incl. the Project
+ * Manager flag). Call it from every such write BEFORE any write/transaction starts.
+ *
+ * Only the BU Admin role is affected — Admin, Entity Admin, Platform Admin, HR, BU Head and every
+ * other role are unchanged. `authContext.roleNames` is the session's ACTIVE role names (req.userRoles).
+ *
+ * @param {{ employeeId: number|string|null, roleNames?: string[] }} authContext
+ * @param {number|string|null|undefined} targetEmployeeId - the Employee whose mapping is being written
+ * @throws {Error} 403 code SELF_MAPPING_NOT_ALLOWED
+ */
+function assertNotSelfMappingForBuAdmin(authContext, targetEmployeeId) {
+  if (!authContext || targetEmployeeId == null || authContext.employeeId == null) return;
+  const isBuAdmin = (authContext.roleNames || []).some((r) => String(r || '').trim().toLowerCase() === 'bu admin');
+  if (!isBuAdmin || String(authContext.employeeId) !== String(targetEmployeeId)) return;
+  const err = new Error(SELF_MAPPING_NOT_ALLOWED_MESSAGE);
+  err.statusCode = 403;
+  err.code = 'SELF_MAPPING_NOT_ALLOWED';
+  throw err;
+}
+
+module.exports = {
+  resolveEmployeeAccessWhere, isBuAdminPeerRole, isReadOnlyBuAdminPeer,
+  assertNotSelfMappingForBuAdmin, SELF_MAPPING_NOT_ALLOWED_MESSAGE,
+};

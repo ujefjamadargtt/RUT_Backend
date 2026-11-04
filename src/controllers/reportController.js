@@ -7,6 +7,7 @@ const employeeWorkLogHoursSummaryService = require('../services/employeeWorkLogH
 const projectTimesheetReportService = require('../services/projectTimesheetReportService');
 const employeeRoleBuMappingReportService = require('../services/employeeRoleBuMappingReportService');
 const teamLeadEmployeeProjectHoursReportService = require('../services/teamLeadEmployeeProjectHoursReportService');
+const teamLeadEmployeePoHoursReportService = require('../services/teamLeadEmployeePoHoursReportService');
 const { toMultiSheetExcelBuffer, toCsvExportBuffer } = require('../utils/reportExporter');
 
 /**
@@ -729,9 +730,57 @@ async function getTeamLeadEmployeeProjectHoursFilterOptions(req, res, next) {
   }
 }
 
+/**
+ * GET /api/v1/reports/team-lead-employee-po-hours
+ * Employee x Service PO hours matrix for the Employees mapped to the CALLER as Primary/Secondary
+ * manager (req.employeeId — never a query param). Not BU-restricted on the PO side.
+ */
+async function getTeamLeadEmployeePoHoursReport(req, res, next) {
+  try {
+    const report = await teamLeadEmployeePoHoursReportService.getReport(req.query, req.employeeId);
+    return sendSuccess(res, report, 'Team Lead employee PO hours report fetched successfully.');
+  } catch (err) {
+    if (err.statusCode) return sendError(res, err.message, err.statusCode);
+    logger.error('getTeamLeadEmployeePoHoursReport error', { error: err.message, stack: err.stack });
+    return next(err);
+  }
+}
+
+/** GET /api/v1/reports/team-lead-employee-po-hours/export?format=excel — the same matrix as one .xlsx. */
+async function exportTeamLeadEmployeePoHoursReport(req, res, next) {
+  try {
+    const { rows, columns, period, basis } = await teamLeadEmployeePoHoursReportService.getExport(req.query, req.employeeId);
+    const buffer = await toMultiSheetExcelBuffer([{ name: 'Team Lead PO Hours', columns, rows }]);
+    const periodSuffix = [period.start_date, period.end_date].filter(Boolean).join('_to_');
+    const filename = `team-lead-employee-po-hours_${basis}${periodSuffix ? `_${periodSuffix}` : ''}.xlsx`;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.send(Buffer.from(buffer));
+  } catch (err) {
+    if (err.statusCode) return sendError(res, err.message, err.statusCode);
+    logger.error('exportTeamLeadEmployeePoHoursReport error', { error: err.message, stack: err.stack });
+    return next(err);
+  }
+}
+
+/** GET /api/v1/reports/team-lead-employee-po-hours/filter-options */
+async function getTeamLeadEmployeePoHoursFilterOptions(req, res, next) {
+  try {
+    const options = await teamLeadEmployeePoHoursReportService.getFilterOptions(req.query, req.employeeId);
+    return sendSuccess(res, options, 'Filter options fetched successfully.');
+  } catch (err) {
+    if (err.statusCode) return sendError(res, err.message, err.statusCode);
+    logger.error('getTeamLeadEmployeePoHoursFilterOptions error', { error: err.message, stack: err.stack });
+    return next(err);
+  }
+}
+
 module.exports = {
   getProjectTimesheetReport,
   getEmployeeRoleBuMappingReport,
+  getTeamLeadEmployeePoHoursReport,
+  exportTeamLeadEmployeePoHoursReport,
+  getTeamLeadEmployeePoHoursFilterOptions,
   getTeamLeadEmployeeProjectHoursReport,
   exportTeamLeadEmployeeProjectHoursReport,
   getTeamLeadEmployeeProjectHoursFilterOptions,

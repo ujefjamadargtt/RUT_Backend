@@ -813,7 +813,8 @@ const reassignEmployeesToImport = async (employeeIds, month, year, companyId, im
  * @returns {Promise<Timesheet[]>}
  */
 const findByImportBatch = async (importId, companyId, { search } = {}) => {
-  const where = { timesheet_import_id: importId, company_id: companyId };
+  // A single BU, or the caller's whole reach (array) when the import is opened from the multi-BU history.
+  const where = { timesheet_import_id: importId, company_id: Array.isArray(companyId) ? { [Op.in]: companyId } : companyId };
   const term = typeof search === 'string' ? search.trim() : '';
   if (term) {
     const like = { [Op.iLike]: `%${term.replace(/[\\%_]/g, '\\$&')}%` };

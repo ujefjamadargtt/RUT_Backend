@@ -32,6 +32,33 @@ function companyScope(companyId) {
   return { company_id: companyId };
 }
 
+// imported_by holds an Employee id (see models/index.js), LEFT-joined so imports
+// without a resolvable importer still come back.
+const IMPORTER_INCLUDE = {
+  model: Employee,
+  as: 'importerEmployee',
+  attributes: ['id', 'full_name', 'employee_code', 'email'],
+  required: false,
+};
+
+/**
+ * Reshape the joined Employee into the `importer` object the UI reads:
+ * { id, email, employee: { full_name, employee_code } }. Works on a Sequelize
+ * instance or a plain object; importer is null when nothing was joined.
+ *
+ * @param {object} record
+ * @returns {object} plain object
+ */
+const withImporter = (record) => {
+  const plain = typeof record.toJSON === 'function' ? record.toJSON() : { ...record };
+  const emp = plain.importerEmployee;
+  delete plain.importerEmployee;
+  plain.importer = emp
+    ? { id: emp.id, email: emp.email || null, employee: { full_name: emp.full_name, employee_code: emp.employee_code } }
+    : null;
+  return plain;
+};
+
 /**
  * Insert a new import history record.
  *
@@ -94,20 +121,7 @@ const findImportById = async (id, companyId) => {
         order: [['row_number', 'ASC']],
         required: false,
       },
-      {
-        model: User,
-        as: 'importer',
-        attributes: ['id', 'email'],
-        required: false,
-        include: [
-          {
-            model: Employee,
-            as: 'employee',
-            attributes: ['id', 'full_name', 'employee_code'],
-            required: false,
-          },
-        ],
-      },
+      IMPORTER_INCLUDE,
     ],
   });
 };
@@ -143,22 +157,7 @@ const findAllImports = async (pagination = {}, filters = {}) => {
 
   const isMultiBU = Array.isArray(companyId) && companyId.length > 1;
 
-  const include = [
-    {
-      model: User,
-      as: 'importer',
-      attributes: ['id', 'email'],
-      required: false,
-      include: [
-        {
-          model: Employee,
-          as: 'employee',
-          attributes: ['id', 'full_name', 'employee_code'],
-          required: false,
-        },
-      ],
-    },
-  ];
+  const include = [IMPORTER_INCLUDE];
 
   if (isMultiBU) {
     include.push({
@@ -395,6 +394,7 @@ module.exports = {
   createImportHistory,
   updateImportHistory,
   createImportErrors,
+  withImporter,
   findImportById,
   findByMonthYearSource,
   deleteStalePending,

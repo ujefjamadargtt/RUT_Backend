@@ -339,10 +339,13 @@ test('update(): a Parent the Employee already holds a Sub-BU of is not rejected 
   assert.deepEqual(sortNum(out.replaced), [40, 42]);
 });
 
-test('update(): a BU Admin with NO other role cannot unmap a BU from their OWN record, but can for another employee', async () => {
+test('update(): a BU Admin cannot change the BUs/roles of their OWN record (SELF_MAPPING_NOT_ALLOWED), but can for another employee', async () => {
   const ctx = { ...AUTH_CONTEXT, companyId: 40, employeeBusinessUnits: [40, 41], roleNames: ['BU Admin'] };
   const base = { existingBuIds: [40, 41], roles: BU_ADMIN_ROLE_ONLY, companies: [{ id: 40, company_name: 'A' }], submitted: [40], ctx };
-  await assert.rejects(runUpdate({ ...base, empId: 99 }), /cannot unmap/);
+  await assert.rejects(
+    runUpdate({ ...base, empId: 99 }),
+    (err) => err.statusCode === 403 && err.code === 'SELF_MAPPING_NOT_ALLOWED' && /change your own roles, Business Units or Service POs/.test(err.message)
+  );
   const out = await runUpdate({ ...base, empId: 61 });
   assert.deepEqual(out.replaced, [40]);
 });
@@ -351,9 +354,26 @@ test('update(): a BU Admin + Project Manager unmapped from a BU is unmapped for 
   const ctx = { ...AUTH_CONTEXT, companyId: 40, employeeBusinessUnits: [40, 41], roleNames: ['BU Admin'] };
   const out = await runUpdate({
     existingBuIds: [40, 41], roles: BU_ADMIN_AND_PM, companies: [{ id: 40, company_name: 'A' }],
-    submitted: [40], ctx, empId: 99,
+    submitted: [40], ctx, empId: 61, // another employee who is BU Admin + Project Manager
   });
   assert.deepEqual(sortNum(out.replaced), [40, 41]); // nothing deleted from employee_business_units
   assert.deepEqual(out.added, { buIds: [41], roleIds: [12] });
   assert.deepEqual(out.cleared, [40]);
+});
+
+test('update(): unmapping EVERY BU from a BU Admin + Project Manager is a full unmap - rows deleted, no per-role exclusion', async () => {
+  const ctx = { ...AUTH_CONTEXT, companyId: 20, employeeBusinessUnits: [20], hierarchyRank: 2, roleNames: ['Admin'] };
+  const out = await runUpdate({
+    existingBuIds: [20], roles: BU_ADMIN_AND_PM, companies: [], submitted: [], ctx, empId: 42,
+  });
+  assert.deepEqual(out.replaced, []); // employee_business_units rows really go
+  assert.equal(out.added, null); // and nothing is merely hidden per role
+  assert.deepEqual(out.cleared, [20]); // stale exclusions for the removed BU are cleared
+});
+
+test('update(): a BU Admin cannot unmap ALL of their own BUs from their own record (self mapping is blocked)', async () => {
+  const ctx = { ...AUTH_CONTEXT, companyId: 40, employeeBusinessUnits: [40], roleNames: ['BU Admin'] };
+  await assert.rejects(runUpdate({
+    existingBuIds: [40], roles: BU_ADMIN_AND_PM, companies: [], submitted: [], ctx, empId: 99,
+  }), (err) => err.code === 'SELF_MAPPING_NOT_ALLOWED');
 });

@@ -207,7 +207,7 @@ const getImportById = async (req, res, next) => {
       return sendError(res, 'Invalid import ID.', 400);
     }
 
-    const record = await timesheetService.getImportById(id, req.companyId);
+    const record = await timesheetService.getImportById(id, req.companyIds);
     return sendSuccess(res, record, 'Import record fetched successfully.');
   } catch (err) {
     return handleError(next, err, 'getImportById');
@@ -234,7 +234,7 @@ const getImportRows = async (req, res, next) => {
 
     const search = typeof req.query.search === 'string' ? req.query.search : undefined;
 
-    const rows = await timesheetService.getImportRows(id, filters.role, req.companyId, search);
+    const rows = await timesheetService.getImportRows(id, filters.role, req.companyIds, search);
     return sendSuccess(res, rows, 'Imported timesheet rows fetched successfully.');
   } catch (err) {
     return handleError(next, err, 'getImportRows');

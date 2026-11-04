@@ -31,6 +31,11 @@ const {
   teamLeadEmployeeProjectHoursExportQuerySchema,
   teamLeadEmployeeProjectHoursFilterOptionsQuerySchema,
 } = require('../validations/teamLeadEmployeeProjectHoursReportValidation');
+const {
+  teamLeadEmployeePoHoursQuerySchema,
+  teamLeadEmployeePoHoursExportQuerySchema,
+  teamLeadEmployeePoHoursFilterOptionsQuerySchema,
+} = require('../validations/teamLeadEmployeePoHoursReportValidation');
 const authorize = require('../middlewares/authorize');
 
 /**
@@ -242,6 +247,65 @@ router.get(
   authorize(['manager.view_mapped_employees']),
   validate(teamLeadEmployeeProjectHoursExportQuerySchema, 'query'),
   reportController.exportTeamLeadEmployeeProjectHoursReport
+);
+
+/**
+ * @swagger
+ * /reports/team-lead-employee-po-hours:
+ *   get:
+ *     summary: Team Lead Employee PO Hours — Employees (rows) x Service POs (columns) matrix
+ *     description: >
+ *       Employees = the caller's active Primary/Secondary manager mappings (manager_employee_mappings);
+ *       the Team Lead is always the authenticated caller. Columns = every Service PO those Employees
+ *       are mapped to or logged approved hours on in the period — NOT restricted by BU (Cross-BU and
+ *       Centralised POs included); a PO shared by several Employees is one column. hoursBasis=original
+ *       sums approved/synced work-log hours (works before any sync); hoursBasis=adjusted sums the
+ *       post-sync timesheet hours and returns sync_available=false plus a message when none exist.
+ *     tags: [Reports]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: query, name: month, schema: { type: integer }, description: With year; defaults to the current month when no period is sent }
+ *       - { in: query, name: year, schema: { type: integer } }
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *       - { in: query, name: hoursBasis, schema: { type: string, enum: [original, adjusted], default: original } }
+ *       - { in: query, name: employeeIds, schema: { type: string }, description: Comma-separated; only narrows the caller's own team }
+ *       - { in: query, name: clientIds, schema: { type: string } }
+ *       - { in: query, name: projectIds, schema: { type: string } }
+ *       - { in: query, name: servicePoIds, schema: { type: string } }
+ *       - { in: query, name: entityIds, schema: { type: string }, description: Filters the PO columns by the PO's Entity }
+ *       - { in: query, name: buIds, schema: { type: string }, description: Filters the PO columns by the PO's BU (includes its Sub-BUs) }
+ *       - { in: query, name: subBuIds, schema: { type: string } }
+ *       - { in: query, name: search, schema: { type: string }, description: Employee name or code }
+ *     responses:
+ *       200:
+ *         description: "{ period, hours_basis, sync_available, message, columns[], data[], totals }"
+ *       403:
+ *         description: Caller lacks the manager.view_mapped_employees capability
+ */
+router.get(
+  '/team-lead-employee-po-hours/filter-options',
+  authenticateBase.authenticateIdentity,
+  authorize(['manager.view_mapped_employees']),
+  validate(teamLeadEmployeePoHoursFilterOptionsQuerySchema, 'query'),
+  reportController.getTeamLeadEmployeePoHoursFilterOptions
+);
+
+router.get(
+  '/team-lead-employee-po-hours/export',
+  authenticateBase.authenticateIdentity,
+  authorize(['manager.view_mapped_employees']),
+  validate(teamLeadEmployeePoHoursExportQuerySchema, 'query'),
+  reportController.exportTeamLeadEmployeePoHoursReport
+);
+
+router.get(
+  '/team-lead-employee-po-hours',
+  authenticateBase.authenticateIdentity,
+  authorize(['manager.view_mapped_employees']),
+  validate(teamLeadEmployeePoHoursQuerySchema, 'query'),
+  reportController.getTeamLeadEmployeePoHoursReport
 );
 
 router.get(

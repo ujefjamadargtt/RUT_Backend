@@ -41,6 +41,8 @@ function buildAuthContext(req) {
     hierarchyRank: req.hierarchyRank,
     employeeId: req.employeeId,
     employeeBusinessUnits: (req.employeeBusinessUnits || []).map((bu) => bu.id),
+    // The session's ACTIVE role names — the BU Admin self-mapping guard reads them.
+    roleNames: req.userRoles || [],
   };
 }
 
@@ -64,7 +66,8 @@ const assign = async (req, res, next) => {
       req.body.service_po_id,
       req.userId,
       companyId,
-      req.body.is_project_manager
+      req.body.is_project_manager,
+      buildAuthContext(req)
     );
     return sendCreated(res, mapping, 'Service PO assigned to employee successfully.');
   } catch (err) {
@@ -282,6 +285,7 @@ const saveMappings = async (req, res, next) => {
         hierarchyRank: req.hierarchyRank,
         employeeId: req.employeeId,
         employeeBusinessUnits: (req.employeeBusinessUnits || []).map((bu) => bu.id),
+        roleNames: req.userRoles || [],
       }
     );
     return sendSuccess(res, mappings, 'Employee Service PO mappings saved successfully.');

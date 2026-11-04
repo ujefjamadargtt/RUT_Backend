@@ -6,6 +6,7 @@ const router = express.Router();
 const authenticateBase = require('../middlewares/auth');
 const resolveCompanyContextForCompanyLessActors = require('../middlewares/resolveCompanyContextForCompanyLessActors');
 const authenticateReadMultiBU = require('../middlewares/authenticateReadMultiBU');
+const resolveFullReachCompanyScope = require('../middlewares/resolveFullReachCompanyScope');
 // Admin/Entity Admin (ranks 2-3) have no single req.companyId from
 // authenticateBase alone — this module's controllers all read req.companyId
 // directly, so every route here resolves ONE Business Unit context for them
@@ -117,9 +118,12 @@ router.get(
  *       404:
  *         description: Import record not found
  */
+// Opening a record from the (multi-BU) import history by id resolves against the caller's FULL reach,
+// not the single BU in X-Company-Id — otherwise an import of another BU/Sub-BU 404s right after being listed.
 router.get(
   '/import/:id',
-  authenticate,
+  authenticateBase.authenticateIdentity,
+  resolveFullReachCompanyScope,
   timesheetController.getImportById
 );
 
@@ -142,7 +146,8 @@ router.get(
  */
 router.get(
   '/import/:id/rows',
-  authenticate,
+  authenticateBase.authenticateIdentity,
+  resolveFullReachCompanyScope,
   timesheetController.getImportRows
 );
 

@@ -1022,6 +1022,18 @@ const validateRows = async (rows, companyId) => {
       }
     }
 
+    // Employee identity shown in the preview. employeeName comes from the already-loaded employees
+    // (one query for the whole batch) and stays null for an unmatched row — never the id/code. An
+    // Employee Sync row has no "Resource Name" cell (resourceName was filled with the employee code),
+    // so for it resourceName becomes the full name; an Excel row keeps the sheet's own value.
+    const employeeName = employee ? employee.full_name : null;
+    const displayResourceName = row.employeeId && employee ? employee.full_name : resourceName;
+    const employeeIdentity = {
+      employeeId: employee ? employee.id : (row.employeeId ?? null),
+      employeeCode: employee ? employee.employee_code : null,
+      employeeName,
+    };
+
     if (errors.length > 0) {
       logger.warn('Timesheet validateRows row failed', {
         rowNumber, resourceName, projectLabel, date, hours, errors,
@@ -1029,7 +1041,8 @@ const validateRows = async (rows, companyId) => {
       errorRows.push({
         rowNumber,
         row: {
-          resourceName,
+          ...employeeIdentity,
+          resourceName: displayResourceName,
           servicePOName,
           subProject,
           date,
@@ -1040,13 +1053,13 @@ const validateRows = async (rows, companyId) => {
     } else {
       validRows.push({
         rowNumber,
-        employeeId:      employee.id,
+        ...employeeIdentity,
         poId:            po.id,
         subProjectId:    subProjectRecord ? subProjectRecord.id : null,
         date,
         hours:           numericHours,
         // Original display data for preview
-        resourceName,
+        resourceName:    displayResourceName,
         servicePOName,
         projectLabel,    // resolved label (servicePOName for flat, projectHeader for pivot)
         serviceTypeName: po.serviceType ? po.serviceType.service_type_name : '',
@@ -1787,7 +1800,7 @@ const getImportHistory = async (query = {}, companyId) => {
   const employeeCounts = await timesheetImportRepository.getEmployeeCountsByImportIds(importIds, companyId);
 
   const data = rows.map((r) => {
-    const plain = r.toJSON();
+    const plain = timesheetImportRepository.withImporter(r);
     plain.total_employees = employeeCounts.get(r.id) || 0;
     return plain;
   });
@@ -1810,7 +1823,7 @@ const getImportById = async (id, companyId) => {
     err.statusCode = 404;
     throw err;
   }
-  return record;
+  return timesheetImportRepository.withImporter(record);
 };
 
 // ── Single-record CRUD helpers used by timesheetController ───────────────────

@@ -65,7 +65,11 @@ async function assertEmployeeHoldsProjectManagerRole(employeeId) {
  * @param {boolean} [isProjectManager]
  * @returns {Promise<EmployeeServicePOMapping>}
  */
-const assign = async (employeeId, servicePOId, userId, companyId, isProjectManager = false) => {
+const assign = async (employeeId, servicePOId, userId, companyId, isProjectManager = false, authContext = null) => {
+  // A BU Admin never maps Service POs onto their OWN record. Callers without an authContext
+  // (e.g. the Manager self-service flow, which has already authorized its own Employee) skip it.
+  employeeAccessControlService.assertNotSelfMappingForBuAdmin(authContext, employeeId);
+
   // `companyId` may be a single number (BU-scoped actor) or an array (a
   // company-less Admin/Entity Admin's resolved owned-Company scope, see
   // companyAccessControlService.resolveActorCompanyScope) — both lookups
@@ -320,6 +324,10 @@ async function loadAuthorizedMapping(id, companyId, authContext = null) {
   if (!mapping) {
     throw notFoundError(`Mapping #${id} was not found.`);
   }
+
+  // Delete / activate / deactivate / PM-flag on a mapping row of the caller's OWN record are blocked
+  // for a BU Admin — before any write.
+  employeeAccessControlService.assertNotSelfMappingForBuAdmin(authContext, mapping.employee_id);
 
   const actorEmployeeId = authContext ? authContext.employeeId : null;
   const centralisedTenant = await companyAccessControlService.resolveCentralisedServicePOTenant(companyId, actorEmployeeId);
@@ -839,6 +847,7 @@ const getServicePOOptionsForEmployee = async (employeeId, authContext) => {
  * @returns {Promise<EmployeeServicePOMapping[]>} the employee's mappings after save
  */
 const saveEmployeeServicePOMappings = async (employeeId, servicePOEntries, userId, authContext) => {
+  employeeAccessControlService.assertNotSelfMappingForBuAdmin(authContext, employeeId);
   const companyId = await resolveEmployeeMappingScope(authContext);
   const employee = await resolveMappingTargetEmployee(employeeId, companyId);
   const { unrestricted, businessUnitIds } = await resolveMappingEligibilityInputs(employee);
