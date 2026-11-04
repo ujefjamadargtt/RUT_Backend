@@ -39,15 +39,30 @@ const buColumnsFor = (query) => {
     .map((c) => (NOT_BASIS_DEPENDENT.has(c.key) ? c : { ...c, label: `${c.label} (${basis})` }));
 };
 
-const EMP_PROJECT_COLUMNS = [
+// Employee x Project export: ONE hours column and ONE utilisation % column, for the basis chosen with
+// ?hoursSource (Original for 'O', Adjusted / after-sync otherwise) — never both side by side.
+const EMP_PROJECT_COLUMNS_ADJUSTED = [
   { key: 'employeeName', label: 'Employee Name', width: 28 },
   { key: 'projectName', label: 'Project Name', width: 32 },
   { key: 'clientName', label: 'Client', width: 24 },
-  { key: 'loggedHours', label: 'Logged Hrs', width: 14, numFmt: HRS_FMT },
   { key: 'adjustedHours', label: 'Adjusted Hrs (After Sync)', width: 24, numFmt: HRS_FMT },
-  { key: 'originalUtilizationPercentage', label: 'Original Util %', width: 16, numFmt: PCT_FMT },
   { key: 'totalUtilizationPercentage', label: 'Total Util % (After Sync)', width: 24, numFmt: PCT_FMT },
 ];
+const EMP_PROJECT_COLUMNS_ORIGINAL = [
+  { key: 'employeeName', label: 'Employee Name', width: 28 },
+  { key: 'projectName', label: 'Project Name', width: 32 },
+  { key: 'clientName', label: 'Client', width: 24 },
+  { key: 'loggedHours', label: 'Logged Hrs (Original)', width: 22, numFmt: HRS_FMT },
+  { key: 'originalUtilizationPercentage', label: 'Util % (Original)', width: 18, numFmt: PCT_FMT },
+];
+const empProjectColumnsFor = (query) => (
+  query.hoursSource === 'O' ? EMP_PROJECT_COLUMNS_ORIGINAL : EMP_PROJECT_COLUMNS_ADJUSTED
+);
+const empProjectMergeGroupsFor = (query) => ({
+  by: 'employeeId',
+  columns: ['employeeName', query.hoursSource === 'O' ? 'originalUtilizationPercentage' : 'totalUtilizationPercentage'],
+  nameCell: { name: 'employeeName', nameKey: 'employeeName', codeKey: 'employeeCode' },
+});
 
 const periodSuffix = (period) => (
   [period.startDate, period.endDate].filter(Boolean).join('_to_')
@@ -93,7 +108,8 @@ const handle = ({ label, fn, message, columns, sheetName, filePrefix, totalRow, 
       const tableRows = groupRowsBy ? groupConsecutive(data, groupRowsBy) : data;
       const rows = [...(flatten ? flatten(tableRows) : tableRows), totalRow(summary)];
       const sheetColumns = typeof columns === 'function' ? columns(query) : columns;
-      const buffer = await toMultiSheetExcelBuffer([{ name: sheetName, columns: sheetColumns, rows, mergeGroups }]);
+      const sheetMergeGroups = typeof mergeGroups === 'function' ? mergeGroups(query) : mergeGroups;
+      const buffer = await toMultiSheetExcelBuffer([{ name: sheetName, columns: sheetColumns, rows, mergeGroups: sheetMergeGroups }]);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', `attachment; filename="${filePrefix}_${periodSuffix(period)}.xlsx"`);
       return res.send(Buffer.from(buffer));
@@ -140,17 +156,13 @@ const getEmployeeProjectUtilisation = handle({
   label: 'getEmployeeProjectUtilisation',
   fn: service.getEmployeeProjectUtilisationReport,
   message: 'Employee project utilisation report fetched successfully.',
-  columns: EMP_PROJECT_COLUMNS,
+  columns: empProjectColumnsFor,
   sheetName: 'Employee Project Utilisation',
   filePrefix: 'Employee_Project_Utilisation',
-  // One employee = a block of consecutive project rows; their name and the two per-employee %
-  // columns are merged across the block (as in the UI). Project / client / hours stay per row.
+  // One employee = a block of consecutive project rows; their name and the per-employee %
+  // column are merged across the block (as in the UI). Project / client / hours stay per row.
   groupRowsBy: 'employeeId',
-  mergeGroups: {
-    by: 'employeeId',
-    columns: ['employeeName', 'originalUtilizationPercentage', 'totalUtilizationPercentage'],
-    nameCell: { name: 'employeeName', nameKey: 'employeeName', codeKey: 'employeeCode' },
-  },
+  mergeGroups: empProjectMergeGroupsFor,
   // The % columns are per-employee totals — meaningless summed/averaged, so left blank.
   totalRow: (s) => ({
     employeeName: 'Total',
@@ -159,4 +171,10 @@ const getEmployeeProjectUtilisation = handle({
   }),
 });
 
-module.exports = { getBuWiseUtilisation, getEmployeeProjectUtilisation };
+module.exports = {
+  getBuWiseUtilisation,
+  getEmployeeProjectUtilisation,
+  buColumnsFor,
+  empProjectColumnsFor,
+  empProjectMergeGroupsFor,
+};

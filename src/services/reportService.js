@@ -782,7 +782,9 @@ async function getServicePOSummary(query, companyIds) {
       total_po_value:                     round2(pageTotals.total_po_value),
       total_hours_delivered_before_month: round2(pageTotals.total_hours_delivered),
       original_total_hours_delivered_before_month: round2(pageTotals.total_original_hours_delivered),
-      total_exp_hours:                    round2(pageTotals.total_exp_hours),
+      // Same figure under the name the frontend reads (total_* prefix like the sibling summary fields).
+      total_original_hours_delivered_before_month: round2(pageTotals.total_original_hours_delivered),
+      total_exp_hours:                   round2(pageTotals.total_exp_hours),
       total_monthly_billable_amount:      round2(pageTotals.total_monthly_billable_amount),
     },
   };
@@ -1274,6 +1276,19 @@ async function getResourseProjectUtilizationReport(query, companyIds, authContex
 const round2 = (n) => Math.round((parseFloat(n) || 0) * 100) / 100;
 
 /**
+ * Hours-basis aware sort key. `twinnedKeys` are the sortable fields that have an `original_<key>` twin in
+ * the response row. With hoursSource=O the key sorts by its original twin; an explicit `original_<key>`
+ * is honoured on either basis. Any other value is returned untouched so the caller's allow-list check
+ * still decides (request input never reaches an ORDER BY from here — sorting is in-memory on row fields).
+ */
+function resolveBasisSortKey(sortBy, twinnedKeys, hoursSource) {
+  const key = String(sortBy || '');
+  if (key.startsWith('original_') && twinnedKeys.includes(key.slice('original_'.length))) return key;
+  if (hoursSource === 'O' && twinnedKeys.includes(key)) return `original_${key}`;
+  return key;
+}
+
+/**
  * Resolve exactly one filter mode — month+year XOR startDate+endDate — into
  * a concrete { startDate, endDate } range for getClientServicePOHoursReport.
  * Throws 422 on any ambiguous or incomplete combination.
@@ -1502,9 +1517,13 @@ async function getClientCostAnalytics(query, companyIds) {
     }
   }
   const clients = Array.from(clientMap.values()).sort((a, b) => b.total_cost - a.total_cost);
+  // Original basis: Top Clients are ranked by the as-logged hours (cost as the tiebreak); otherwise by cost, as before.
+  const rankedClients = hoursSource === 'O'
+    ? [...clients].sort((a, b) => (b.original_total_hours - a.original_total_hours) || (b.total_cost - a.total_cost))
+    : clients;
 
   const { page, limit, offset } = getPaginationParams({ page: query.page, limit: query.limit || 15 });
-  const topClientsData = clients
+  const topClientsData = rankedClients
     .slice(offset, offset + limit)
     .map((client, idx) => ({ rank: offset + idx + 1, ...client }));
   const topClientsMeta = getPaginationMeta(clients.length, page, limit);
@@ -1619,8 +1638,10 @@ async function getClientWiseAnalyticsReport(query, companyIds) {
     percentage_of_total_cost: overallTotalCost > 0 ? round2((c.total_cost / overallTotalCost) * 100) : 0,
   }));
 
-  const allowedSort = ['total_cost', 'total_hours', 'average_cost_per_hour', 'total_projects', 'percentage_of_total_cost'];
-  const sortBy = allowedSort.includes(query.sortBy) ? query.sortBy : 'total_cost';
+  // original_total_hours is sent by the UI when the Hours basis is Original; total_hours already follows hoursSource.
+  const allowedSort = ['total_cost', 'total_hours', 'original_total_hours', 'average_cost_per_hour', 'total_projects', 'percentage_of_total_cost'];
+  const requestedSort = resolveBasisSortKey(query.sortBy, ['total_hours'], query.hoursSource);
+  const sortBy = allowedSort.includes(requestedSort) ? requestedSort : 'total_cost';
   const sortOrder = (query.sortOrder || 'DESC').toUpperCase() === 'ASC' ? 1 : -1;
   shaped.sort((a, b) => (a[sortBy] - b[sortBy]) * sortOrder);
 
@@ -1877,8 +1898,9 @@ async function getEmployeeBenchPercentage(query, companyIds) {
     };
   });
 
-  const allowedSort = ['bench_pct', 'bench_hours', 'total_hours'];
-  const sortBy = allowedSort.includes(query.sortBy) ? query.sortBy : 'bench_pct';
+  const allowedSort = ['bench_pct', 'bench_hours', 'total_hours', 'original_bench_pct', 'original_bench_hours', 'original_total_hours'];
+  const requestedSort = resolveBasisSortKey(query.sortBy, ['bench_pct', 'bench_hours', 'total_hours'], query.hoursSource);
+  const sortBy = allowedSort.includes(requestedSort) ? requestedSort : (query.hoursSource === 'O' ? 'original_bench_pct' : 'bench_pct');
   const sortOrder = (query.sortOrder || 'DESC').toUpperCase() === 'ASC' ? 1 : -1;
   shaped.sort((a, b) => (a[sortBy] - b[sortBy]) * sortOrder);
 
@@ -2064,8 +2086,12 @@ async function getResourceUtilizationTrendReport(query, companyIds) {
     };
   });
 
-  const allowedSort = ['utilization_percentage', 'total_hours', 'billable_hours', 'full_name'];
-  const sortBy = allowedSort.includes(query.sortBy) ? query.sortBy : null;
+  const allowedSort = [
+    'utilization_percentage', 'total_hours', 'billable_hours', 'full_name',
+    'original_utilization_percentage', 'original_total_hours', 'original_billable_hours',
+  ];
+  const requestedSort = resolveBasisSortKey(query.sortBy, ['utilization_percentage', 'total_hours', 'billable_hours'], query.hoursSource);
+  const sortBy = allowedSort.includes(requestedSort) ? requestedSort : null;
   if (sortBy) {
     const sortOrder = (query.sortOrder || 'DESC').toUpperCase() === 'ASC' ? 1 : -1;
     shaped.sort((a, b) => (
@@ -2175,8 +2201,9 @@ async function getServicePOHoursBudgetReport(query, companyIds) {
     cost_budget: r.cost_budget,
   }));
 
-  const allowedSort = ['total_hours', 'cost_budget'];
-  const sortBy = allowedSort.includes(query.sortBy) ? query.sortBy : null;
+  const allowedSort = ['total_hours', 'original_total_hours', 'cost_budget'];
+  const requestedSort = resolveBasisSortKey(query.sortBy, ['total_hours'], query.hoursSource);
+  const sortBy = allowedSort.includes(requestedSort) ? requestedSort : null;
   if (sortBy) {
     const sortOrder = (query.sortOrder || 'DESC').toUpperCase() === 'ASC' ? 1 : -1;
     shaped.sort((a, b) => (a[sortBy] - b[sortBy]) * sortOrder);

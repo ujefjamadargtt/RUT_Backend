@@ -6,6 +6,27 @@ const idList = Joi.string().trim().pattern(/^\d+(,\d+)*$/).allow('').optional().
   'string.pattern.base': '{{#label}} must be a comma-separated list of ids.',
 });
 
+const MAX_RANGE_DAYS = 366;
+
+// Both dates or neither; the range (inclusive) may not exceed MAX_RANGE_DAYS.
+const rangeLimit = (value, helpers) => {
+  if (value.startDate && value.endDate) {
+    const days = Math.round((new Date(value.endDate) - new Date(value.startDate)) / 86400000) + 1;
+    if (days > MAX_RANGE_DAYS) return helpers.message(`Date range cannot exceed ${MAX_RANGE_DAYS} days.`);
+  }
+  return value;
+};
+
+const periodRules = (schema) => schema
+  .and('month', 'year')
+  .and('startDate', 'endDate')
+  .oxor('month', 'startDate')
+  .custom(rangeLimit)
+  .messages({
+    'object.and': 'Send both month and year, or both startDate and endDate.',
+    'object.oxor': 'Send either month+year or startDate+endDate, not both.',
+  });
+
 // Shared by the report and its export so the export accepts exactly what the screen does.
 const reportFilterKeys = {
   month: Joi.number().integer().min(1).max(12).optional(),
@@ -24,29 +45,25 @@ const reportFilterKeys = {
 };
 
 /** GET /reports/team-lead-employee-po-hours — the Team Lead is always the authenticated caller. */
-const teamLeadEmployeePoHoursQuerySchema = Joi.object(reportFilterKeys)
-  .and('month', 'year')
-  .oxor('month', 'startDate');
+const teamLeadEmployeePoHoursQuerySchema = periodRules(Joi.object(reportFilterKeys));
 
 /** GET /reports/team-lead-employee-po-hours/export */
-const teamLeadEmployeePoHoursExportQuerySchema = Joi.object({
+const teamLeadEmployeePoHoursExportQuerySchema = periodRules(Joi.object({
   ...reportFilterKeys,
   format: Joi.string().lowercase().valid('excel').default('excel'),
-})
-  .and('month', 'year')
-  .oxor('month', 'startDate');
+}));
 
 /** GET /reports/team-lead-employee-po-hours/filter-options — optional period only. */
-const teamLeadEmployeePoHoursFilterOptionsQuerySchema = Joi.object({
+const teamLeadEmployeePoHoursFilterOptionsQuerySchema = periodRules(Joi.object({
   month: reportFilterKeys.month,
   year: reportFilterKeys.year,
   startDate: reportFilterKeys.startDate,
   endDate: reportFilterKeys.endDate,
-})
-  .and('month', 'year')
-  .oxor('month', 'startDate');
+}));
 
 module.exports = {
+  reportFilterKeys,
+  periodRules,
   teamLeadEmployeePoHoursQuerySchema,
   teamLeadEmployeePoHoursExportQuerySchema,
   teamLeadEmployeePoHoursFilterOptionsQuerySchema,

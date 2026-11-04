@@ -61,13 +61,11 @@ test('exportResourceCostUtilization: same-year range groups columns as plain APR
     assert.equal(sheet.getCell(1, empColCount + 1).value, 'APR');
     assert.equal(sheet.getCell(2, empColCount + 1).value, 'Hours');
     assert.equal(sheet.getCell(2, empColCount + 2).value, 'Logged Hrs');
-    assert.equal(sheet.getCell(2, empColCount + 3).value, 'Original Logged Hrs');
-    assert.equal(sheet.getCell(2, empColCount + 4).value, 'Utilization % - Projection');
-    assert.equal(sheet.getCell(2, empColCount + 5).value, 'Utilization % - Actual');
-    assert.equal(sheet.getCell(2, empColCount + 6).value, 'Original Utilization % - Actual');
-    assert.equal(sheet.getCell(2, empColCount + 7).value, 'Contribution');
-    assert.equal(sheet.getCell(2, empColCount + 8).value, 'Original Contribution');
-    assert.equal(sheet.getCell(1, empColCount + 9).value, 'MAY');
+    // Single basis (Adjusted): one hours column per metric, no side-by-side Original columns.
+    assert.equal(sheet.getCell(2, empColCount + 3).value, 'Utilization % - Projection');
+    assert.equal(sheet.getCell(2, empColCount + 4).value, 'Utilization % - Actual');
+    assert.equal(sheet.getCell(2, empColCount + 5).value, 'Contribution');
+    assert.equal(sheet.getCell(1, empColCount + 6).value, 'MAY');
 
     // Data row: Expected CTC / Billed Status blank; hours/contribution populated.
     const dataRow = sheet.getRow(3);
@@ -81,10 +79,8 @@ test('exportResourceCostUtilization: same-year range groups columns as plain APR
     assert.equal(dataRow.getCell(8).value, 'Balaji, Suresh'); // merged PMs, one cell
     assert.equal(dataRow.getCell(empColCount + 1).value, 176);
     assert.equal(dataRow.getCell(empColCount + 2).value, 88);
-    assert.equal(dataRow.getCell(empColCount + 3).value, 100);
-    assert.equal(dataRow.getCell(empColCount + 6).value, 56.82);
-    assert.equal(dataRow.getCell(empColCount + 7).value, 2083.5);
-    assert.equal(dataRow.getCell(empColCount + 8).value, 2367.5);
+    assert.equal(dataRow.getCell(empColCount + 4).value, 50);
+    assert.equal(dataRow.getCell(empColCount + 5).value, 2083.5);
   } finally {
     restore();
   }
@@ -107,9 +103,9 @@ test('exportResourceCostUtilization: a year-crossing range (Nov->Feb) suffixes m
 
     const empColCount = 11;
     assert.equal(sheet.getCell(1, empColCount + 1).value, 'NOV-26');
-    assert.equal(sheet.getCell(1, empColCount + 9).value, 'DEC-26');
-    assert.equal(sheet.getCell(1, empColCount + 17).value, 'JAN-27');
-    assert.equal(sheet.getCell(1, empColCount + 25).value, 'FEB-27');
+    assert.equal(sheet.getCell(1, empColCount + 6).value, 'DEC-26');
+    assert.equal(sheet.getCell(1, empColCount + 11).value, 'JAN-27');
+    assert.equal(sheet.getCell(1, empColCount + 16).value, 'FEB-27');
   } finally {
     restore();
   }
@@ -138,8 +134,41 @@ test('exportResourceCostUtilization: a roster row missing a month in range still
     const sheet = workbook.worksheets[0];
     const empColCount = 11;
     const dataRow = sheet.getRow(3);
-    assert.equal(dataRow.getCell(empColCount + 9).value, 176); // May Hours still 176, not blank
-    assert.equal(dataRow.getCell(empColCount + 10).value, 0);   // May Logged Hrs defaults to 0
+    assert.equal(dataRow.getCell(empColCount + 6).value, 176); // May Hours still 176, not blank
+    assert.equal(dataRow.getCell(empColCount + 7).value, 0);   // May Logged Hrs defaults to 0
+  } finally {
+    restore();
+  }
+});
+
+test('exportResourceCostUtilization: hoursSource=O exports ONLY original values, headers suffixed " (Original)"', async () => {
+  try {
+    managementReportService.exportResourceCostUtilization = async () => ({
+      data: [{
+        employeeCode: 'EMP001', employeeName: 'R', monthlyCtc: 1, projectManagers: [], client: 'C', project: 'P', spo: 'S',
+        months: [
+          { monthNumber: 4, year: 2026, cappedHours: 176, loggedHours: 88, projectionPercentage: 73.86, actualPercentage: 50, contribution: 2083.5, originalLoggedHours: 100, originalActualPercentage: 56.82, originalContribution: 2367.5 },
+        ],
+      }],
+      period: { startMonth: 4, startYear: 2026, endMonth: 4, endYear: 2026 },
+    });
+
+    const req = { query: { hoursSource: 'O' }, body: {}, companyIds: [1] };
+    const res = makeRes();
+    await managementReportController.exportResourceCostUtilization(req, res, (err) => { throw err; });
+
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(res.sentBuffer);
+    const sheet = workbook.worksheets[0];
+    const empColCount = 11;
+    assert.equal(sheet.getCell(2, empColCount + 2).value, 'Logged Hrs (Original)');
+    assert.equal(sheet.getCell(2, empColCount + 4).value, 'Utilization % - Actual (Original)');
+    assert.equal(sheet.getCell(2, empColCount + 5).value, 'Contribution (Original)');
+    assert.equal(sheet.getCell(2, empColCount + 6).value, null);
+    const dataRow = sheet.getRow(3);
+    assert.equal(dataRow.getCell(empColCount + 2).value, 100);
+    assert.equal(dataRow.getCell(empColCount + 4).value, 56.82);
+    assert.equal(dataRow.getCell(empColCount + 5).value, 2367.5);
   } finally {
     restore();
   }

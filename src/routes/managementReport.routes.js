@@ -492,6 +492,10 @@ router.get('/invoice-realization-trend', authenticateMultiBU, managementReportCo
  *           Optional. Narrows the caller's existing Business Unit scope
  *           (X-Company-Id header / role reach) to just the Companies under
  *           this Entity — intersected with, never replacing, that scope.
+ *       - in: query
+ *         name: hoursSource
+ *         schema: { type: string, enum: [M, O], default: M }
+ *         description: Hours basis. O = Original (as-logged, pre-cap) hours drive server sort/totals/export; M, omitted or any other value = Adjusted.
  *     responses:
  *       200: { description: Un-paginated business-mix records (one row per category x type) }
  *       401: { description: Unauthorized }
@@ -551,6 +555,7 @@ router.get('/service-line-business-mix', authenticateMultiBU, managementReportCo
  *       - in: query
  *         name: sortBy
  *         schema: { type: string, enum: [pm_name, resource_count, project_count, total_logged_hours, total_available_hours, utilization_pct] }
+ *         description: With hoursSource=O, total_logged_hours / utilization_pct sort by original_total_logged_hours / original_utilization_pct.
  *       - in: query
  *         name: sortOrder
  *         schema: { type: string, enum: [ASC, DESC] }
@@ -567,6 +572,10 @@ router.get('/service-line-business-mix', authenticateMultiBU, managementReportCo
  *           Optional. Narrows the caller's existing Business Unit scope
  *           (X-Company-Id header / role reach) to just the Companies under
  *           this Entity — intersected with, never replacing, that scope.
+ *       - in: query
+ *         name: hoursSource
+ *         schema: { type: string, enum: [M, O], default: M }
+ *         description: Hours basis. O = Original (as-logged, pre-cap) hours drive server sort/totals/export; M, omitted or any other value = Adjusted.
  *     responses:
  *       200: { description: Paginated PM-wise utilization records, plus a portfolio-wide summary totals block }
  *       401: { description: Unauthorized }
@@ -618,6 +627,7 @@ router.get('/pm-wise-utilization', authenticateMultiBU, managementReportControll
  *       - in: query
  *         name: sortBy
  *         schema: { type: string, enum: [client_name, project_name, service_po_name, resource_count, total_logged_hours, total_available_hours, utilization_pct] }
+ *         description: With hoursSource=O, total_logged_hours / utilization_pct sort by original_total_logged_hours / original_utilization_pct.
  *       - in: query
  *         name: sortOrder
  *         schema: { type: string, enum: [ASC, DESC] }
@@ -634,6 +644,10 @@ router.get('/pm-wise-utilization', authenticateMultiBU, managementReportControll
  *           Optional. Narrows the caller's existing Business Unit scope
  *           (X-Company-Id header / role reach) to just the Companies under
  *           this Entity — intersected with, never replacing, that scope.
+ *       - in: query
+ *         name: hoursSource
+ *         schema: { type: string, enum: [M, O], default: M }
+ *         description: Hours basis. O = Original (as-logged, pre-cap) hours drive server sort/totals/export; M, omitted or any other value = Adjusted.
  *     responses:
  *       200:
  *         description: >
@@ -690,6 +704,10 @@ router.get('/project-wise-utilization', authenticateMultiBU, managementReportCon
  *           Optional. Narrows the caller's existing Business Unit scope
  *           (X-Company-Id header / role reach) to just the Companies under
  *           this Entity — intersected with, never replacing, that scope.
+ *       - in: query
+ *         name: hoursSource
+ *         schema: { type: string, enum: [M, O], default: M }
+ *         description: Hours basis. O = Original (as-logged, pre-cap) hours drive server sort/totals/export; M, omitted or any other value = Adjusted.
  *     responses:
  *       200:
  *         description: >
@@ -739,6 +757,7 @@ router.get('/month-wise-bench', authenticateMultiBU, managementReportController.
  *       - in: query
  *         name: sortBy
  *         schema: { type: string, enum: [full_name, avg_bench_pct] }
+ *         description: With hoursSource=O, avg_bench_pct sorts by original_avg_bench_pct.
  *       - in: query
  *         name: sortOrder
  *         schema: { type: string, enum: [ASC, DESC] }
@@ -755,6 +774,10 @@ router.get('/month-wise-bench', authenticateMultiBU, managementReportController.
  *           Optional. Narrows the caller's existing Business Unit scope
  *           (X-Company-Id header / role reach) to just the Companies under
  *           this Entity — intersected with, never replacing, that scope.
+ *       - in: query
+ *         name: hoursSource
+ *         schema: { type: string, enum: [M, O], default: M }
+ *         description: Hours basis. O = Original (as-logged, pre-cap) hours drive server sort/totals/export; M, omitted or any other value = Adjusted.
  *     responses:
  *       200:
  *         description: >
@@ -863,6 +886,10 @@ router.get('/resource-wise-bench', authenticateMultiBU, managementReportControll
  *           Optional. Narrows the caller's existing Business Unit scope
  *           (X-Company-Id header / role reach) to just the Companies under
  *           this Entity — intersected with, never replacing, that scope.
+ *       - in: query
+ *         name: hoursSource
+ *         schema: { type: string, enum: [M, O], default: M }
+ *         description: Hours basis. O = Original (as-logged, pre-cap) hours drive server sort/totals/export; M, omitted or any other value = Adjusted.
  *     responses:
  *       200: { description: Paginated resource cost/utilization records, plus a per-month full-dataset summary block }
  *       401: { description: Unauthorized }
@@ -904,6 +931,10 @@ router.get('/resource-cost-utilization', authenticateMultiBU, managementReportCo
  *       - in: query
  *         name: endYear
  *         schema: { type: integer }
+ *       - in: query
+ *         name: hoursSource
+ *         schema: { type: string, enum: [M, O], default: M }
+ *         description: Hours basis. O = Original (as-logged, pre-cap) hours drive server sort/totals/export; M, omitted or any other value = Adjusted.
  *     responses:
  *       200:
  *         description: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet file download

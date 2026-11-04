@@ -105,6 +105,9 @@ const MONTH_NAMES_UPPER = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG
 async function exportResourceCostUtilization(req, res, next) {
   try {
     const filters = { ...req.body, ...req.query };
+    // Active hours basis: 'O' = Original (as-logged), anything else = Adjusted ('M').
+    const isOriginal = filters.hoursSource === 'O';
+    const basisSuffix = isOriginal ? ' (Original)' : '';
     const { data, period } = await managementReportService.exportResourceCostUtilization(filters, req.companyIds);
 
     const staticColumns = [
@@ -151,13 +154,10 @@ async function exportResourceCostUtilization(req, res, next) {
       const fill = monthFillHex(month);
       monthColumns.push(
         { key: `${prefix}_hours`, label: 'Hours', group, fill, width: 10, numFmt: '0.00' },
-        { key: `${prefix}_logged`, label: 'Logged Hrs', group, fill, width: 12, numFmt: '0.00' },
-        { key: `${prefix}_original_logged`, label: 'Original Logged Hrs', group, fill, width: 14, numFmt: '0.00' },
+        { key: `${prefix}_logged`, label: `Logged Hrs${basisSuffix}`, group, fill, width: 12, numFmt: '0.00' },
         { key: `${prefix}_projection`, label: 'Utilization % - Projection', group, fill, width: 15, numFmt: '0.00"%"' },
-        { key: `${prefix}_actual`, label: 'Utilization % - Actual', group, fill, width: 15, numFmt: '0.00"%"' },
-        { key: `${prefix}_original_actual`, label: 'Original Utilization % - Actual', group, fill, width: 17, numFmt: '0.00"%"' },
-        { key: `${prefix}_contribution`, label: 'Contribution', group, fill, width: 14, numFmt: '#,##0.00' },
-        { key: `${prefix}_original_contribution`, label: 'Original Contribution', group, fill, width: 14, numFmt: '#,##0.00' }
+        { key: `${prefix}_actual`, label: `Utilization % - Actual${basisSuffix}`, group, fill, width: 15, numFmt: '0.00"%"' },
+        { key: `${prefix}_contribution`, label: `Contribution${basisSuffix}`, group, fill, width: 14, numFmt: '#,##0.00' }
       );
     });
 
@@ -186,13 +186,11 @@ async function exportResourceCostUtilization(req, res, next) {
         const prefix = `m_${year}_${month}`;
         const mo = byMonth.get(`${year}_${month}`);
         row[`${prefix}_hours`] = mo ? mo.cappedHours : fallbackCappedHours;
-        row[`${prefix}_logged`] = mo ? mo.loggedHours : 0;
-        row[`${prefix}_original_logged`] = mo ? mo.originalLoggedHours : 0;
+        // Single basis only: Original reads the original* twins, Adjusted the hoursSource-following fields.
+        row[`${prefix}_logged`] = mo ? (isOriginal ? mo.originalLoggedHours : mo.loggedHours) : 0;
         row[`${prefix}_projection`] = mo ? mo.projectionPercentage : 0;
-        row[`${prefix}_actual`] = mo ? mo.actualPercentage : 0;
-        row[`${prefix}_original_actual`] = mo ? mo.originalActualPercentage : 0;
-        row[`${prefix}_contribution`] = mo ? mo.contribution : 0;
-        row[`${prefix}_original_contribution`] = mo ? mo.originalContribution : 0;
+        row[`${prefix}_actual`] = mo ? (isOriginal ? mo.originalActualPercentage : mo.actualPercentage) : 0;
+        row[`${prefix}_contribution`] = mo ? (isOriginal ? mo.originalContribution : mo.contribution) : 0;
       });
       return row;
     });

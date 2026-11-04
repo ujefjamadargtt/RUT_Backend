@@ -36,6 +36,14 @@ const {
   teamLeadEmployeePoHoursExportQuerySchema,
   teamLeadEmployeePoHoursFilterOptionsQuerySchema,
 } = require('../validations/teamLeadEmployeePoHoursReportValidation');
+const {
+  buAdminEmployeePoHoursQuerySchema,
+  buAdminEmployeePoHoursExportQuerySchema,
+  buAdminEmployeePoHoursFilterOptionsQuerySchema,
+  projectManagerEmployeePoHoursQuerySchema,
+  projectManagerEmployeePoHoursExportQuerySchema,
+  projectManagerEmployeePoHoursFilterOptionsQuerySchema,
+} = require('../validations/poHoursScopedReportsValidation');
 const authorize = require('../middlewares/authorize');
 
 /**
@@ -88,6 +96,9 @@ router.get(
  *       (totals), the Employee BU <-> PO BU hours flow (bu_flow) and the paged records.
  *       Period: month+year, or start_date+end_date (max 366 days); default current month.
  *       format=json | excel (Details + BU Flow sheets) | csv (details).
+ *       hoursSource=O = Original (as-logged) hours, omitted/M = Adjusted: drives sort_by=hours (Original -> logged_hours,
+ *       Adjusted -> adjusted_hours) and the single hours column of the excel/csv export (header suffixed '(Original)').
+ *       totals carry the original and adjusted Own BU / Cross BU / unclassified hours (original_own_bu_hours, adjusted_own_bu_hours, ...).
  *     tags: [Reports]
  *     security:
  *       - bearerAuth: []
@@ -306,6 +317,118 @@ router.get(
   authorize(['manager.view_mapped_employees']),
   validate(teamLeadEmployeePoHoursQuerySchema, 'query'),
   reportController.getTeamLeadEmployeePoHoursReport
+);
+
+/**
+ * @swagger
+ * /reports/bu-admin-employee-po-hours:
+ *   get:
+ *     summary: BU Admin Employee PO Hours — BU members (rows) x Service POs (columns) matrix
+ *     description: >
+ *       Admin / Entity Admin / BU Admin only (hierarchyRank 4 or lower, else 403). Employees = every active
+ *       employee who is an active member of the caller's BU scope (the BU picked via X-Company-Id or
+ *       company_id, else the caller's full reach; Sub-BUs included) — not manager mappings. Columns = every
+ *       Service PO those employees are mapped to or logged approved hours on in the period, any BU; each
+ *       column carries is_cross_bu (the PO has a BU, is not Centralised and its BU is outside the caller's
+ *       scope) and each row employee_bu_names. Same response shape as team-lead-employee-po-hours
+ *       (mapping_type is null). Sub-routes /export (xlsx) and /filter-options take the same filters.
+ *     tags: [Reports]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: query, name: month, schema: { type: integer } }
+ *       - { in: query, name: year, schema: { type: integer } }
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *       - { in: query, name: hoursBasis, schema: { type: string, enum: [original, adjusted], default: original } }
+ *       - { in: query, name: employeeIds, schema: { type: string }, description: Comma-separated; narrows within the BU scope }
+ *       - { in: query, name: clientIds, schema: { type: string } }
+ *       - { in: query, name: projectIds, schema: { type: string } }
+ *       - { in: query, name: servicePoIds, schema: { type: string } }
+ *       - { in: query, name: entityIds, schema: { type: string } }
+ *       - { in: query, name: buIds, schema: { type: string } }
+ *       - { in: query, name: subBuIds, schema: { type: string } }
+ *       - { in: query, name: search, schema: { type: string } }
+ *       - { in: query, name: company_id, schema: { type: integer }, description: Optional BU selection (alternative to X-Company-Id) }
+ *     responses:
+ *       200:
+ *         description: "{ period, hours_basis, sync_available, message, columns[], data[], totals }"
+ *       403:
+ *         description: Caller is above BU Admin level
+ */
+router.get(
+  '/bu-admin-employee-po-hours/filter-options',
+  authenticateMultiBU,
+  validate(buAdminEmployeePoHoursFilterOptionsQuerySchema, 'query'),
+  reportController.getBuAdminEmployeePoHoursFilterOptions
+);
+
+router.get(
+  '/bu-admin-employee-po-hours/export',
+  authenticateMultiBU,
+  validate(buAdminEmployeePoHoursExportQuerySchema, 'query'),
+  reportController.exportBuAdminEmployeePoHoursReport
+);
+
+router.get(
+  '/bu-admin-employee-po-hours',
+  authenticateMultiBU,
+  validate(buAdminEmployeePoHoursQuerySchema, 'query'),
+  reportController.getBuAdminEmployeePoHoursReport
+);
+
+/**
+ * @swagger
+ * /reports/project-manager-employee-po-hours:
+ *   get:
+ *     summary: Project Manager Employee PO Hours — the PM's PO roster (rows) x the PM's own POs (columns)
+ *     description: >
+ *       Employees = everyone actively mapped to a non-Centralised Service PO on which the CALLER is flagged
+ *       Project Manager (the caller is always the authenticated user, never a query value). Columns = ONLY the
+ *       caller's own flagged POs, each with is_cross_bu relative to the caller's BU scope; rows carry
+ *       employee_bu_names. A caller with no flagged POs gets an empty matrix. Same filters, response shape,
+ *       /export and /filter-options as bu-admin-employee-po-hours.
+ *     tags: [Reports]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: query, name: month, schema: { type: integer } }
+ *       - { in: query, name: year, schema: { type: integer } }
+ *       - { in: query, name: startDate, schema: { type: string, format: date } }
+ *       - { in: query, name: endDate, schema: { type: string, format: date } }
+ *       - { in: query, name: hoursBasis, schema: { type: string, enum: [original, adjusted], default: original } }
+ *       - { in: query, name: employeeIds, schema: { type: string } }
+ *       - { in: query, name: clientIds, schema: { type: string } }
+ *       - { in: query, name: projectIds, schema: { type: string } }
+ *       - { in: query, name: servicePoIds, schema: { type: string } }
+ *       - { in: query, name: entityIds, schema: { type: string } }
+ *       - { in: query, name: buIds, schema: { type: string } }
+ *       - { in: query, name: subBuIds, schema: { type: string } }
+ *       - { in: query, name: search, schema: { type: string } }
+ *       - { in: query, name: company_id, schema: { type: integer } }
+ *     responses:
+ *       200:
+ *         description: "{ period, hours_basis, sync_available, message, columns[], data[], totals }"
+ */
+router.get(
+  '/project-manager-employee-po-hours/filter-options',
+  authenticateMultiBU,
+  validate(projectManagerEmployeePoHoursFilterOptionsQuerySchema, 'query'),
+  reportController.getProjectManagerEmployeePoHoursFilterOptions
+);
+
+router.get(
+  '/project-manager-employee-po-hours/export',
+  authenticateMultiBU,
+  validate(projectManagerEmployeePoHoursExportQuerySchema, 'query'),
+  reportController.exportProjectManagerEmployeePoHoursReport
+);
+
+router.get(
+  '/project-manager-employee-po-hours',
+  authenticateMultiBU,
+  validate(projectManagerEmployeePoHoursQuerySchema, 'query'),
+  reportController.getProjectManagerEmployeePoHoursReport
 );
 
 router.get(
@@ -1646,7 +1769,7 @@ router.get(
  *         schema: { type: string, enum: [O, M] }
  *       - in: query
  *         name: sortBy
- *         schema: { type: string, enum: [total_cost, total_hours, average_cost_per_hour, total_projects, percentage_of_total_cost] }
+ *         schema: { type: string, enum: [total_cost, total_hours, original_total_hours, average_cost_per_hour, total_projects, percentage_of_total_cost] }
  *       - in: query
  *         name: sortOrder
  *         schema: { type: string, enum: [ASC, DESC] }
@@ -1779,7 +1902,7 @@ router.get(
  *         schema: { type: string, enum: [O, M] }
  *       - in: query
  *         name: sortBy
- *         schema: { type: string, enum: [bench_pct, bench_hours, total_hours] }
+ *         schema: { type: string, enum: [bench_pct, bench_hours, total_hours, original_bench_pct, original_bench_hours, original_total_hours] }
  *       - in: query
  *         name: sortOrder
  *         schema: { type: string, enum: [ASC, DESC] }
@@ -1924,7 +2047,7 @@ router.get(
  *         schema: { type: string, enum: [O, M] }
  *       - in: query
  *         name: sortBy
- *         schema: { type: string, enum: [utilization_percentage, total_hours, billable_hours, full_name] }
+ *         schema: { type: string, enum: [utilization_percentage, total_hours, billable_hours, full_name, original_utilization_percentage, original_total_hours, original_billable_hours] }
  *       - in: query
  *         name: sortOrder
  *         schema: { type: string, enum: [ASC, DESC] }
@@ -2001,7 +2124,7 @@ router.get(
  *         schema: { type: string, enum: [O, M] }
  *       - in: query
  *         name: sortBy
- *         schema: { type: string, enum: [total_hours, cost_budget] }
+ *         schema: { type: string, enum: [total_hours, original_total_hours, cost_budget] }
  *       - in: query
  *         name: sortOrder
  *         schema: { type: string, enum: [ASC, DESC] }

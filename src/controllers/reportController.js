@@ -1,5 +1,6 @@
 'use strict';
 
+const moment = require('moment-timezone');
 const reportService = require('../services/reportService');
 const { sendPaginated, sendSuccess, sendError } = require('../utils/response');
 const logger = require('../utils/logger');
@@ -8,6 +9,8 @@ const projectTimesheetReportService = require('../services/projectTimesheetRepor
 const employeeRoleBuMappingReportService = require('../services/employeeRoleBuMappingReportService');
 const teamLeadEmployeeProjectHoursReportService = require('../services/teamLeadEmployeeProjectHoursReportService');
 const teamLeadEmployeePoHoursReportService = require('../services/teamLeadEmployeePoHoursReportService');
+const buAdminEmployeePoHoursReportService = require('../services/buAdminEmployeePoHoursReportService');
+const projectManagerEmployeePoHoursReportService = require('../services/projectManagerEmployeePoHoursReportService');
 const { toMultiSheetExcelBuffer, toCsvExportBuffer } = require('../utils/reportExporter');
 
 /**
@@ -751,8 +754,8 @@ async function exportTeamLeadEmployeePoHoursReport(req, res, next) {
   try {
     const { rows, columns, period, basis } = await teamLeadEmployeePoHoursReportService.getExport(req.query, req.employeeId);
     const buffer = await toMultiSheetExcelBuffer([{ name: 'Team Lead PO Hours', columns, rows }]);
-    const periodSuffix = [period.start_date, period.end_date].filter(Boolean).join('_to_');
-    const filename = `team-lead-employee-po-hours_${basis}${periodSuffix ? `_${periodSuffix}` : ''}.xlsx`;
+    const fmt = (d) => moment.utc(d).format('DD-MMM-YYYY');
+    const filename = `Team Lead Employee PO Hours ${fmt(period.start_date)} to ${fmt(period.end_date)}.xlsx`;
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     return res.send(Buffer.from(buffer));
@@ -775,7 +778,100 @@ async function getTeamLeadEmployeePoHoursFilterOptions(req, res, next) {
   }
 }
 
+// ---------------------------------------------------------------------------------------------
+// BU Admin / Project Manager Employee PO Hours (siblings of the Team Lead PO Hours matrix).
+// Both run behind authenticateMultiBU, so req.companyIds (BU scope, Sub-BUs included),
+// req.employeeId and req.hierarchyRank are set.
+// ---------------------------------------------------------------------------------------------
+
+const BU_ADMIN_MAX_RANK = 4;
+
+/** 403 unless the caller is Admin / Entity Admin / BU Admin (hierarchyRank 1-4). */
+function assertBuAdminRank(req) {
+  if (!Number.isInteger(req.hierarchyRank) || req.hierarchyRank > BU_ADMIN_MAX_RANK) {
+    const err = new Error('Access denied: this report is available to Admin, Entity Admin and BU Admin only.');
+    err.statusCode = 403;
+    throw err;
+  }
+}
+
+function sendPoHoursExcel(res, { rows, columns, period }, sheetName, title) {
+  return toMultiSheetExcelBuffer([{ name: sheetName, columns, rows }]).then((buffer) => {
+    const fmt = (d) => moment.utc(d).format('DD-MMM-YYYY');
+    const filename = `${title} ${fmt(period.start_date)} to ${fmt(period.end_date)}.xlsx`;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    return res.send(Buffer.from(buffer));
+  });
+}
+
+function poHoursHandler(name, run, okMessage) {
+  return async (req, res, next) => {
+    try {
+      const result = await run(req);
+      return sendSuccess(res, result, okMessage);
+    } catch (err) {
+      if (err.statusCode) return sendError(res, err.message, err.statusCode);
+      logger.error(`${name} error`, { error: err.message, stack: err.stack });
+      return next(err);
+    }
+  };
+}
+
+/** GET /api/v1/reports/bu-admin-employee-po-hours */
+const getBuAdminEmployeePoHoursReport = poHoursHandler('getBuAdminEmployeePoHoursReport', async (req) => {
+  assertBuAdminRank(req);
+  return buAdminEmployeePoHoursReportService.getReport(req.query, req.companyIds);
+}, 'BU Admin employee PO hours report fetched successfully.');
+
+/** GET /api/v1/reports/bu-admin-employee-po-hours/export */
+async function exportBuAdminEmployeePoHoursReport(req, res, next) {
+  try {
+    assertBuAdminRank(req);
+    const exported = await buAdminEmployeePoHoursReportService.getExport(req.query, req.companyIds);
+    return await sendPoHoursExcel(res, exported, 'BU Admin PO Hours', 'BU Admin Employee PO Hours');
+  } catch (err) {
+    if (err.statusCode) return sendError(res, err.message, err.statusCode);
+    logger.error('exportBuAdminEmployeePoHoursReport error', { error: err.message, stack: err.stack });
+    return next(err);
+  }
+}
+
+/** GET /api/v1/reports/bu-admin-employee-po-hours/filter-options */
+const getBuAdminEmployeePoHoursFilterOptions = poHoursHandler('getBuAdminEmployeePoHoursFilterOptions', async (req) => {
+  assertBuAdminRank(req);
+  return buAdminEmployeePoHoursReportService.getFilterOptions(req.query, req.companyIds);
+}, 'Filter options fetched successfully.');
+
+/** GET /api/v1/reports/project-manager-employee-po-hours — the PM is always the authenticated caller. */
+const getProjectManagerEmployeePoHoursReport = poHoursHandler('getProjectManagerEmployeePoHoursReport', async (req) => (
+  projectManagerEmployeePoHoursReportService.getReport(req.query, req.employeeId, req.companyIds)
+), 'Project Manager employee PO hours report fetched successfully.');
+
+/** GET /api/v1/reports/project-manager-employee-po-hours/export */
+async function exportProjectManagerEmployeePoHoursReport(req, res, next) {
+  try {
+    const exported = await projectManagerEmployeePoHoursReportService.getExport(req.query, req.employeeId, req.companyIds);
+    return await sendPoHoursExcel(res, exported, 'PM PO Hours', 'Project Manager Employee PO Hours');
+  } catch (err) {
+    if (err.statusCode) return sendError(res, err.message, err.statusCode);
+    logger.error('exportProjectManagerEmployeePoHoursReport error', { error: err.message, stack: err.stack });
+    return next(err);
+  }
+}
+
+/** GET /api/v1/reports/project-manager-employee-po-hours/filter-options */
+const getProjectManagerEmployeePoHoursFilterOptions = poHoursHandler('getProjectManagerEmployeePoHoursFilterOptions', async (req) => (
+  projectManagerEmployeePoHoursReportService.getFilterOptions(req.query, req.employeeId, req.companyIds)
+), 'Filter options fetched successfully.');
+
 module.exports = {
+  getBuAdminEmployeePoHoursReport,
+  exportBuAdminEmployeePoHoursReport,
+  getBuAdminEmployeePoHoursFilterOptions,
+  getProjectManagerEmployeePoHoursReport,
+  exportProjectManagerEmployeePoHoursReport,
+  getProjectManagerEmployeePoHoursFilterOptions,
   getProjectTimesheetReport,
   getEmployeeRoleBuMappingReport,
   getTeamLeadEmployeePoHoursReport,

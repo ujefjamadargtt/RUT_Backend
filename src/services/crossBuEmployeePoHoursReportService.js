@@ -147,6 +147,15 @@ function toTotals(t) {
     own_bu_hours: own,
     cross_bu_hours: cross,
     unclassified_hours: num(t.unclassified_hours),
+    // Both bases of the work-type split. own_bu_hours / cross_bu_hours / unclassified_hours above (and total_hours)
+    // are the ORIGINAL (as-logged) figures; the adjusted_* ones are after the monthly-cap adjustment (synced work only).
+    original_total_hours: total,
+    original_own_bu_hours: own,
+    original_cross_bu_hours: cross,
+    original_unclassified_hours: num(t.unclassified_hours),
+    adjusted_own_bu_hours: num(t.adjusted_own_bu_hours),
+    adjusted_cross_bu_hours: num(t.adjusted_cross_bu_hours),
+    adjusted_unclassified_hours: num(t.adjusted_unclassified_hours),
     own_bu_percent: pct(own, total),
     cross_bu_percent: pct(cross, total),
     cross_bu_employee_count: t.cross_bu_employee_count,
@@ -206,7 +215,7 @@ async function getReport(query, authContext, companyIds) {
   }
 
   const [rows, totals, matrix] = await Promise.all([
-    repository.findRows(filters, { sortBy: query.sort_by, limit, offset: (page - 1) * limit }),
+    repository.findRows(filters, { sortBy: query.sort_by, hoursSource: query.hoursSource, limit, offset: (page - 1) * limit }),
     repository.getTotals(filters),
     repository.getBuMatrix(filters),
   ]);
@@ -239,6 +248,14 @@ const DETAIL_COLUMNS = [
   { key: 'year', label: 'Year', width: 8 },
 ];
 
+// Export: ONE hours column per metric, for the basis chosen with ?hoursSource ('O' = Original, anything else = Adjusted).
+const isOriginal = (query) => query.hoursSource === 'O';
+const detailColumnsFor = (query) => DETAIL_COLUMNS
+  .filter((c) => c.key !== (isOriginal(query) ? 'adjusted_hours' : 'logged_hours'))
+  .map((c) => (isOriginal(query) && c.key === 'logged_hours' ? { ...c, label: 'Logged Hours (Original)', width: 22 } : c));
+const flowColumnsFor = (query) => FLOW_COLUMNS
+  .map((c) => (c.key === 'hours' ? { ...c, label: isOriginal(query) ? 'Hours (Original)' : 'Hours (Adjusted)', width: 18 } : c));
+
 const FLOW_COLUMNS = [
   { key: 'employee_bu', label: 'Employee BU', width: 24 },
   { key: 'po_bu', label: 'PO BU', width: 24 },
@@ -250,25 +267,31 @@ const FLOW_COLUMNS = [
 async function getExport(query, authContext, companyIds) {
   const { period, filters } = await buildFilters(query, authContext, companyIds);
   if (!filters) {
-    return { period, sheets: [{ name: 'Cross-BU Hours', columns: DETAIL_COLUMNS, rows: [] }, { name: 'BU Flow', columns: FLOW_COLUMNS, rows: [] }] };
+    return {
+      period,
+      sheets: [
+        { name: 'Cross-BU Hours', columns: detailColumnsFor(query), rows: [] },
+        { name: 'BU Flow', columns: flowColumnsFor(query), rows: [] },
+      ],
+    };
   }
 
-  const matrix = await repository.getBuMatrix(filters);
+  const matrix = isOriginal(query) ? await repository.getBuMatrix(filters) : await repository.getBuMatrixAdjusted(filters);
   // Window COUNT comes back with the first row; probe with a 1-row page before pulling everything.
-  const probe = await repository.findRows(filters, { sortBy: query.sort_by, limit: 1, offset: 0 });
+  const probe = await repository.findRows(filters, { sortBy: query.sort_by, hoursSource: query.hoursSource, limit: 1, offset: 0 });
   if (probe.length && Number(probe[0].total_rows) > MAX_EXPORT_ROWS) {
     throw badRequest(`This download would contain ${probe[0].total_rows} rows (maximum ${MAX_EXPORT_ROWS}). Narrow the period or filters.`);
   }
-  const rows = await repository.findRows(filters, { sortBy: query.sort_by });
+  const rows = await repository.findRows(filters, { sortBy: query.sort_by, hoursSource: query.hoursSource });
 
   const flowRows = toBuFlow(matrix).employee_bu_to_po_bu.map((r) => ({ ...r, work_type_label: WORK_TYPE_LABELS[r.work_type] }));
   return {
     period,
     sheets: [
-      { name: 'Cross-BU Hours', columns: DETAIL_COLUMNS, rows: rows.map(toRecord) },
-      { name: 'BU Flow', columns: FLOW_COLUMNS, rows: flowRows },
+      { name: 'Cross-BU Hours', columns: detailColumnsFor(query), rows: rows.map(toRecord) },
+      { name: 'BU Flow', columns: flowColumnsFor(query), rows: flowRows },
     ],
   };
 }
 
-module.exports = { getReport, getExport, resolvePeriod, toRecord, toBuFlow, toTotals, DETAIL_COLUMNS };
+module.exports = { getReport, getExport, resolvePeriod, toRecord, toBuFlow, toTotals, DETAIL_COLUMNS, detailColumnsFor, flowColumnsFor };

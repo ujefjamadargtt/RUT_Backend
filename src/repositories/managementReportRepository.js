@@ -1276,7 +1276,15 @@ const CAP_M = capForMonthStartSql('m.month_start', 'companyIds');
 // IS excludable after all, contrary to this file's earlier assumption.
 const BILLABLE_ENTRY_FILTER_SQL = `sp.is_billable = true`;
 
-const PERIOD_EXPR_SQL = `(EXTRACT(YEAR FROM t.timesheet_date)::int * 100 + EXTRACT(MONTH FROM t.timesheet_date)::int)`;
+// Sort key -> its as-logged (Original basis) twin column, used when hoursSource === 'O'.
+// Keys outside this map (names, counts, available hours) sort identically on both bases.
+const ORIGINAL_SORT_TWIN = {
+  total_logged_hours: 'original_total_logged_hours',
+  utilization_pct: 'original_utilization_pct',
+  avg_bench_pct: 'original_avg_bench_pct',
+};
+
+const PERIOD_EXPR_SQL =`(EXTRACT(YEAR FROM t.timesheet_date)::int * 100 + EXTRACT(MONTH FROM t.timesheet_date)::int)`;
 
 // BU scope for the 2 Bench reports below — deliberately NOT the usual
 // "(sp.company_id IN (:companyIds) OR sp.company_id IS NULL)" idiom used
@@ -1386,7 +1394,9 @@ async function getPMWiseUtilization(filters) {
 
   const hoursCol = (hoursSource === 'O') ? 'COALESCE(t.original_hours, t.hours_logged)' : 'COALESCE(t.modified_hours, t.hours_logged)';
   const allowedSort = ['pm_name', 'resource_count', 'project_count', 'total_logged_hours', 'total_available_hours', 'utilization_pct'];
-  const safeSort = allowedSort.includes(sortBy) ? sortBy : 'utilization_pct';
+  const allowedSafeSort = allowedSort.includes(sortBy) ? sortBy : 'utilization_pct';
+  // Original basis: sort by the as-logged twin of the chosen key (fixed allow-list map, never request input).
+  const safeSort = (hoursSource === 'O' && ORIGINAL_SORT_TWIN[allowedSafeSort]) || allowedSafeSort;
   const safeOrder = sortOrder && sortOrder.toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
   const replacements = {
@@ -1541,7 +1551,9 @@ async function getProjectWiseUtilization(filters) {
 
   const hoursCol = (hoursSource === 'O') ? 'COALESCE(t.original_hours, t.hours_logged)' : 'COALESCE(t.modified_hours, t.hours_logged)';
   const allowedSort = ['client_name', 'project_name', 'service_po_name', 'resource_count', 'total_logged_hours', 'total_available_hours', 'utilization_pct'];
-  const safeSort = allowedSort.includes(sortBy) ? sortBy : 'utilization_pct';
+  const allowedSafeSort = allowedSort.includes(sortBy) ? sortBy : 'utilization_pct';
+  // Original basis: sort by the as-logged twin of the chosen key (fixed allow-list map, never request input).
+  const safeSort = (hoursSource === 'O' && ORIGINAL_SORT_TWIN[allowedSafeSort]) || allowedSafeSort;
   const safeOrder = sortOrder && sortOrder.toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
   const replacements = {
@@ -1787,7 +1799,9 @@ async function getResourceWiseBench(filters) {
 
   const hoursCol = (hoursSource === 'O') ? 'COALESCE(t.original_hours, t.hours_logged)' : 'COALESCE(t.modified_hours, t.hours_logged)';
   const allowedSort = ['full_name', 'avg_bench_pct'];
-  const safeSort = allowedSort.includes(sortBy) ? sortBy : 'avg_bench_pct';
+  const allowedSafeSort = allowedSort.includes(sortBy) ? sortBy : 'avg_bench_pct';
+  // Original basis: sort by the as-logged twin (original_avg_bench_pct) via the fixed allow-list map.
+  const safeSort = (hoursSource === 'O' && ORIGINAL_SORT_TWIN[allowedSafeSort]) || allowedSafeSort;
   const safeOrder = sortOrder && sortOrder.toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
   const replacements = {

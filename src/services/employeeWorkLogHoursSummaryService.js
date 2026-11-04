@@ -129,6 +129,9 @@ async function getDetails(employeeId, query, authContext, companyIds) {
       is_cross_bu: result.hasCrossBu === true,
     },
     total_hours: asNumber(result.totalHours),
+    // This report reads employee_work_logs, which only carries the as-logged hours (the monthly-cap
+    // adjustment exists only on the synced `timesheets` rows), so Original == the figure above.
+    original_total_hours: asNumber(result.totalHours),
     work_log_count: result.workLogCount,
     entries: result.entries.map((entry) => ({ ...entry, hours: asNumber(entry.hours), is_cross_bu: entry.is_cross_bu === true })),
     meta: getPaginationMeta(result.count, page, limit),

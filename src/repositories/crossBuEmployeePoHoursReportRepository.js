@@ -44,12 +44,22 @@ const EMPLOYEE_HOME_BU_SQL = `CASE
   ELSE eb.primary_bu_id
 END`;
 
+// Static allow-list: sort_by only ever selects one of these literals, never reaches the SQL itself.
+// `hours` follows the Hours basis: Original = the as-logged hours (`hours` / logged_hours), Adjusted = the
+// after-cap `adjusted_hours` (NULL — unsynced — rows last).
 const SORTS = {
   employee: 'e.full_name ASC, sp.service_po_name ASC',
   po: 'sp.service_po_name ASC, e.full_name ASC',
   hours: 'hours DESC, e.full_name ASC',
+  hours_adjusted: 'adjusted_hours DESC NULLS LAST, e.full_name ASC',
   work_type: 'work_type ASC, e.full_name ASC, sp.service_po_name ASC',
 };
+
+/** ORDER BY literal for a sort_by key under the given Hours basis ('O' = Original, anything else = Adjusted). */
+function resolveOrderBy(sortBy, hoursSource) {
+  if (sortBy === 'hours') return hoursSource === 'O' ? SORTS.hours : SORTS.hours_adjusted;
+  return SORTS[sortBy] || SORTS.employee;
+}
 
 // Employee -> set of BUs, rolled up to the top-level BU, plus the Sub-BUs they sit in.
 const CTE_SQL = `
@@ -186,9 +196,9 @@ function buildWhere(f) {
  * One page (or, with no limit, every row) of Employee x PO x month rows, plus the
  * total row count of the whole filtered set (window COUNT, so a page query needs no second one).
  */
-async function findRows(filters, { sortBy = 'employee', limit = null, offset = 0 } = {}) {
+async function findRows(filters, { sortBy = 'employee', hoursSource, limit = null, offset = 0 } = {}) {
   const { whereSql, replacements } = buildWhere(filters);
-  const orderBy = SORTS[sortBy] || SORTS.employee;
+  const orderBy = resolveOrderBy(sortBy, hoursSource);
   const paging = limit != null ? 'LIMIT :limit OFFSET :offset' : '';
 
   return sequelize.query(
@@ -238,13 +248,17 @@ async function getTotals(filters) {
   const adjusted = replacements.includeSynced
     ? await sequelize.query(
       `${CTE_SQL},
-       keys AS (SELECT DISTINCT wl.employee_id, wl.service_po_id, wl.work_date ${FROM_SQL} WHERE ${whereSql})
-       SELECT COALESCE(ROUND(SUM(COALESCE(t.modified_hours, t.hours_logged))::NUMERIC, 2), 0) AS adjusted_total_hours
+       keys AS (SELECT DISTINCT wl.employee_id, wl.service_po_id, wl.work_date, (${WORK_TYPE_SQL}) AS work_type ${FROM_SQL} WHERE ${whereSql})
+       SELECT
+         COALESCE(ROUND(SUM(COALESCE(t.modified_hours, t.hours_logged))::NUMERIC, 2), 0) AS adjusted_total_hours,
+         COALESCE(ROUND(SUM(CASE WHEN k.work_type = 'own' THEN COALESCE(t.modified_hours, t.hours_logged) ELSE 0 END)::NUMERIC, 2), 0) AS adjusted_own_bu_hours,
+         COALESCE(ROUND(SUM(CASE WHEN k.work_type = 'cross' THEN COALESCE(t.modified_hours, t.hours_logged) ELSE 0 END)::NUMERIC, 2), 0) AS adjusted_cross_bu_hours,
+         COALESCE(ROUND(SUM(CASE WHEN k.work_type = 'na' THEN COALESCE(t.modified_hours, t.hours_logged) ELSE 0 END)::NUMERIC, 2), 0) AS adjusted_unclassified_hours
          FROM timesheets t
          JOIN keys k ON k.employee_id = t.employee_id AND k.service_po_id = t.service_po_id AND k.work_date = t.timesheet_date`,
       { replacements, type: QueryTypes.SELECT }
     )
-    : [{ adjusted_total_hours: 0 }];
+    : [{ adjusted_total_hours: 0, adjusted_own_bu_hours: 0, adjusted_cross_bu_hours: 0, adjusted_unclassified_hours: 0 }];
   const [row] = await sequelize.query(
     `${CTE_SQL}
      SELECT
@@ -258,7 +272,13 @@ async function getTotals(filters) {
      WHERE ${whereSql}`,
     { replacements, type: QueryTypes.SELECT }
   );
-  return { ...row, adjusted_total_hours: adjusted[0].adjusted_total_hours };
+  return {
+    ...row,
+    adjusted_total_hours: adjusted[0].adjusted_total_hours,
+    adjusted_own_bu_hours: adjusted[0].adjusted_own_bu_hours,
+    adjusted_cross_bu_hours: adjusted[0].adjusted_cross_bu_hours,
+    adjusted_unclassified_hours: adjusted[0].adjusted_unclassified_hours,
+  };
 }
 
 /**
@@ -285,4 +305,37 @@ async function getBuMatrix(filters) {
   );
 }
 
-module.exports = { findRows, getTotals, getBuMatrix, buildWhere, WORK_TYPE_SQL };
+/**
+ * Same Employee BU x PO BU pairs as getBuMatrix(), but with the ADJUSTED (after-cap) hours of the synced
+ * timesheets of those same Employee + PO + day keys — used by the Adjusted-basis export. A pair whose work is
+ * not synced yet has no adjusted hours and does not appear (0, never a guess).
+ */
+async function getBuMatrixAdjusted(filters) {
+  const { whereSql, replacements } = buildWhere(filters);
+  if (!replacements.includeSynced) return [];
+  return sequelize.query(
+    `${CTE_SQL},
+     keys AS (
+       SELECT DISTINCT wl.employee_id, wl.service_po_id, wl.work_date,
+              emp_home.id AS employee_bu_id, emp_home.company_name AS employee_bu,
+              po_root.id AS po_bu_id, po_root.company_name AS po_bu
+       ${FROM_SQL}
+       LEFT JOIN companies emp_home ON emp_home.id = (${EMPLOYEE_HOME_BU_SQL})
+       WHERE ${whereSql} AND sp.is_centralised IS NOT TRUE
+     )
+     SELECT
+       k.employee_bu_id,
+       k.employee_bu,
+       k.po_bu_id,
+       k.po_bu,
+       ROUND(SUM(COALESCE(t.modified_hours, t.hours_logged))::NUMERIC, 2) AS hours,
+       COUNT(DISTINCT k.employee_id)::int AS employee_count
+     FROM timesheets t
+     JOIN keys k ON k.employee_id = t.employee_id AND k.service_po_id = t.service_po_id AND k.work_date = t.timesheet_date
+     GROUP BY k.employee_bu_id, k.employee_bu, k.po_bu_id, k.po_bu
+     ORDER BY SUM(COALESCE(t.modified_hours, t.hours_logged)) DESC`,
+    { replacements, type: QueryTypes.SELECT }
+  );
+}
+
+module.exports = { findRows, getTotals, getBuMatrix, getBuMatrixAdjusted, buildWhere, resolveOrderBy, WORK_TYPE_SQL };

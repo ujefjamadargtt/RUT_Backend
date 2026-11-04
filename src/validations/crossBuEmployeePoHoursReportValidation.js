@@ -7,6 +7,10 @@ const { validateApprovalStatus } = require('../utils/approvalStatusFilter');
 const idList = Joi.string().trim().pattern(/^\d+(\s*,\s*\d+)*$/).optional().allow('')
   .messages({ 'string.pattern.base': '{{#label}} must be a comma-separated list of ids.' });
 
+// Hours basis switch: 'O' = Original (as-logged, pre-cap) hours; anything else (omitted, 'M', unknown) = Adjusted.
+// Invalid values are normalised to 'M' rather than rejected.
+const hoursSourceField = Joi.string().allow('').custom((value) => (value === 'O' ? 'O' : 'M')).optional();
+
 /**
  * Cross-BU Employee & Service PO Hours Report. Employee BU and PO BU are separate, independent
  * filters (never one shared "business unit"). Period: month + year, or start_date + end_date
@@ -35,6 +39,7 @@ const crossBuEmployeePoHoursReportQuerySchema = Joi.object({
   approval_status: Joi.string().trim().custom(validateApprovalStatus).default('all'),
   search: Joi.string().trim().max(100).allow('').optional(),
 
+  hoursSource: hoursSourceField,
   sort_by: Joi.string().valid('employee', 'po', 'hours', 'work_type').default('employee'),
   page: Joi.number().integer().min(1).default(1),
   limit: Joi.number().integer().min(1).max(500).default(50),

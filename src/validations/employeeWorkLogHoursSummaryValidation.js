@@ -2,6 +2,10 @@
 
 const Joi = require('joi');
 
+// Hours basis switch: 'O' = Original (as-logged, pre-cap) hours; anything else (omitted, 'M', unknown) = Adjusted.
+// Invalid values are normalised to 'M' rather than rejected.
+const hoursSourceField = Joi.string().allow('').custom((value) => (value === 'O' ? 'O' : 'M')).optional();
+
 const periodFields = {
   // Keep the validated ISO date as YYYY-MM-DD for the repository's DATE
   // predicates; Joi otherwise converts it into a JavaScript Date object.
@@ -45,6 +49,7 @@ const employeeWorkLogHoursSummaryQuerySchema = Joi.object({
   entityId: Joi.number().integer().positive().optional(),
   ...multiSelectFields,
   search: Joi.string().trim().max(100).allow('').optional(),
+  hoursSource: hoursSourceField,
   sortBy: Joi.string().valid('employee_name', 'employee_code', 'total_hours').default('employee_name'),
   sortOrder: Joi.string().valid('ASC', 'DESC').default('ASC'),
   page: Joi.number().integer().min(1).default(1),
@@ -56,6 +61,7 @@ const employeeWorkLogHoursSummaryDetailQuerySchema = Joi.object({
   company_id: Joi.number().integer().positive().optional(),
   entityId: Joi.number().integer().positive().optional(),
   ...multiSelectFields,
+  hoursSource: hoursSourceField,
   page: Joi.number().integer().min(1).default(1),
   limit: Joi.number().integer().min(1).max(100).default(20),
 }).custom(requireDateOrMonth, 'date-or-month-period');

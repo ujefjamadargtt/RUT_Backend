@@ -24,9 +24,8 @@ const round2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
 function resolvePeriod(query) {
   const range = resolveDateRange(query);
   if (range.startDate || range.endDate) {
-    const startDate = range.startDate || range.endDate;
-    const endDate = range.endDate || range.startDate;
-    return { startDate, endDate };
+    const fmt = (d) => moment.utc(d).format('YYYY-MM-DD');
+    return { startDate: fmt(range.startDate || range.endDate), endDate: fmt(range.endDate || range.startDate) };
   }
   const start = moment().startOf('month');
   return { startDate: start.format('YYYY-MM-DD'), endDate: start.clone().endOf('month').format('YYYY-MM-DD') };
