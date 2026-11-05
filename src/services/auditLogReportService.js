@@ -43,6 +43,7 @@ const ENTITY_LABELS = {
   resource_budget_master: 'Resource Budget',
   cost_budget_master: 'Cost Budget',
   system_settings: 'System Setting',
+  site_logos: 'Site Logo',
 };
 
 const ACTION_LABELS = {

@@ -372,7 +372,41 @@ const handleProjectUpload = (req, res, next) => {
   });
 };
 
+// ── Memory Storage: Site Logo (bytes go to Postgres, never to disk) ───────────
+const LOGO_MAX_BYTES = 5 * 1024 * 1024; // 5 MB
+const uploadLogoMemory = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: LOGO_MAX_BYTES, files: 1 },
+});
+const uploadLogoSingle = uploadLogoMemory.single('file');
+
+/**
+ * Site logo upload (field name "file"). Multer errors become clean JSON here:
+ * LIMIT_FILE_SIZE -> 413, anything else -> 422. Type/signature checks live in siteLogoService.
+ */
+const handleLogoUpload = (req, res, next) => {
+  uploadLogoSingle(req, res, (err) => {
+    if (!err) return next();
+    if (err instanceof multer.MulterError) {
+      const tooLarge = err.code === 'LIMIT_FILE_SIZE';
+      return res.status(tooLarge ? 413 : 422).json({
+        success: false,
+        message: tooLarge
+          ? 'Logo is too large. Maximum allowed size is 5 MB.'
+          : err.code === 'LIMIT_UNEXPECTED_FILE'
+            ? 'Unexpected upload field. Send the image in a single field named "file".'
+            : 'Logo upload failed: ' + err.message,
+        code: 'UPLOAD_ERROR',
+      });
+    }
+    return next(err);
+  });
+};
+
 module.exports = {
+  handleLogoUpload,
+  uploadLogoMemory,
+  LOGO_MAX_BYTES,
   uploadExcel,
   handleTimesheetUpload,
   UPLOAD_DIR,

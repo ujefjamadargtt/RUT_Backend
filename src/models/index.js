@@ -63,6 +63,8 @@ const AuditLog               = require('./AuditLog')(sequelize);
 const UserSession            = require('./UserSession')(sequelize);
 const TimesheetImportHistory = require('./TimesheetImportHistory')(sequelize);
 const TimesheetImportError   = require('./TimesheetImportError')(sequelize);
+const SiteLogo               = require('./SiteLogo')(sequelize);
+SiteLogo.belongsTo(Employee, { foreignKey: 'uploaded_by', as: 'uploader', constraints: false });
 const Notification           = require('./Notification')(sequelize);
 const FormMaster             = require('./FormMaster')(sequelize);
 const Category                = require('./Category')(sequelize);
@@ -512,6 +514,7 @@ module.exports = {
   UserSession,
   TimesheetImportHistory,
   TimesheetImportError,
+  SiteLogo,
   Notification,
   FormMaster,
   Category,

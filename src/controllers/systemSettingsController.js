@@ -1,8 +1,9 @@
 'use strict';
 
 const monthlyCapService = require('../services/monthlyCapService');
+const siteLogoService = require('../services/siteLogoService');
 const { getIpAddress } = require('../middlewares/auditLog');
-const { sendSuccess, sendError } = require('../utils/response');
+const { sendSuccess, sendError, sendCreated } = require('../utils/response');
 const logger = require('../utils/logger');
 
 /**
@@ -54,4 +55,65 @@ const updateMonthlyCap = async (req, res, next) => {
   }
 };
 
-module.exports = { getMonthlyCap, updateMonthlyCap };
+const handleErr = (res, next, label, req, err) => {
+  if (err.statusCode) return sendError(res, err.message, err.statusCode);
+  logger.error('systemSettings ' + label + ' error', { error: err.message, userId: req.userId });
+  return next(err);
+};
+
+/** GET /system-settings/site-logo — PUBLIC (login page). data is null when no logo is active. */
+const getSiteLogo = async (req, res, next) => {
+  try {
+    const data = await siteLogoService.getActiveLogo();
+    return sendSuccess(res, data, 'Site logo fetched successfully.');
+  } catch (err) { return handleErr(res, next, 'getSiteLogo', req, err); }
+};
+
+/** GET /system-settings/logos — Platform Admin only. */
+const listLogos = async (req, res, next) => {
+  try {
+    return sendSuccess(res, await siteLogoService.listLogos(), 'Logos fetched successfully.');
+  } catch (err) { return handleErr(res, next, 'listLogos', req, err); }
+};
+
+/** POST /system-settings/logos — Platform Admin only (multipart, field "file"). */
+const uploadLogo = async (req, res, next) => {
+  try {
+    const data = await siteLogoService.uploadLogo(req.file, req.employeeId || req.userId, getIpAddress(req));
+    return sendCreated(res, data, 'Logo uploaded successfully. Select it to make it the site logo.');
+  } catch (err) { return handleErr(res, next, 'uploadLogo', req, err); }
+};
+
+/** PUT /system-settings/logos/:id/activate — Platform Admin only. */
+const activateLogo = async (req, res, next) => {
+  try {
+    const data = await siteLogoService.activateLogo(req.params.id, req.employeeId || req.userId, getIpAddress(req));
+    return sendSuccess(res, data, 'Site logo updated successfully.');
+  } catch (err) { return handleErr(res, next, 'activateLogo', req, err); }
+};
+
+/** GET /system-settings/logos/:id/image — PUBLIC; streams the bytes. */
+const getLogoImage = async (req, res, next) => {
+  try {
+    const img = await siteLogoService.getLogoImage(req.params.id);
+    if (!img) return sendError(res, 'Logo not found.', 404);
+    res.set({
+      'Content-Type': img.mime_type,
+      'Content-Length': img.data.length,
+      'Cache-Control': 'public, max-age=31536000, immutable',
+      'X-Content-Type-Options': 'nosniff',
+      'Cross-Origin-Resource-Policy': 'cross-origin',
+    });
+    return res.status(200).end(img.data);
+  } catch (err) { return handleErr(res, next, 'getLogoImage', req, err); }
+};
+
+module.exports = {
+  getMonthlyCap,
+  updateMonthlyCap,
+  getSiteLogo,
+  listLogos,
+  uploadLogo,
+  activateLogo,
+  getLogoImage,
+};
