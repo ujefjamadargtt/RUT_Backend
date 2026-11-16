@@ -367,18 +367,26 @@ const getDailyHours = async (date, employeeId, excludeId = null, companyId) => {
  * Approval breakdown per date for the employee calendar — one row per date that has any live line or
  * any deleted line. Counts are per work-log line. approved = approved OR synced; reverted = pending
  * WITH a revert_reason (an approver reverted an approved log); pending = pending without one;
- * deleted = soft-deleted lines. Own employee only (same scoping as getCalendarSummary).
+ * deleted = soft-deleted lines removed ONE AT A TIME BY SOMEONE ELSE (deleted_by set and not this
+ * employee) — the employee clearing their own entry, or a whole-day/month replace-save
+ * (deleted_via = 'replace'), is routine self-editing, not a noteworthy deletion. Own employee only
+ * (same scoping as getCalendarSummary).
  * @param {object} params - { employeeId, month, year }
  * @returns {Promise<Array<{ date, approved, pending, rejected, reverted, deleted }>>}
  */
 const getCalendarStatusCounts = async ({ employeeId, month, year }) => {
   const monthNum = parseInt(month, 10);
   const yearNum = parseInt(year, 10);
+  const employeeIdNum = parseInt(employeeId, 10);
   if (!Number.isInteger(monthNum) || !Number.isInteger(yearNum)) {
     throw new Error(`getCalendarStatusCounts: month/year must be numbers (got month=${month}, year=${year}).`);
   }
   const live = '"deleted_at" IS NULL';
   const hasRevert = `"revert_reason" IS NOT NULL AND BTRIM("revert_reason") <> ''`;
+  // Someone OTHER than the employee deleted this line individually — never a self-delete and
+  // never a replace-save swap (deleted_via = 'replace').
+  const deletedByOther = `"deleted_at" IS NOT NULL AND "deleted_via" IS DISTINCT FROM 'replace' `
+    + `AND "deleted_by" IS NOT NULL AND "deleted_by" <> ${employeeIdNum}`;
   const rows = await EmployeeWorkLog.findAll({
     paranoid: false,
     attributes: [
@@ -387,14 +395,14 @@ const getCalendarStatusCounts = async ({ employeeId, month, year }) => {
       [literal(`COUNT(*) FILTER (WHERE ${live} AND "status" = 'pending' AND NOT (${hasRevert}))`), 'pending'],
       [literal(`COUNT(*) FILTER (WHERE ${live} AND "status" = 'rejected')`), 'rejected'],
       [literal(`COUNT(*) FILTER (WHERE ${live} AND "status" = 'pending' AND (${hasRevert}))`), 'reverted'],
-      [literal('COUNT(*) FILTER (WHERE "deleted_at" IS NOT NULL)'), 'deleted'],
+      [literal(`COUNT(*) FILTER (WHERE ${deletedByOther})`), 'deleted'],
     ],
     where: {
       [Op.and]: [
         literal(`EXTRACT(MONTH FROM work_date) = ${monthNum}`),
         literal(`EXTRACT(YEAR  FROM work_date) = ${yearNum}`),
       ],
-      employee_id: parseInt(employeeId, 10),
+      employee_id: employeeIdNum,
     },
     group: ['work_date'],
     raw: true,
