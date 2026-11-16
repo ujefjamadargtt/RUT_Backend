@@ -189,7 +189,7 @@ async function getComplianceData(companyId, period) {
   const [byStatus, pendingByManager, missing] = await Promise.all([
     sequelize.query(
       `SELECT wl.status, COUNT(*) AS logs, COUNT(DISTINCT wl.employee_id) AS employees
-         FROM employee_work_logs wl
+         FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) wl
         WHERE wl.work_date BETWEEN :startDate AND :endDate AND ${scopeSql}
         GROUP BY wl.status`,
       { replacements, type: QueryTypes.SELECT }
@@ -198,7 +198,7 @@ async function getComplianceData(companyId, period) {
       `SELECT COALESCE(m.full_name, 'No primary manager') AS manager_name,
               COUNT(*) AS pending_logs, COUNT(DISTINCT wl.employee_id) AS employees,
               TO_CHAR(MIN(wl.work_date), 'YYYY-MM-DD') AS oldest_pending_date
-         FROM employee_work_logs wl
+         FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) wl
          LEFT JOIN manager_employee_mappings mm
            ON mm.employee_id = wl.employee_id AND mm.mapping_type = 'PRIMARY' AND mm.status = 'active'
          LEFT JOIN employees m ON m.id = mm.manager_employee_id
@@ -210,7 +210,7 @@ async function getComplianceData(companyId, period) {
     sequelize.query(
       `SELECT e.full_name FROM employees e
         WHERE e.is_deleted = false AND e.status = 'active' AND ${countableEmployeeSql('e')} AND ${EMPLOYEE_IN_BU_SQL}
-          AND NOT EXISTS (SELECT 1 FROM employee_work_logs wl
+          AND NOT EXISTS (SELECT 1 FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) wl
                            WHERE wl.employee_id = e.id AND wl.work_date BETWEEN :startDate AND :endDate)
         ORDER BY e.full_name`,
       { replacements, type: QueryTypes.SELECT }
@@ -241,7 +241,7 @@ async function getComplianceData(companyId, period) {
  */
 async function getPendingApprovalCount(companyId, period) {
   const [row] = await sequelize.query(
-    `SELECT COUNT(*) AS logs FROM employee_work_logs wl
+    `SELECT COUNT(*) AS logs FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) wl
       WHERE wl.status = 'pending' AND wl.work_date BETWEEN :startDate AND :endDate
         AND wl.employee_id IN (SELECT e.id FROM employees e WHERE e.is_deleted = false AND ${EMPLOYEE_IN_BU_SQL})`,
     { replacements: { companyId, startDate: period.start, endDate: period.end }, type: QueryTypes.SELECT }

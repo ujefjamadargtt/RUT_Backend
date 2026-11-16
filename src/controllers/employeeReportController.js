@@ -12,11 +12,27 @@ const { sendSuccess, sendError } = require('../utils/response');
  * Thin layer: parse request -> call service -> respond as JSON or a file.
  */
 
-async function respond(res, format, title, filenamePrefix, result) {
+const MAX_PAGE_LIMIT = 100;
+
+async function respond(res, format, title, filenamePrefix, result, query = {}) {
   const { rows, totalHours, columns } = result;
 
   if (format === 'json') {
-    return sendSuccess(res, { rows, totalHours }, `${title} fetched successfully.`);
+    // Pagination applies to the JSON response only; totalHours and summary always cover the whole period.
+    const page = Math.max(parseInt(query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(query.limit, 10) || 10, 1), MAX_PAGE_LIMIT);
+    const total = rows.length;
+    const offset = (page - 1) * limit;
+    return sendSuccess(res, {
+      rows: rows.slice(offset, offset + limit),
+      totalHours,
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+      summary: {
+        totalEntries: total,
+        projectCount: new Set(rows.map((r) => r.project)).size,
+        servicePoCount: new Set(rows.map((r) => r.servicePO)).size,
+      },
+    }, `${title} fetched successfully.`);
   }
 
   let buffer;
@@ -51,7 +67,7 @@ const getDaily = async (req, res, next) => {
   try {
     const { date, format = 'json' } = req.query;
     const result = await employeeReportService.getDailyReport(req.employeeId, req.companyId, date);
-    return await respond(res, format, 'Daily Timesheet Report', `daily-report-${date}`, result);
+    return await respond(res, format, 'Daily Timesheet Report', `daily-report-${date}`, result, req.query);
   } catch (err) {
     next(err);
   }
@@ -64,7 +80,7 @@ const getMonthly = async (req, res, next) => {
   try {
     const { month, year, format = 'json' } = req.query;
     const result = await employeeReportService.getMonthlyReport(req.employeeId, req.companyId, month, year);
-    return await respond(res, format, 'Monthly Timesheet Report', `monthly-report-${year}-${month}`, result);
+    return await respond(res, format, 'Monthly Timesheet Report', `monthly-report-${year}-${month}`, result, req.query);
   } catch (err) {
     next(err);
   }
@@ -77,7 +93,7 @@ const getRange = async (req, res, next) => {
   try {
     const { startDate, endDate, format = 'json' } = req.query;
     const result = await employeeReportService.getDateRangeReport(req.employeeId, req.companyId, startDate, endDate);
-    return await respond(res, format, 'Date Range Timesheet Report', `range-report-${startDate}-to-${endDate}`, result);
+    return await respond(res, format, 'Date Range Timesheet Report', `range-report-${startDate}-to-${endDate}`, result, req.query);
   } catch (err) {
     next(err);
   }

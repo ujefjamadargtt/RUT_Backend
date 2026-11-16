@@ -164,13 +164,11 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data, options = {}) =
     const approvedRows = await employeeWorkLogRepository.findApprovedInRange(
       employeeId, startDate, endDate, { servicePOIds: Array.isArray(scopeServicePOIds) ? scopeServicePOIds : null }
     );
-    const linePoIds = new Set(lines.map((line) => Number(line.service_po_id)));
-    const clash = approvedRows.find((row) => linePoIds.has(Number(row.service_po_id)));
+    // Lock is per LINE (Service PO + hierarchy node), not per Service PO: other lines of the same PO stay open.
+    const lineKeys = new Set(lines.map((line) => `${Number(line.service_po_id)}|${line.hierarchy_node_id || 0}`));
+    const clash = approvedRows.find((row) => lineKeys.has(`${Number(row.service_po_id)}|${row.hierarchy_node_id || 0}`));
     if (clash) {
-      throw conflictError(
-        `An approved timesheet log already exists for Service PO #${clash.service_po_id} in this month (${clash.work_date}). `
-        + 'It cannot be replaced; ask your approver to revert or delete it first.'
-      );
+      throw conflictError(`This line is already approved for ${clash.work_date}. Ask your approver to revert it to edit.`);
     }
     approvedHoursKept = approvedRows.reduce((sum, row) => sum + parseFloat(row.hours), 0);
   }

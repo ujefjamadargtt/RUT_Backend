@@ -111,7 +111,7 @@ async function findOriginalHours(employeeIds, { startDate, endDate }, filters) {
   const po = buildPoFilter(filters, { companyExpr: 'COALESCE(sp.company_id, wl.company_id)', replacements });
   return sequelize.query(
     `SELECT wl.employee_id, wl.service_po_id, ROUND(SUM(wl.hours)::numeric, 2) AS hours
-       FROM employee_work_logs wl
+       FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) wl
        INNER JOIN service_pos sp ON sp.id = wl.service_po_id AND sp.is_deleted = false
        ${po.needsBu ? BU_JOINS('COALESCE(sp.company_id, wl.company_id)') : ''}
       WHERE wl.employee_id IN (:employeeIds)

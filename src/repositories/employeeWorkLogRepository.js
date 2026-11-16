@@ -197,7 +197,34 @@ const checkDuplicate = async (employeeId, servicePOId, hierarchyNodeId, date, ex
  * @returns {Promise<EmployeeWorkLog>}
  */
 const create = async (data, options = {}) => {
-  return EmployeeWorkLog.create(data, options);
+  const row = await EmployeeWorkLog.create(data, options);
+  await purgeSupersededDeletes([row], options.transaction);
+  return row;
+};
+
+/**
+ * Work logs are soft-deleted (deleted_at) so the employee calendar can count deletions. A line that is
+ * re-created for the same (employee, Service PO, node, date) — notably every line a replace-save
+ * re-inserts after clearing the day — supersedes its own tombstone, so the tombstone is removed for
+ * good: only lines that genuinely disappeared stay counted as "deleted".
+ * @param {EmployeeWorkLog[]} createdRows
+ * @param {object} [transaction]
+ */
+const purgeSupersededDeletes = async (createdRows, transaction) => {
+  for (const row of createdRows) {
+    await EmployeeWorkLog.destroy({
+      where: {
+        employee_id: row.employee_id,
+        service_po_id: row.service_po_id,
+        work_date: row.work_date,
+        hierarchy_node_id: row.hierarchy_node_id ?? null,
+        deleted_at: { [Op.ne]: null },
+      },
+      paranoid: false,
+      force: true,
+      transaction,
+    });
+  }
 };
 
 /**
@@ -211,7 +238,9 @@ const create = async (data, options = {}) => {
  */
 const bulkCreate = async (rows, transaction) => {
   if (rows.length === 0) return [];
-  return EmployeeWorkLog.bulkCreate(rows, { transaction, returning: true });
+  const created = await EmployeeWorkLog.bulkCreate(rows, { transaction, returning: true });
+  await purgeSupersededDeletes(created, transaction);
+  return created;
 };
 
 /**
@@ -236,11 +265,11 @@ const bulkCreate = async (rows, transaction) => {
  * @returns {Promise<number>} rows deleted
  */
 const deleteByEmployeeAndDate = async (employeeId, date, companyId, transaction, keepApproved = false) => {
-  return EmployeeWorkLog.destroy({
-    // keepApproved: the employee's replace-save must never wipe a row an approver already approved.
-    where: { employee_id: employeeId, work_date: date, ...(keepApproved && { status: { [Op.ne]: 'approved' } }) },
-    transaction,
-  });
+  // keepApproved: the employee's replace-save must never wipe a row an approver already approved.
+  const where = { employee_id: employeeId, work_date: date, ...(keepApproved && { status: { [Op.ne]: 'approved' } }) };
+  // Swapped out by a replace-save, not a real one-at-a-time delete (see deleted_via).
+  await EmployeeWorkLog.update({ deleted_via: 'replace' }, { where, transaction, silent: true });
+  return EmployeeWorkLog.destroy({ where, transaction });
 };
 
 /**
@@ -274,8 +303,33 @@ const update = async (id, data, companyId, transaction = null) => {
  * @param {number} [companyId] - unused, kept for call-site compatibility
  * @returns {Promise<number>} rows deleted
  */
-const deleteById = async (id, companyId) => {
+const deleteById = async (id, companyId, actorId = null) => {
+  // Mark it as a one-at-a-time delete (not a replace-save swap) before the soft delete stamps deleted_at.
+  await EmployeeWorkLog.update({ deleted_by: actorId, deleted_via: 'single' }, { where: { id }, silent: true });
   return EmployeeWorkLog.destroy({ where: { id } });
+};
+
+/**
+ * The employee's own one-at-a-time deleted lines (soft-deleted rows with deleted_via = 'single') in a
+ * date range — never rows swapped out by a replace-save. Newest delete first.
+ * @param {object} params - { employeeId, startDate, endDate, poId }
+ * @returns {Promise<EmployeeWorkLog[]>}
+ */
+const findDeletedByEmployee = async ({ employeeId, startDate, endDate, poId }) => {
+  const where = {
+    employee_id: parseInt(employeeId, 10),
+    deleted_at: { [Op.ne]: null },
+    deleted_via: 'single',
+  };
+  if (poId) where.service_po_id = parseInt(poId, 10);
+  if (startDate) where.work_date = { ...where.work_date, [Op.gte]: startDate };
+  if (endDate) where.work_date = { ...where.work_date, [Op.lte]: endDate };
+  return EmployeeWorkLog.findAll({
+    where,
+    paranoid: false,
+    include: buildIncludes(),
+    order: [['work_date', 'DESC'], ['deleted_at', 'DESC'], ['id', 'DESC']],
+  });
 };
 
 /**
@@ -307,6 +361,53 @@ const getDailyHours = async (date, employeeId, excludeId = null, companyId) => {
   });
 
   return parseFloat(result?.total_hours ?? 0) || 0;
+};
+
+/**
+ * Approval breakdown per date for the employee calendar — one row per date that has any live line or
+ * any deleted line. Counts are per work-log line. approved = approved OR synced; reverted = pending
+ * WITH a revert_reason (an approver reverted an approved log); pending = pending without one;
+ * deleted = soft-deleted lines. Own employee only (same scoping as getCalendarSummary).
+ * @param {object} params - { employeeId, month, year }
+ * @returns {Promise<Array<{ date, approved, pending, rejected, reverted, deleted }>>}
+ */
+const getCalendarStatusCounts = async ({ employeeId, month, year }) => {
+  const monthNum = parseInt(month, 10);
+  const yearNum = parseInt(year, 10);
+  if (!Number.isInteger(monthNum) || !Number.isInteger(yearNum)) {
+    throw new Error(`getCalendarStatusCounts: month/year must be numbers (got month=${month}, year=${year}).`);
+  }
+  const live = '"deleted_at" IS NULL';
+  const hasRevert = `"revert_reason" IS NOT NULL AND BTRIM("revert_reason") <> ''`;
+  const rows = await EmployeeWorkLog.findAll({
+    paranoid: false,
+    attributes: [
+      'work_date',
+      [literal(`COUNT(*) FILTER (WHERE ${live} AND "status" IN ('approved', 'synced'))`), 'approved'],
+      [literal(`COUNT(*) FILTER (WHERE ${live} AND "status" = 'pending' AND NOT (${hasRevert}))`), 'pending'],
+      [literal(`COUNT(*) FILTER (WHERE ${live} AND "status" = 'rejected')`), 'rejected'],
+      [literal(`COUNT(*) FILTER (WHERE ${live} AND "status" = 'pending' AND (${hasRevert}))`), 'reverted'],
+      [literal('COUNT(*) FILTER (WHERE "deleted_at" IS NOT NULL)'), 'deleted'],
+    ],
+    where: {
+      [Op.and]: [
+        literal(`EXTRACT(MONTH FROM work_date) = ${monthNum}`),
+        literal(`EXTRACT(YEAR  FROM work_date) = ${yearNum}`),
+      ],
+      employee_id: parseInt(employeeId, 10),
+    },
+    group: ['work_date'],
+    raw: true,
+  });
+
+  return rows.map((r) => ({
+    date: r.work_date,
+    approved: parseInt(r.approved, 10) || 0,
+    pending: parseInt(r.pending, 10) || 0,
+    rejected: parseInt(r.rejected, 10) || 0,
+    reverted: parseInt(r.reverted, 10) || 0,
+    deleted: parseInt(r.deleted, 10) || 0,
+  }));
 };
 
 /**
@@ -1053,7 +1154,7 @@ function buildApprovalSummaryBucketsBase({
     if (centralised && memberIds !== undefined) replacements.centralisedMemberEmployeeIds = memberIds;
     scopeConditions.push(centralised
       ? `(wl.service_po_id IN (:ownPoIds) OR (wl.service_po_id IN (:centralisedPoIds)${memberIds !== undefined ? ' AND wl.employee_id IN (:centralisedMemberEmployeeIds)' : ''} AND wl.employee_id IN (
-           SELECT own.employee_id FROM employee_work_logs own
+           SELECT own.employee_id FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) own
            WHERE own.employee_id IN (:employeeIds) AND own.service_po_id IN (:ownPoIds))))`
       : 'wl.service_po_id IN (:ownPoIds)');
   }
@@ -1085,7 +1186,7 @@ function buildApprovalSummaryBucketsBase({
         ${searchTerm ? 'COALESCE(bool_or(sp.service_po_name ILIKE :search), false)' : 'false'} AS service_po_matches_search,
         array_agg(DISTINCT sp.service_po_name) FILTER (WHERE sp.service_po_name IS NOT NULL) AS service_po_names,
         array_agg(wl.id ORDER BY wl.work_date DESC, wl.id ASC) AS entry_ids
-      FROM employee_work_logs wl
+      FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) wl
       LEFT JOIN service_pos sp ON sp.id = wl.service_po_id
       WHERE ${scopeConditions.join(' AND ')}
       GROUP BY wl.employee_id, ${periodExpr}
@@ -1585,17 +1686,17 @@ const existsForHierarchyNodes = async (hierarchyNodeIds) => {
  * @returns {Promise<number>} rows deleted
  */
 const deleteByEmployeeAndDateRange = async (employeeId, startDate, endDate, companyId, transaction, servicePOIds = null, keepApproved = false) => {
-  return EmployeeWorkLog.destroy({
-    where: {
-      employee_id: employeeId,
-      work_date: { [Op.gte]: startDate, [Op.lte]: endDate },
-      ...(keepApproved && { status: { [Op.ne]: 'approved' } }),
-      // Optional: a Project Manager's bulk upload may only replace the rows of the
-      // Service POs they manage — every other PO's rows for the month stay untouched.
-      ...(Array.isArray(servicePOIds) && { service_po_id: { [Op.in]: servicePOIds } }),
-    },
-    transaction,
-  });
+  const where = {
+    employee_id: employeeId,
+    work_date: { [Op.gte]: startDate, [Op.lte]: endDate },
+    ...(keepApproved && { status: { [Op.ne]: 'approved' } }),
+    // Optional: a Project Manager's bulk upload may only replace the rows of the
+    // Service POs they manage — every other PO's rows for the month stay untouched.
+    ...(Array.isArray(servicePOIds) && { service_po_id: { [Op.in]: servicePOIds } }),
+  };
+  // Swapped out by a replace-save, not a real one-at-a-time delete (see deleted_via).
+  await EmployeeWorkLog.update({ deleted_via: 'replace' }, { where, transaction, silent: true });
+  return EmployeeWorkLog.destroy({ where, transaction });
 };
 
 /**
@@ -1906,7 +2007,11 @@ const revertApprovedById = async (id, { reason, revertedBy }, transaction) => {
  * @param {object} transaction
  * @returns {Promise<number>} rows deleted (0 = no longer approved-and-unsynced)
  */
-const deleteApprovedById = async (id, transaction) => {
+const deleteApprovedById = async (id, transaction, actorId = null) => {
+  await EmployeeWorkLog.update(
+    { deleted_by: actorId, deleted_via: 'single' },
+    { where: { id, ...APPROVED_UNSYNCED_WHERE }, transaction, silent: true }
+  );
   return EmployeeWorkLog.destroy({ where: { id, ...APPROVED_UNSYNCED_WHERE }, transaction });
 };
 
@@ -1927,7 +2032,7 @@ const findApprovedInRange = async (employeeId, startDate, endDate, { servicePOId
   };
   if (Array.isArray(servicePOIds)) where.service_po_id = { [Op.in]: servicePOIds };
   if (excludeId) where.id = { [Op.ne]: excludeId };
-  const rows = await EmployeeWorkLog.findAll({ where, attributes: ['id', 'service_po_id', 'work_date', 'hours'], raw: true });
+  const rows = await EmployeeWorkLog.findAll({ where, attributes: ['id', 'service_po_id', 'hierarchy_node_id', 'work_date', 'hours'], raw: true });
   return rows;
 };
 
@@ -1950,8 +2055,10 @@ module.exports = {
   hasSyncedEntriesInRange,
   update,
   deleteById,
+  findDeletedByEmployee,
   getDailyHours,
   getCalendarSummary,
+  getCalendarStatusCounts,
   getDailyHierarchyBreakdown,
   getMonthlyHierarchyBreakdown,
   getHierarchyBreakdownForRange,

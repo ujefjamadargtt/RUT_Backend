@@ -234,7 +234,7 @@ function buildBaseQuery(filters) {
       wl.hours                                                   AS logged_hours,
       wl.description,
       wl.status
-    FROM employee_work_logs wl
+    FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) wl
     INNER JOIN my_employees me          ON me.employee_id = wl.employee_id
     INNER JOIN employees e              ON e.id = wl.employee_id AND e.is_deleted = false
     INNER JOIN service_pos sp           ON sp.id = wl.service_po_id

@@ -107,6 +107,7 @@ function resolvePeriod(query) {
 }
 
 const PROJECT_MANAGER_RANK = 6;
+const EMPLOYEE_RANK = 8;
 
 /**
  * Employee scope — data-driven, not role-name-driven (same principle
@@ -278,11 +279,33 @@ const getReport = async (userId, ownEmployeeId, companyId, query, authContext = 
     ? String(query.employee_ids).split(',').map(Number).filter(Boolean)
     : (query.employee_id ? [parseInt(query.employee_id, 10)] : undefined);
 
-  const employeeIds = await resolveEmployeeScope(userId, ownEmployeeId, requestedEmployeeIds, companyId);
+  // A session logged in as the plain Employee role (rank 8) is a regular employee, even if the
+  // same person also holds PM / TL / BU Admin roles: no team scope, and only their own entries on
+  // the Service POs they are actually mapped to (plus Centralised POs: Leave / Bench / ...).
+  const isEmployeeSession = authContext.hierarchyRank === EMPLOYEE_RANK && !!ownEmployeeId;
+
+  let employeeIds;
+  if (isEmployeeSession) {
+    const notOwn = (requestedEmployeeIds || []).find((id) => id !== ownEmployeeId);
+    if (notOwn !== undefined) throw forbiddenError(`Employee #${notOwn} is not mapped to you.`);
+    employeeIds = [ownEmployeeId];
+  } else {
+    employeeIds = await resolveEmployeeScope(userId, ownEmployeeId, requestedEmployeeIds, companyId);
+  }
 
   let rows = await employeeWorkLogRepository.findForApprovalSummaryByEmployees({
     employeeIds, startDate, endDate,
   });
+
+  if (isEmployeeSession) {
+    const mappedPoIds = new Set(
+      (await employeeServicePOMappingRepository.findAllByEmployee(ownEmployeeId, 'active')).map((m) => m.service_po_id)
+    );
+    // eslint-disable-next-line global-require
+    const centralisedIds = new Set(await require('../repositories/servicePORepository')
+      .findCentralisedIdsAmong([...new Set(rows.map((r) => r.service_po_id))]));
+    rows = rows.filter((r) => mappedPoIds.has(r.service_po_id) || centralisedIds.has(r.service_po_id));
+  }
 
   // A Project Manager (rank 6) is scoped PO-wise: for their team members only the entries on the Service POs
   // they are the flagged PM of, plus Centralised POs (Leave / Bench / ...), are shown — never the same

@@ -43,7 +43,7 @@ test('source is employee_work_logs: hours, description, status; BU/Sub-BU from t
   try {
     await repository.getTeamLeadEmployeeProjectHours(base);
     const { sql } = cap.calls[0];
-    assert.match(sql, /FROM employee_work_logs wl/);
+    assert.match(sql, /FROM \(SELECT \* FROM employee_work_logs WHERE deleted_at IS NULL\) wl/);
     assert.match(sql, /wl\.hours AS logged_hours, wl\.description, wl\.status/);
     assert.match(sql, /LEFT JOIN companies bu_unit ON bu_unit\.id = COALESCE\(sp\.company_id, wl\.company_id\)/);
     assert.match(sql, /COALESCE\(bu_parent\.company_name, bu_unit\.company_name\) AS bu_name/);

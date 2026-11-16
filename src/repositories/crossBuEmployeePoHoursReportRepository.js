@@ -105,7 +105,7 @@ const ADJUSTED_HOURS_CTE_SQL = `,
   )`;
 
 const FROM_SQL = `
-  FROM employee_work_logs wl
+  FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) wl
   JOIN employees e        ON e.id = wl.employee_id AND e.is_deleted = false
   JOIN service_pos sp     ON sp.id = wl.service_po_id
   LEFT JOIN emp_bu eb     ON eb.employee_id = e.id

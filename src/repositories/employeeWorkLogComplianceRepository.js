@@ -120,7 +120,7 @@ async function getComplianceReport({
        ROUND((:threshold::NUMERIC - COALESCE(SUM(wl.hours), 0))::NUMERIC, 2)
                                                             AS shortfall_hours
      FROM   employees e
-     LEFT JOIN employee_work_logs wl
+     LEFT JOIN (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) wl
             ON wl.employee_id = e.id
            AND wl.work_date BETWEEN :startDate AND :endDate
      WHERE  ${whereEmployee}
@@ -137,7 +137,7 @@ async function getComplianceReport({
      FROM (
        SELECT e.id
        FROM   employees e
-       LEFT JOIN employee_work_logs wl
+       LEFT JOIN (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) wl
               ON wl.employee_id = e.id
              AND wl.work_date BETWEEN :startDate AND :endDate
        WHERE  ${whereEmployee}
@@ -164,7 +164,7 @@ async function getComplianceReport({
 async function getEmployeeTotalHours({ employeeId, startDate, endDate }) {
   const [result] = await sequelize.query(
     `SELECT ROUND(COALESCE(SUM(hours), 0)::NUMERIC, 2) AS total_hours
-     FROM   employee_work_logs
+     FROM   (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) employee_work_logs
      WHERE  employee_id = :employeeId
        AND  work_date BETWEEN :startDate AND :endDate`,
     { replacements: { employeeId, startDate, endDate }, type: QueryTypes.SELECT }

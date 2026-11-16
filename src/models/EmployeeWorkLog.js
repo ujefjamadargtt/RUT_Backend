@@ -236,15 +236,34 @@ module.exports = (sequelize) => {
         type: DataTypes.INTEGER,
         allowNull: true,
       },
+      // Soft delete (20261114_employee_work_logs_soft_delete.sql): a deleted line keeps its row so
+      // the employee calendar can count it. `paranoid` makes every model query skip these rows;
+      // raw SQL must add `deleted_at IS NULL` itself.
+      deleted_at: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
+      // 'single' = removed one at a time (employee delete / approver delete); NULL = swapped out by a
+      // replace-save (20261114_employee_work_logs_deleted_via.sql).
+      deleted_by: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
+      deleted_via: {
+        type: DataTypes.STRING(20),
+        allowNull: true,
+      },
     },
     {
       sequelize,
       modelName: 'EmployeeWorkLog',
       tableName: 'employee_work_logs',
       timestamps: true,
+      paranoid: true,
       underscored: true,
       createdAt: 'created_at',
       updatedAt: 'updated_at',
+      deletedAt: 'deleted_at',
       // NOTE: uq_employee_work_logs is NOT declared here as a Sequelize
       // model-level index. It's a functional unique index — UNIQUE on
       // (employee_id, service_po_id, COALESCE(hierarchy_node_id, 0),

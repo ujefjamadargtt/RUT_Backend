@@ -237,6 +237,7 @@ const listEntriesQuerySchema = Joi.object({
   endDate: Joi.date().iso().optional(),
   status: Joi.string().valid('pending', 'approved', 'rejected', 'synced').optional(),
   poId: Joi.number().integer().positive().optional(),
+  include_deleted: Joi.boolean().default(false),
 });
 
 module.exports = {

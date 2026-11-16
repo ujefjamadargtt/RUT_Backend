@@ -141,7 +141,7 @@ async function getProjectRollup(filters) {
     actual AS (
       SELECT po_scope.project_id, SUM(ewl.hours) AS actual_hours
       FROM po_scope
-      INNER JOIN employee_work_logs ewl ON ewl.service_po_id = po_scope.service_po_id
+      INNER JOIN (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) ewl ON ewl.service_po_id = po_scope.service_po_id
         AND ewl.status IN ${WORKLOG_STATUSES_SQL}
         AND EXTRACT(MONTH FROM ewl.work_date) = :monthNum
         AND EXTRACT(YEAR FROM ewl.work_date) = :yearNum
@@ -277,7 +277,7 @@ async function getTeamCapacity(filters) {
     ),
     actual AS (
       SELECT t.employee_id AS emp_id, SUM(t.hours) AS actual_hours
-      FROM employee_work_logs t
+      FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) t
       WHERE EXTRACT(MONTH FROM t.work_date) = :monthNum AND EXTRACT(YEAR FROM t.work_date) = :yearNum
         AND t.status IN ${WORKLOG_STATUSES_SQL}
         AND t.employee_id IN (:employeeIds)
@@ -285,7 +285,7 @@ async function getTeamCapacity(filters) {
     ),
     leave_hrs AS (
       SELECT t.employee_id AS emp_id, SUM(t.hours) AS leave_hours
-      FROM employee_work_logs t
+      FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) t
       INNER JOIN service_pos sp   ON sp.id = t.service_po_id
       INNER JOIN service_types st ON st.id = sp.service_type_id
       WHERE EXTRACT(MONTH FROM t.work_date) = :monthNum AND EXTRACT(YEAR FROM t.work_date) = :yearNum
@@ -296,7 +296,7 @@ async function getTeamCapacity(filters) {
     ),
     no_work AS (
       SELECT t.employee_id AS emp_id, SUM(t.hours) AS no_work_hours
-      FROM employee_work_logs t
+      FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) t
       INNER JOIN service_pos sp ON sp.id = t.service_po_id
       WHERE EXTRACT(MONTH FROM t.work_date) = :monthNum AND EXTRACT(YEAR FROM t.work_date) = :yearNum
         AND t.status IN ${WORKLOG_STATUSES_SQL}
@@ -400,14 +400,14 @@ async function getPendingApprovals(filters) {
     SELECT
       ewl.id AS work_log_id, ewl.employee_id, e.full_name, e.employee_code,
       ewl.service_po_id, sp.service_po_name, ewl.work_date, ewl.hours, ewl.log_type
-    FROM employee_work_logs ewl
+    FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) ewl
     INNER JOIN employees e ON e.id = ewl.employee_id
     LEFT JOIN service_pos sp ON sp.id = ewl.service_po_id
     ${whereClause}
     ORDER BY ewl.work_date ASC
     LIMIT :limit OFFSET :offset
   `;
-  const countQuery = `SELECT COUNT(*) AS total FROM employee_work_logs ewl ${whereClause}`;
+  const countQuery = `SELECT COUNT(*) AS total FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) ewl ${whereClause}`;
 
   const [rows, countResult] = await Promise.all([
     sequelize.query(dataQuery, { replacements, type: QueryTypes.SELECT }),
@@ -469,7 +469,7 @@ async function getLoggedHoursMTD({ companyIds, monthNum, yearNum, servicePoIds }
   if (scopedPoIds) replacements.servicePoIds = scopedPoIds;
   const [row] = await sequelize.query(
     `SELECT COALESCE(SUM(ewl.hours), 0) AS total_hours
-     FROM employee_work_logs ewl
+     FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) ewl
      INNER JOIN service_pos sp ON sp.id = ewl.service_po_id
      WHERE (sp.company_id IN (:companyIds) OR ${buLessServicePOInTenantSql('sp', 'companyIds')})
        ${scopedPoIds ? 'AND sp.id IN (:servicePoIds)' : ''}
@@ -591,7 +591,7 @@ async function getMonthlyHoursByEmployee({ employeeIds, yearNum }) {
     `SELECT
        EXTRACT(MONTH FROM t.work_date)::int AS month,
        ROUND(SUM(t.hours)::numeric, 2) AS logged_hours
-     FROM employee_work_logs t
+     FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) t
      WHERE t.employee_id IN (:employeeIds)
        AND t.status IN ${WORKLOG_STATUSES_SQL}
        AND EXTRACT(YEAR FROM t.work_date) = :yearNum

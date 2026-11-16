@@ -45,7 +45,7 @@ async function getSummary({ employeeIds, startDate, endDate, search, sortBy, sor
        e.full_name AS employee_name,
        e.employee_code,
        ROUND(SUM(wl.hours)::NUMERIC, 2) AS total_hours
-     FROM employee_work_logs wl
+     FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) wl
      INNER JOIN employees e ON e.id = wl.employee_id
      WHERE ${whereSql}
      GROUP BY e.id, e.full_name, e.employee_code
@@ -58,7 +58,7 @@ async function getSummary({ employeeIds, startDate, endDate, search, sortBy, sor
     `SELECT COUNT(*)::int AS count
      FROM (
        SELECT wl.employee_id
-       FROM employee_work_logs wl
+       FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) wl
        INNER JOIN employees e ON e.id = wl.employee_id
        WHERE ${whereSql}
        GROUP BY wl.employee_id
@@ -130,7 +130,7 @@ async function getDetails({ employeeId, startDate, endDate, limit, offset }) {
        END AS entry_type,
        wl.status,
        ${IS_CROSS_BU_SQL} AS is_cross_bu
-     FROM employee_work_logs wl
+     FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) wl
      INNER JOIN service_pos sp ON sp.id = wl.service_po_id
      LEFT JOIN projects p ON p.id = sp.project_id
      LEFT JOIN service_po_hierarchy h ON h.id = wl.hierarchy_node_id
@@ -147,7 +147,7 @@ async function getDetails({ employeeId, startDate, endDate, limit, offset }) {
     `SELECT
        COUNT(*)::int AS work_log_count,
        ROUND(COALESCE(SUM(hours), 0)::NUMERIC, 2) AS total_hours
-     FROM employee_work_logs
+     FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) employee_work_logs
      WHERE employee_id = :employeeId
        AND work_date BETWEEN :startDate AND :endDate`,
     { replacements, type: QueryTypes.SELECT }
@@ -157,7 +157,7 @@ async function getDetails({ employeeId, startDate, endDate, limit, offset }) {
   const [crossBu] = await sequelize.query(
     `WITH ${EMPLOYEE_ROOT_BUS_CTE}
      SELECT COALESCE(BOOL_OR(${IS_CROSS_BU_SQL}), false) AS has_cross_bu
-     FROM employee_work_logs wl
+     FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) wl
      INNER JOIN service_pos sp ON sp.id = wl.service_po_id
      WHERE wl.employee_id = :employeeId
        AND wl.work_date BETWEEN :startDate AND :endDate`,
@@ -166,7 +166,7 @@ async function getDetails({ employeeId, startDate, endDate, limit, offset }) {
 
   const countRows = await sequelize.query(
     `SELECT COUNT(*)::int AS count
-     FROM employee_work_logs wl
+     FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) wl
      LEFT JOIN employee_work_log_time_entries te ON te.employee_work_log_id = wl.id
      WHERE wl.employee_id = :employeeId
        AND wl.work_date BETWEEN :startDate AND :endDate`,

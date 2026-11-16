@@ -176,7 +176,7 @@ function buildSyncedWorkLogQuery({ startDate, endDate, search, status, sortBy, s
   const sql = `
     WITH synced AS (
       SELECT employee_id, SUM(hours) AS total_hours
-      FROM employee_work_logs
+      FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) employee_work_logs
       WHERE status = 'synced' AND work_date BETWEEN :startDate AND :endDate
       GROUP BY employee_id
     )

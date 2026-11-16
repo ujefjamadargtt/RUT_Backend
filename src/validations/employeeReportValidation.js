@@ -8,18 +8,27 @@ const Joi = require('joi');
 
 const formatField = Joi.string().valid('json', 'excel', 'csv', 'pdf').default('json');
 
+// Optional server-side pagination (JSON format only; ignored by excel/csv/pdf). A limit above 100
+// is clamped to 100 in the controller rather than rejected.
+const pageField = Joi.number().integer().min(1).default(1);
+const limitField = Joi.number().integer().min(1).default(10);
+
 const dailyReportQuerySchema = Joi.object({
   date: Joi.date().iso().required().messages({
     'any.required': 'date is required.',
     'date.format': 'date must be in ISO format (YYYY-MM-DD).',
   }),
   format: formatField,
+  page: pageField,
+  limit: limitField,
 });
 
 const monthlyReportQuerySchema = Joi.object({
   month: Joi.number().integer().min(1).max(12).required(),
   year: Joi.number().integer().min(2000).required(),
   format: formatField,
+  page: pageField,
+  limit: limitField,
 });
 
 const rangeReportQuerySchema = Joi.object({
@@ -31,6 +40,8 @@ const rangeReportQuerySchema = Joi.object({
     'date.min': 'endDate must be on or after startDate.',
   }),
   format: formatField,
+  page: pageField,
+  limit: limitField,
 });
 
 /**

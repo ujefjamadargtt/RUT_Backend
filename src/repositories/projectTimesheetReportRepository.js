@@ -93,7 +93,7 @@ function buildWhere(f) {
       conditions.push(`(
         (${projectFilter})
         OR (${IS_LEAVE_SQL} AND EXISTS (
-          SELECT 1 FROM employee_work_logs wl2
+          SELECT 1 FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) wl2
           JOIN service_pos sp2 ON sp2.id = wl2.service_po_id
           WHERE wl2.employee_id = wl.employee_id
             AND wl2.work_date BETWEEN :startDate AND :endDate
@@ -111,7 +111,7 @@ function buildWhere(f) {
 }
 
 const FROM_SQL = `
-  FROM employee_work_logs wl
+  FROM (SELECT * FROM employee_work_logs WHERE deleted_at IS NULL) wl
   JOIN employees e        ON e.id = wl.employee_id
   JOIN service_pos sp     ON sp.id = wl.service_po_id
   LEFT JOIN service_types st ON st.id = sp.service_type_id

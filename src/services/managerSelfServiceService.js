@@ -1398,7 +1398,7 @@ const performApprovedWorkLogAction = async (action, managerUserId, id, reason, c
 
     const affected = isRevert
       ? await employeeWorkLogRepository.revertApprovedById(id, { reason, revertedBy: actorId }, transaction)
-      : await employeeWorkLogRepository.deleteApprovedById(id, transaction);
+      : await employeeWorkLogRepository.deleteApprovedById(id, transaction, actorId);
     if (affected !== 1) {
       throw conflictError(`Work log entry #${id} is no longer approved and unsynced, so it was not ${verb}.`);
     }
@@ -1582,7 +1582,7 @@ const performApprovedWorkLogActionByDate = async (action, managerUserId, body, c
           };
           const count = isRevert
             ? await employeeWorkLogRepository.revertApprovedById(row.id, { reason, revertedBy: actorId }, transaction)
-            : await employeeWorkLogRepository.deleteApprovedById(row.id, transaction);
+            : await employeeWorkLogRepository.deleteApprovedById(row.id, transaction, actorId);
           if (count !== 1) {
             throw conflictError(`Work log entry #${row.id} is no longer approved and unsynced, so it was not ${verb}.`);
           }

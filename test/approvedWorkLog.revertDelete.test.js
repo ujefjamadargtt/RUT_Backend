@@ -351,7 +351,7 @@ test('8: replaceDailyEntries refuses a line for a PO that already has an approve
         timesheet_date: '2026-10-05',
         entries: [{ service_po_id: 7, hours: 2, description: 'more' }, { service_po_id: 9, hours: 1, description: 'other' }],
       }),
-      (err) => err.statusCode === 409 && /Service PO #7/.test(err.message)
+      (err) => err.statusCode === 409 && /This line is already approved for 2026-10-05\. Ask your approver to revert it to edit\./.test(err.message)
     );
     assert.equal(wiped, false);
   } finally { restore(); }
@@ -368,7 +368,7 @@ test('8: addTimeEntries refuses another log against an approved PO on that date'
         () => employeeTimesheetService.addTimeEntries(EMPLOYEE_ID, 3, {
           work_date: '2026-10-05', service_po_id: 7, time_entries: [{ start_time: '09:00', end_time: '10:00' }],
         }),
-        (err) => err.statusCode === 409 && /approved timesheet log already exists/.test(err.message)
+        (err) => err.statusCode === 409 && /This line is already approved for 2026-10-05/.test(err.message)
       );
     } finally {
       employeeServicePOMappingRepository.findByEmployeeAndPO = original;
@@ -402,7 +402,7 @@ test('employee monthly submit: refuses a PO that already has an approved log in 
       () => employeeMonthlyWorkLogService.submitMonthlyWorkLog(EMPLOYEE_ID, 3, {
         month: 9, year: 2026, entries: [{ service_po_id: 7, hours: 100, description: 'x' }],
       }),
-      (err) => err.statusCode === 409 && /Service PO #7/.test(err.message)
+      (err) => err.statusCode === 409 && /This line is already approved for 2026-09-12/.test(err.message)
     );
   } finally { restore(); }
 });
@@ -412,4 +412,22 @@ test('the replace-save wipes pass keepApproved so an approved row can never be d
   assert.match(src, /deleteByEmployeeAndDate\(employeeId, dateStr, companyId, transaction, true\)/);
   const monthly = require('fs').readFileSync(require.resolve('../src/services/employeeMonthlyWorkLogService.js'), 'utf8');
   assert.match(monthly, /scopeServicePOIds, !forceApproved\)/);
+});
+
+test('approved lock is per LINE: another node of the same PO is not blocked, the approved line itself is', async () => {
+  try {
+    employeeWorkLogRepository.findApprovedInRange = async () => [
+      { id: 7291, service_po_id: 94, hierarchy_node_id: null, work_date: '2026-11-04', hours: '2' },
+      { id: 7292, service_po_id: 94, hierarchy_node_id: '463', work_date: '2026-11-04', hours: '4' },
+    ];
+    await employeeTimesheetService.assertNoApprovedLine(268, '2026-11-04', [{ service_po_id: 94, hierarchy_node_id: 500, hours: 8 }]);
+    await assert.rejects(
+      () => employeeTimesheetService.assertNoApprovedLine(268, '2026-11-04', [{ service_po_id: 94, hierarchy_node_id: 463 }]),
+      (err) => err.statusCode === 409 && /This line is already approved for 2026-11-04/.test(err.message)
+    );
+    await assert.rejects(
+      () => employeeTimesheetService.assertNoApprovedLine(268, '2026-11-04', [{ service_po_id: 94, hierarchy_node_id: null }]),
+      (err) => err.statusCode === 409
+    );
+  } finally { restore(); }
 });

@@ -37,7 +37,7 @@ test('SQL filter: project filter + include_leave also brings the SAME employees\
   const { whereSql, replacements } = repository.buildWhere({ ...BASE, servicePoIds: [147], includeLeave: true });
   const sql = whereSql.replace(/\s+/g, ' ');
   assert.match(sql, /\( ?\(wl\.service_po_id IN \(:servicePoIds\)\) OR \(LOWER/);
-  assert.match(sql, /EXISTS \( SELECT 1 FROM employee_work_logs wl2 .* wl2\.employee_id = wl\.employee_id .* wl2\.service_po_id IN \(:servicePoIds\)/);
+  assert.match(sql, /EXISTS \( SELECT 1 FROM \(SELECT \* FROM employee_work_logs WHERE deleted_at IS NULL\) wl2 .* wl2\.employee_id = wl\.employee_id .* wl2\.service_po_id IN \(:servicePoIds\)/);
   assert.deepEqual(replacements.servicePoIds, [147]);
 });
 
