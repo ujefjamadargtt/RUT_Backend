@@ -166,7 +166,7 @@ const create = async (data, actorId, req, isEntityAdmin = false) => {
     'entities',
     entity.id,
     null,
-    { entity_code: entity.entity_code, entity_name: entity.entity_name, entity_admin_employee_id: entity.entity_admin_employee_id },
+    { entity_code: entity.entity_code, entity_name: entity.entity_name, entity_admin_employee_id: entity.entity_admin_employee_id, is_log_desc_mandatory: entity.is_log_desc_mandatory },
     getIpAddress(req)
   );
 
@@ -209,6 +209,7 @@ const update = async (id, data, userId, req, entityIds) => {
     entity_name: existing.entity_name,
     status: existing.status,
     entity_admin_employee_id: existing.entity_admin_employee_id,
+    is_log_desc_mandatory: existing.is_log_desc_mandatory,
   };
 
   const payload = { ...data, updated_by: userId };

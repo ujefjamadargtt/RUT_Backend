@@ -56,7 +56,7 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
     limit,
     offset,
     order: [[safeSortBy, safeSortOrder]],
-    attributes: ['id', 'entity_code', 'entity_name', 'entity_admin_employee_id', 'status', 'created_at', 'updated_at', 'created_by'],
+    attributes: ['id', 'entity_code', 'entity_name', 'entity_admin_employee_id', 'is_log_desc_mandatory', 'status', 'created_at', 'updated_at', 'created_by'],
   });
 };
 
@@ -73,7 +73,7 @@ const findById = async (id, entityIds = []) => {
   }
   return Entity.findOne({
     where: { id, is_deleted: false },
-    attributes: ['id', 'entity_code', 'entity_name', 'entity_admin_employee_id', 'status', 'created_at', 'updated_at', 'created_by', 'updated_by'],
+    attributes: ['id', 'entity_code', 'entity_name', 'entity_admin_employee_id', 'is_log_desc_mandatory', 'status', 'created_at', 'updated_at', 'created_by', 'updated_by'],
   });
 };
 

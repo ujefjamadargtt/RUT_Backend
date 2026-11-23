@@ -2,6 +2,7 @@
 
 const { sequelize } = require('../models');
 const authRepository = require('../repositories/authRepository');
+const logDescriptionRuleService = require('./logDescriptionRuleService');
 const employeeRepository = require('../repositories/employeeRepository');
 const microsoftAuthService = require('./microsoftAuthService');
 const rbacService = require('./rbacService');
@@ -259,6 +260,7 @@ async function issueSession(employee, rolesToGrant, ipAddress, userAgent) {
     employee: sanitiseEmployee(employee),
     roles: rolesToGrant.map((role) => ({ ...buildRoleSummary(role), is_original_data_visible: isOriginalDataVisible })),
     forms,
+    is_log_desc_mandatory: await logDescriptionRuleService.isLogDescriptionMandatory(employee.id),
   };
 }
 
@@ -772,7 +774,10 @@ async function getProfile(employeeId) {
     throw err;
   }
 
-  return sanitiseEmployee(employee);
+  return {
+    ...sanitiseEmployee(employee),
+    is_log_desc_mandatory: await logDescriptionRuleService.isLogDescriptionMandatory(employee.id),
+  };
 }
 
 module.exports = {

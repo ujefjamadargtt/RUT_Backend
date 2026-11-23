@@ -2,6 +2,7 @@
 
 const { sequelize } = require('../models');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
+const logDescriptionRuleService = require('./logDescriptionRuleService');
 const employeeRepository = require('../repositories/employeeRepository');
 const timesheetService = require('./timesheetService');
 const employeeTimesheetService = require('./employeeTimesheetService');
@@ -94,7 +95,8 @@ async function buildMonthlyWorkLogDTO(employeeId, companyId, month, year) {
  * @returns {Promise<object>}
  */
 const getMonthlyWorkLog = async (employeeId, companyId, month, year) => {
-  return buildMonthlyWorkLogDTO(employeeId, companyId, month, year);
+  const dto = await buildMonthlyWorkLogDTO(employeeId, companyId, month, year);
+  return { ...dto, is_log_desc_mandatory: await logDescriptionRuleService.isLogDescriptionMandatory(employeeId) };
 };
 
 /**
@@ -143,6 +145,11 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data, options = {}) =
       );
     }
   }
+
+  await logDescriptionRuleService.assertDescriptionsProvided(employeeId, lines.map((line) => ({
+    description: line.description,
+    label: `Service PO #${line.service_po_id}, ${month}/${year}`,
+  })));
 
   const { endDate, startDate } = dateHelper.getMonthBounds(month, year);
 

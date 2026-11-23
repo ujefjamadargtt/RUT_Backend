@@ -59,6 +59,12 @@ module.exports = (sequelize) => {
           isIn: { args: [['active', 'inactive']], msg: 'Status must be active or inactive.' },
         },
       },
+      // When true, every work-log description is mandatory for employees whose Business Unit belongs to this entity.
+      is_log_desc_mandatory: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
+      },
       is_deleted: {
         type: DataTypes.BOOLEAN,
         allowNull: false,

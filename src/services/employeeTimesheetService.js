@@ -3,6 +3,7 @@
 const { sequelize } = require('../models');
 const employeeWorkLogRepository = require('../repositories/employeeWorkLogRepository');
 const employeeWorkLogTimeEntryRepository = require('../repositories/employeeWorkLogTimeEntryRepository');
+const logDescriptionRuleService = require('./logDescriptionRuleService');
 const employeeRepository = require('../repositories/employeeRepository');
 const { sumHoursByMinute, toMinutes } = require('../utils/hoursSum');
 const timesheetService = require('./timesheetService');
@@ -493,6 +494,12 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
   // downstream, uses these resolved values, never the raw line.hours.
   const resolvedTimes = lines.map((line) => resolveHoursAndTimeEntries(line));
 
+  await logDescriptionRuleService.assertDescriptionsProvided(employeeId, lines.map((line) => ({
+    description: line.description,
+    segmentDescriptions: (line.time_entries || []).map((entry) => entry.description),
+    label: `Service PO #${line.service_po_id}, ${dateStr}`,
+  })));
+
   // 12-hour/day cap, computed purely from this payload — the old rows for
   // this date are being replaced wholesale, so there is nothing left in the
   // DB to add on top of. assertDailyCap's DB-lookup version still backs
@@ -772,6 +779,12 @@ const updateEntry = async (employeeId, companyId, id, data) => {
 
   await assertNoApprovedLine(employeeId, dateStr, [{ service_po_id: servicePOId, hierarchy_node_id: hierarchyNodeId }], { excludeId: id });
 
+  await logDescriptionRuleService.assertDescriptionsProvided(employeeId, [{
+    description: effectiveDescription,
+    segmentDescriptions: effectiveTimeEntries.map((entry) => entry.description),
+    label: `Service PO #${servicePOId}, ${dateStr}`,
+  }]);
+
   const duplicate = await employeeWorkLogRepository.checkDuplicate(
     employeeId, servicePOId, hierarchyNodeId || null, dateStr, id, companyId
   );
@@ -939,6 +952,12 @@ const addTimeEntries = async (employeeId, companyId, data) => {
   const { hours: newTotalHours, resolvedEntries: combinedResolvedEntries } =
     resolveTimeEntries([...existingEntries, ...withFallbackDescription(data.time_entries, effectiveDescription)]);
   const newlyResolvedEntries = combinedResolvedEntries.slice(existingEntries.length);
+
+  await logDescriptionRuleService.assertDescriptionsProvided(employeeId, [{
+    description: effectiveDescription,
+    segmentDescriptions: combinedResolvedEntries.map((entry) => entry.description),
+    label: `Service PO #${data.service_po_id}, ${dateStr}`,
+  }]);
 
   await assertDailyCap(employeeId, dateStr, newTotalHours, companyId, existing ? existing.id : null);
 
@@ -1159,7 +1178,10 @@ const getEntries = async (employeeId, _companyId, query) => {
 
   return {
     data,
-    meta: { total: count, page, limit, totalPages, hasNext: page < totalPages, hasPrev: page > 1 },
+    meta: {
+      total: count, page, limit, totalPages, hasNext: page < totalPages, hasPrev: page > 1,
+      is_log_desc_mandatory: await logDescriptionRuleService.isLogDescriptionMandatory(employeeId),
+    },
   };
 };
 
@@ -1371,7 +1393,7 @@ const getDailyEntries = async (employeeId, date, companyId) => {
   const hoursByPOId = groupHoursByServicePO(breakdownRows);
   const service_pos = buildServicePOsForDate(mappedPOs, hierarchyRowsByPOId, hoursByPOId);
 
-  return { date: dateStr, service_pos };
+  return { date: dateStr, service_pos, is_log_desc_mandatory: await logDescriptionRuleService.isLogDescriptionMandatory(employeeId) };
 };
 
 /**

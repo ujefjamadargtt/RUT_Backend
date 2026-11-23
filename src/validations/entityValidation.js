@@ -44,6 +44,10 @@ const createEntitySchema = Joi.object({
       'number.positive': 'Entity Admin employee ID must be a positive integer.',
     }),
 
+  is_log_desc_mandatory: Joi.boolean().messages({
+    'boolean.base': 'is_log_desc_mandatory must be true or false.',
+  }),
+
   status: Joi.string()
     .trim()
     .lowercase()
@@ -85,6 +89,10 @@ const updateEntitySchema = Joi.object({
       'number.base': 'Entity Admin employee ID must be a number.',
       'number.positive': 'Entity Admin employee ID must be a positive integer.',
     }),
+
+  is_log_desc_mandatory: Joi.boolean().messages({
+    'boolean.base': 'is_log_desc_mandatory must be true or false.',
+  }),
 
   status: Joi.string()
     .trim()
