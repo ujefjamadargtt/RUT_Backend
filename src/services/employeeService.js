@@ -419,6 +419,12 @@ const getAll = async (query = {}, authContext) => {
   const parsedRoleId = Number(query.role_id);
   const roleId = Number.isInteger(parsedRoleId) && parsedRoleId > 0 ? parsedRoleId : null;
 
+  // Employee list-filter (the "Employee" multi-select on the Employee Master
+  // filter bar) — comma-separated ids. Only NARROWS: it's ANDed with
+  // accessWhere in employeeRepository.findAll(), so an id outside the
+  // caller's scope simply matches nothing. Invalid values are ignored.
+  const employeeIds = parseIdList(query.employeeIds);
+
   const filters = {
     search: query.search || '',
     status: query.status || 'active',
@@ -427,6 +433,7 @@ const getAll = async (query = {}, authContext) => {
     accessWhere,
     businessUnitId,
     roleId,
+    employeeIds,
   };
 
   const sort = {

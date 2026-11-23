@@ -96,7 +96,12 @@ async function buildMonthlyWorkLogDTO(employeeId, companyId, month, year) {
  */
 const getMonthlyWorkLog = async (employeeId, companyId, month, year) => {
   const dto = await buildMonthlyWorkLogDTO(employeeId, companyId, month, year);
-  return { ...dto, is_log_desc_mandatory: await logDescriptionRuleService.isLogDescriptionMandatory(employeeId) };
+  const logDescRule = await logDescriptionRuleService.getLogDescRule(employeeId);
+  return {
+    ...dto,
+    service_pos: logDescriptionRuleService.annotateServicePOs(dto.service_pos, logDescRule.log_desc_mandatory_service_po_ids),
+    ...logDescRule,
+  };
 };
 
 /**
@@ -147,6 +152,7 @@ const submitMonthlyWorkLog = async (employeeId, companyId, data, options = {}) =
   }
 
   await logDescriptionRuleService.assertDescriptionsProvided(employeeId, lines.map((line) => ({
+    servicePOId: line.service_po_id,
     description: line.description,
     label: `Service PO #${line.service_po_id}, ${month}/${year}`,
   })));

@@ -696,15 +696,16 @@ async function resolveMappingTargetEmployee(employeeId, companyId) {
  * @param {Employee} employee
  * @returns {Promise<{ unrestricted: boolean, businessUnitIds: number[] }>}
  */
-async function resolveMappingEligibilityInputs(employee) {
+async function resolveMappingEligibilityInputs(employee, businessUnitIdsOverride = null) {
   const [roles, businessUnits] = await Promise.all([
     employeeRoleRepository.findRolesByEmployeeId(employee.id),
-    employeeBusinessUnitRepository.findBusinessUnitsByEmployeeId(employee.id),
+    businessUnitIdsOverride ? null : employeeBusinessUnitRepository.findBusinessUnitsByEmployeeId(employee.id),
   ]);
 
   const unrestricted = hasUnrestrictedServicePOVisibility(roles.map((role) => role.role_name));
+  const selectedBuIds = businessUnitIdsOverride ?? businessUnits.map((bu) => bu.id);
   const businessUnitIds = [
-    ...new Set([...businessUnits.map((bu) => bu.id), ...(employee.company_id != null ? [employee.company_id] : [])]),
+    ...new Set([...selectedBuIds, ...(employee.company_id != null ? [employee.company_id] : [])]),
   ];
 
   return { unrestricted, businessUnitIds };
@@ -762,14 +763,19 @@ function normalizeServicePOEntries(servicePOEntries) {
  *
  * @param {number} employeeId
  * @param {object} authContext - { companyId, hierarchyRank, employeeId, employeeBusinessUnits } — the CALLER's, not the target Employee's
+ * @param {object} [options]
+ * @param {number[]|null} [options.businessUnitIds] - the Business Units currently ticked (not yet
+ *   saved) in the Employee Master edit dialog; replaces the saved BU mapping when computing
+ *   eligibility so a newly ticked BU's POs show before Save. Still bounded by the caller's
+ *   companyScope in getEligibleForMapping(), and Save re-validates against the saved mapping.
  * @returns {Promise<{ employee_id: number, unrestricted: boolean, eligible_service_pos: object[], mapped_service_po_ids: number[] }>}
  */
-const getServicePOOptionsForEmployee = async (employeeId, authContext) => {
+const getServicePOOptionsForEmployee = async (employeeId, authContext, { businessUnitIds: businessUnitIdsOverride = null } = {}) => {
   const companyId = await resolveEmployeeMappingScope(authContext);
   const employee = await resolveMappingTargetEmployee(employeeId, companyId);
 
   const [{ unrestricted, businessUnitIds }, currentMappings] = await Promise.all([
-    resolveMappingEligibilityInputs(employee),
+    resolveMappingEligibilityInputs(employee, businessUnitIdsOverride),
     employeeServicePOMappingRepository.findByEmployee(employeeId, companyId),
   ]);
 

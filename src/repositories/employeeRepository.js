@@ -102,7 +102,7 @@ async function employeeScope(companyId) {
  * @returns {Promise<{ rows: Employee[], count: number }>}
  */
 const findAll = async (filters = {}, pagination = {}, sort = {}) => {
-  const { search, status, designation, companyId, accessWhere, businessUnitId, roleId } = filters;
+  const { search, status, designation, companyId, accessWhere, businessUnitId, roleId, employeeIds } = filters;
   const { limit = 20, offset = 0 } = pagination;
   const { sortBy: requestedSortBy = 'created_at', sortOrder = 'DESC' } = sort;
   // Defense-in-depth allowlist matching employeeValidation.js's sort_by enum
@@ -173,6 +173,11 @@ const findAll = async (filters = {}, pagination = {}, sort = {}) => {
       raw: true,
     });
     andConditions.push({ id: { [Op.in]: roleRows.map((row) => row.employee_id) } });
+  }
+
+  // Employee multi-select filter (employeeService.getAll's `employeeIds`).
+  if (Array.isArray(employeeIds) && employeeIds.length > 0) {
+    andConditions.push({ id: { [Op.in]: employeeIds } });
   }
 
   if (andConditions.length > 0) {

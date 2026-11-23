@@ -249,12 +249,25 @@ const getServicePOOptions = async (req, res, next) => {
     if (isNaN(employeeId)) {
       return sendError(res, 'Invalid employee ID.', 400);
     }
+    // Optional ?business_unit_ids=1,2,3 — the BUs ticked in the edit dialog (may be empty to mean
+    // "none ticked"). Absent = use the Employee's saved BU mapping.
+    const rawBuIds = req.query.business_unit_ids;
+    let businessUnitIds = null;
+    if (rawBuIds !== undefined) {
+      const parts = (Array.isArray(rawBuIds) ? rawBuIds : String(rawBuIds).split(','))
+        .map((v) => String(v).trim())
+        .filter(Boolean);
+      businessUnitIds = parts.map((v) => Number(v));
+      if (businessUnitIds.some((v) => !Number.isInteger(v) || v < 1)) {
+        return sendError(res, 'business_unit_ids must be a comma-separated list of positive integers.', 400);
+      }
+    }
     const options = await employeeServicePOMappingService.getServicePOOptionsForEmployee(employeeId, {
       companyId: req.companyId,
       hierarchyRank: req.hierarchyRank,
       employeeId: req.employeeId,
       employeeBusinessUnits: (req.employeeBusinessUnits || []).map((bu) => bu.id),
-    });
+    }, { businessUnitIds });
     return sendSuccess(res, options, 'Eligible Service PO options fetched successfully.');
   } catch (err) {
     if (err.statusCode === 404) {

@@ -495,6 +495,7 @@ const replaceDailyEntries = async (employeeId, companyId, data) => {
   const resolvedTimes = lines.map((line) => resolveHoursAndTimeEntries(line));
 
   await logDescriptionRuleService.assertDescriptionsProvided(employeeId, lines.map((line) => ({
+    servicePOId: line.service_po_id,
     description: line.description,
     segmentDescriptions: (line.time_entries || []).map((entry) => entry.description),
     label: `Service PO #${line.service_po_id}, ${dateStr}`,
@@ -780,6 +781,7 @@ const updateEntry = async (employeeId, companyId, id, data) => {
   await assertNoApprovedLine(employeeId, dateStr, [{ service_po_id: servicePOId, hierarchy_node_id: hierarchyNodeId }], { excludeId: id });
 
   await logDescriptionRuleService.assertDescriptionsProvided(employeeId, [{
+    servicePOId,
     description: effectiveDescription,
     segmentDescriptions: effectiveTimeEntries.map((entry) => entry.description),
     label: `Service PO #${servicePOId}, ${dateStr}`,
@@ -954,6 +956,7 @@ const addTimeEntries = async (employeeId, companyId, data) => {
   const newlyResolvedEntries = combinedResolvedEntries.slice(existingEntries.length);
 
   await logDescriptionRuleService.assertDescriptionsProvided(employeeId, [{
+    servicePOId: data.service_po_id,
     description: effectiveDescription,
     segmentDescriptions: combinedResolvedEntries.map((entry) => entry.description),
     label: `Service PO #${data.service_po_id}, ${dateStr}`,
@@ -1180,7 +1183,7 @@ const getEntries = async (employeeId, _companyId, query) => {
     data,
     meta: {
       total: count, page, limit, totalPages, hasNext: page < totalPages, hasPrev: page > 1,
-      is_log_desc_mandatory: await logDescriptionRuleService.isLogDescriptionMandatory(employeeId),
+      ...(await logDescriptionRuleService.getLogDescRule(employeeId)),
     },
   };
 };
@@ -1393,7 +1396,12 @@ const getDailyEntries = async (employeeId, date, companyId) => {
   const hoursByPOId = groupHoursByServicePO(breakdownRows);
   const service_pos = buildServicePOsForDate(mappedPOs, hierarchyRowsByPOId, hoursByPOId);
 
-  return { date: dateStr, service_pos, is_log_desc_mandatory: await logDescriptionRuleService.isLogDescriptionMandatory(employeeId) };
+  const logDescRule = await logDescriptionRuleService.getLogDescRule(employeeId);
+  return {
+    date: dateStr,
+    service_pos: logDescriptionRuleService.annotateServicePOs(service_pos, logDescRule.log_desc_mandatory_service_po_ids),
+    ...logDescRule,
+  };
 };
 
 /**
