@@ -16,6 +16,7 @@ const authenticateMultiBU = [authenticateBase.authenticateIdentity, resolveRepor
 const reportController = require('../controllers/reportController');
 const utilisationReportController = require('../controllers/utilisationReportController');
 const crossBuEmployeePoHoursReportController = require('../controllers/crossBuEmployeePoHoursReportController');
+const workLogSyncComparisonReportController = require('../controllers/workLogSyncComparisonReportController');
 const { heavyReportLimiter } = require('../middlewares/rateLimiters');
 const { validate, validateAll } = require('../middlewares/validateRequest');
 const {
@@ -25,6 +26,10 @@ const {
 } = require('../validations/employeeWorkLogHoursSummaryValidation');
 const { projectTimesheetReportQuerySchema } = require('../validations/projectTimesheetReportValidation');
 const { crossBuEmployeePoHoursReportQuerySchema } = require('../validations/crossBuEmployeePoHoursReportValidation');
+const {
+  workLogSyncComparisonQuerySchema,
+  workLogSyncComparisonFilterOptionsQuerySchema,
+} = require('../validations/workLogSyncComparisonReportValidation');
 const { employeeRoleBuMappingQuerySchema } = require('../validations/employeeRoleBuMappingReportValidation');
 const {
   teamLeadEmployeeProjectHoursQuerySchema,
@@ -108,6 +113,80 @@ router.get(
   authenticateMultiBU,
   validate(crossBuEmployeePoHoursReportQuerySchema, 'query'),
   crossBuEmployeePoHoursReportController.getCrossBuEmployeePoHoursReport
+);
+
+/**
+ * @swagger
+ * /reports/work-log-sync-comparison/filter-options:
+ *   get:
+ *     summary: Filter dropdown options for the Work Log Sync Comparison report
+ *     description: >
+ *       Employees, Clients, Projects, Service POs and the Employee / PO Business Units and Sub-BUs, limited to the
+ *       entries the caller may see in the chosen period. The period is ONE of date, start_date + end_date, or
+ *       month + year (default: current month). Same role scope as GET /reports/work-log-sync-comparison.
+ *     tags: [Reports]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: query, name: date, schema: { type: string, format: date } }
+ *       - { in: query, name: start_date, schema: { type: string, format: date } }
+ *       - { in: query, name: end_date, schema: { type: string, format: date } }
+ *       - { in: query, name: month, schema: { type: integer, minimum: 1, maximum: 12 } }
+ *       - { in: query, name: year, schema: { type: integer } }
+ */
+router.get(
+  '/work-log-sync-comparison/filter-options',
+  authenticateMultiBU,
+  validate(workLogSyncComparisonFilterOptionsQuerySchema, 'query'),
+  workLogSyncComparisonReportController.getWorkLogSyncComparisonFilterOptions
+);
+
+/**
+ * @swagger
+ * /reports/work-log-sync-comparison:
+ *   get:
+ *     summary: Work Log Sync Comparison - every work log entry with its hours before and after sync
+ *     description: >
+ *       One row per Employee Work Log entry: employee, Service PO, Module, Task, Project, Client, date,
+ *       before_sync_hours (as logged), after_sync_hours (official timesheet hours after the monthly-cap
+ *       adjustment; null until the entry is synced), description and work_type (own | cross | na = Own BU /
+ *       Cross BU / Not Applicable, the Cross-BU report's definition). When one Service PO/date has several
+ *       entries, the timesheet's adjusted hours are shared across them in proportion to what each logged.
+ *       Period = ONE of date, start_date + end_date (max 366 days), or month + year (default: current month).
+ *       Visibility = the Cross-BU report's role scope (Admin/BU Admin: BU reach; Project Manager: flagged POs;
+ *       Team Lead: mapped employees). Server-side pagination: page, limit (max 500), sort_by, sort_order;
+ *       meta.total is the exact filtered count. totals cover the whole filtered set, not just the page.
+ *       format=excel | csv downloads every row of the same filtered set.
+ *     tags: [Reports]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - { in: query, name: date, schema: { type: string, format: date } }
+ *       - { in: query, name: start_date, schema: { type: string, format: date } }
+ *       - { in: query, name: end_date, schema: { type: string, format: date } }
+ *       - { in: query, name: month, schema: { type: integer, minimum: 1, maximum: 12 } }
+ *       - { in: query, name: year, schema: { type: integer } }
+ *       - { in: query, name: employee_ids, schema: { type: string }, description: Comma-separated ids }
+ *       - { in: query, name: employee_bu_ids, schema: { type: string } }
+ *       - { in: query, name: employee_sub_bu_ids, schema: { type: string } }
+ *       - { in: query, name: client_ids, schema: { type: string } }
+ *       - { in: query, name: project_ids, schema: { type: string } }
+ *       - { in: query, name: service_po_ids, schema: { type: string } }
+ *       - { in: query, name: po_bu_ids, schema: { type: string } }
+ *       - { in: query, name: work_type, schema: { type: string, enum: [all, own, cross, na] } }
+ *       - { in: query, name: approval_status, schema: { type: string }, description: all or comma-separated pending,approved,rejected }
+ *       - { in: query, name: search, schema: { type: string } }
+ *       - { in: query, name: sort_by, schema: { type: string, enum: [date, employee, client, project, po, module, before_hours, after_hours, work_type, status] } }
+ *       - { in: query, name: sort_order, schema: { type: string, enum: [asc, desc] } }
+ *       - { in: query, name: page, schema: { type: integer, minimum: 1 } }
+ *       - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 500 } }
+ *       - { in: query, name: format, schema: { type: string, enum: [json, excel, csv] } }
+ */
+router.get(
+  '/work-log-sync-comparison',
+  authenticateMultiBU,
+  validate(workLogSyncComparisonQuerySchema, 'query'),
+  workLogSyncComparisonReportController.getWorkLogSyncComparisonReport
 );
 
 /**

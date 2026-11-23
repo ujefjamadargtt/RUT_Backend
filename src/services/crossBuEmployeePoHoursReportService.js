@@ -294,4 +294,6 @@ async function getExport(query, authContext, companyIds) {
   };
 }
 
-module.exports = { getReport, getExport, resolvePeriod, toRecord, toBuFlow, toTotals, DETAIL_COLUMNS, detailColumnsFor, flowColumnsFor };
+module.exports = {
+  getReport, getExport, resolvePeriod, resolveScope, toRecord, toBuFlow, toTotals, DETAIL_COLUMNS, detailColumnsFor, flowColumnsFor,
+};

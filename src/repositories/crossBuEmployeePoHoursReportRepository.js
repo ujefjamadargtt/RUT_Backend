@@ -115,6 +115,43 @@ const FROM_SQL = `
   LEFT JOIN companies po_root ON po_root.id = COALESCE(po_bu.parent_business_unit_id, po_bu.id)`;
 
 /**
+ * The caller's hard visibility as WHERE conditions (shared with the Work Log Sync Comparison report, so both
+ * reports expose exactly the same rows to the same role). Adds its named replacements to `replacements`.
+ * @param {object} scope - resolved scope: { kind: 'reach'|'servicePos'|'employees', ... }
+ * @param {object} replacements
+ * @returns {string[]}
+ */
+function buildScopeConditions(scope, replacements) {
+  const out = [];
+  // Visibility. For the BU-scoped tiers a row is visible when EITHER the employee belongs to one
+  // of the caller's BUs (their own people, wherever they worked) OR the PO belongs to one of the
+  // caller's BUs (anyone who worked on their POs) — the two halves are what make cross-BU work
+  // visible from both sides.
+  if (scope.kind === 'reach') {
+    replacements.reachIds = scope.reachIds;
+    const parts = ['eb.member_ids && ARRAY[:reachIds]::int[]', 'sp.company_id IN (:reachIds)'];
+    if (scope.includeTenantBuLessPOs) {
+      parts.push(`(sp.company_id IS NULL AND sp.created_by IN (
+        SELECT tenant_e.created_by FROM companies tenant_c
+          JOIN entities tenant_e ON tenant_e.id = tenant_c.entity_id AND tenant_e.is_deleted = false
+         WHERE tenant_c.id IN (:reachIds) AND tenant_c.is_deleted = false AND tenant_e.created_by IS NOT NULL
+        UNION
+        SELECT tenant_e.entity_admin_employee_id FROM companies tenant_c
+          JOIN entities tenant_e ON tenant_e.id = tenant_c.entity_id AND tenant_e.is_deleted = false
+         WHERE tenant_c.id IN (:reachIds) AND tenant_c.is_deleted = false AND tenant_e.entity_admin_employee_id IS NOT NULL))`);
+    }
+    out.push(`(${parts.join(' OR ')})`);
+  } else if (scope.kind === 'servicePos') {
+    out.push('wl.service_po_id IN (:scopeServicePoIds)');
+    replacements.scopeServicePoIds = scope.servicePoIds;
+  } else {
+    out.push('wl.employee_id IN (:scopeEmployeeIds)');
+    replacements.scopeEmployeeIds = scope.employeeIds;
+  }
+  return out;
+}
+
+/**
  * @param {object} f
  * @param {string} f.startDate
  * @param {string} f.endDate
@@ -141,32 +178,7 @@ function buildWhere(f) {
   };
   const conditions = ['wl.work_date BETWEEN :startDate AND :endDate'];
 
-  // Visibility. For the BU-scoped tiers a row is visible when EITHER the employee belongs to one
-  // of the caller's BUs (their own people, wherever they worked) OR the PO belongs to one of the
-  // caller's BUs (anyone who worked on their POs) — the two halves are what make cross-BU work
-  // visible from both sides.
-  const { scope } = f;
-  if (scope.kind === 'reach') {
-    replacements.reachIds = scope.reachIds;
-    const parts = ['eb.member_ids && ARRAY[:reachIds]::int[]', 'sp.company_id IN (:reachIds)'];
-    if (scope.includeTenantBuLessPOs) {
-      parts.push(`(sp.company_id IS NULL AND sp.created_by IN (
-        SELECT tenant_e.created_by FROM companies tenant_c
-          JOIN entities tenant_e ON tenant_e.id = tenant_c.entity_id AND tenant_e.is_deleted = false
-         WHERE tenant_c.id IN (:reachIds) AND tenant_c.is_deleted = false AND tenant_e.created_by IS NOT NULL
-        UNION
-        SELECT tenant_e.entity_admin_employee_id FROM companies tenant_c
-          JOIN entities tenant_e ON tenant_e.id = tenant_c.entity_id AND tenant_e.is_deleted = false
-         WHERE tenant_c.id IN (:reachIds) AND tenant_c.is_deleted = false AND tenant_e.entity_admin_employee_id IS NOT NULL))`);
-    }
-    conditions.push(`(${parts.join(' OR ')})`);
-  } else if (scope.kind === 'servicePos') {
-    conditions.push('wl.service_po_id IN (:scopeServicePoIds)');
-    replacements.scopeServicePoIds = scope.servicePoIds;
-  } else {
-    conditions.push('wl.employee_id IN (:scopeEmployeeIds)');
-    replacements.scopeEmployeeIds = scope.employeeIds;
-  }
+  conditions.push(...buildScopeConditions(f.scope, replacements));
 
   const inList = (cond, key, values) => {
     if (values && values.length) { conditions.push(cond); replacements[key] = values; }
@@ -338,4 +350,7 @@ async function getBuMatrixAdjusted(filters) {
   );
 }
 
-module.exports = { findRows, getTotals, getBuMatrix, getBuMatrixAdjusted, buildWhere, resolveOrderBy, WORK_TYPE_SQL };
+module.exports = {
+  findRows, getTotals, getBuMatrix, getBuMatrixAdjusted, buildWhere, buildScopeConditions, resolveOrderBy,
+  WORK_TYPE_SQL, CTE_SQL, FROM_SQL,
+};
