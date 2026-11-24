@@ -232,7 +232,12 @@ const getMyEmployees = async (managerUserId, companyIds, hierarchyRank, explicit
   // let them approve their own submitted hours (assertOwnEmployeeForApproval
   // now also blocks that action directly — see its own doc comment — but
   // this list must never have offered it in the first place).
-  const employees = allEmployees.filter((employee) => employee.id !== managerUserId);
+  // Exception: the Admin / BU Admin tier (rank <= 4) keeps its own record — such a person often also
+  // logs work as an Employee, and those entries must reach Timesheet Approval. The tier's normal BU /
+  // Service PO scoping below still decides whether the record qualifies.
+  const employees = isAdminOrBuAdminTier
+    ? allEmployees
+    : allEmployees.filter((employee) => employee.id !== managerUserId);
 
   const mappingByEmployeeId = new Map();
   for (const mapping of mappings) {
@@ -482,7 +487,11 @@ async function assertOwnEmployeeForApproval(managerUserId, employeeId, companyId
   // own timesheet" is reached exclusively via the employeeId-omitted path
   // (getTimesheets/getApprovalSummary's ownEmployeeId branch) — never
   // through this approval-guarded, explicit-employeeId path.
-  if (employeeId === managerUserId) {
+  // Exception: the Admin / BU Admin tier (rank <= 4) may act on its own entries; the same BU / Service PO
+  // restrictions as for every other employee still apply below, and every approve/reject writes the usual
+  // audit row (approved_by = the caller), so self-approvals stay reportable.
+  const isAdminOrBuAdminTier = Number.isInteger(hierarchyRank) && hierarchyRank <= BU_ADMIN_RANK;
+  if (employeeId === managerUserId && !isAdminOrBuAdminTier) {
     throw forbiddenError('You cannot approve, reject, or view your own timesheet through Timesheet Approval.');
   }
 

@@ -93,7 +93,7 @@ test('getMyEmployees (Project Manager tier): the caller\'s own Employee row is e
   }
 });
 
-test('getMyEmployees (Admin/BU Admin tier): the caller\'s own Employee row is excluded from the BU-wide listing too', async () => {
+test('getMyEmployees (Admin/BU Admin tier): the caller own Employee row is KEPT when it qualifies by BU, and other BUs stay excluded', async () => {
   try {
     managerEmployeeMappingRepository.findByManager = async () => {
       throw new Error('Admin/BU Admin tier must not query manager_employee_mappings');
@@ -101,11 +101,12 @@ test('getMyEmployees (Admin/BU Admin tier): the caller\'s own Employee row is ex
     Employee.findAll = async () => [
       { id: 7, employee_code: 'EMP-0007', full_name: 'The Admin', designation: 'x', status: 'active', businessUnits: [{ id: 3, company_name: 'BU3', entity_id: null, entity: null }] },
       { id: 21, employee_code: 'EMP-0021', full_name: 'Someone Else', designation: 'x', status: 'active', businessUnits: [{ id: 3, company_name: 'BU3', entity_id: null, entity: null }] },
+      { id: 30, employee_code: 'EMP-0030', full_name: 'Other BU', designation: 'x', status: 'active', businessUnits: [{ id: 9, company_name: 'BU9', entity_id: null, entity: null }] },
     ];
 
     const employees = await managerSelfServiceService.getMyEmployees(7, [3], BU_ADMIN_RANK, null);
 
-    assert.deepEqual(employees.map((e) => e.id), [21]);
+    assert.deepEqual(employees.map((e) => e.id), [7, 21]);
   } finally {
     restore();
   }
@@ -126,8 +127,8 @@ test('getMyEmployees: caller with no active Employees other than themselves gets
   }
 });
 
-test('assertOwnEmployeeForApproval rejects the caller\'s own employee id with 403 before any tier-specific check runs', async () => {
-  const ranks = [null, ADMIN_RANK, BU_ADMIN_RANK, PROJECT_MANAGER_RANK, TEAM_LEAD_RANK];
+test('assertOwnEmployeeForApproval rejects the caller own employee id with 403 for Team Lead / Project Manager / unknown rank', async () => {
+  const ranks = [null, PROJECT_MANAGER_RANK, TEAM_LEAD_RANK];
   for (const hierarchyRank of ranks) {
     try {
       managerEmployeeMappingRepository.findByManager = async () => { throw new Error('must not be reached'); };
@@ -146,6 +147,11 @@ test('assertOwnEmployeeForApproval rejects the caller\'s own employee id with 40
       restore();
     }
   }
+});
+
+test('assertOwnEmployeeForApproval lets an Admin-tier caller act on their own employee id', async () => {
+  const result = await managerSelfServiceService.assertOwnEmployeeForApproval(42, 42, 10, ADMIN_RANK, []);
+  assert.equal(result, null);
 });
 
 test('approveTimesheet: a Manager cannot approve their own work log entry even when it is otherwise their own managed Service PO', async () => {
